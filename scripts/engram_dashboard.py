@@ -466,6 +466,72 @@ var network=new vis.Network(_container,{{nodes:_dsN,edges:_dsE}},{{
   }},
   interaction:{{hover:true,tooltipDelay:80,navigationButtons:true}}
 }});
+function _getParentViewportHeight(){{
+    try {{
+        if (window.parent && window.parent !== window) {{
+            var h = Number(window.parent.innerHeight || 0);
+            if (isFinite(h) && h > 0) return h;
+        }}
+    }} catch (_err) {{}}
+    return null;
+}}
+function _targetGraphHeight(){{
+    var parentH = _getParentViewportHeight();
+    if (!parentH) return {height};
+    var target = Math.floor(parentH * 0.82);
+    if (target < 640) target = 640;
+    if (target > 1200) target = 1200;
+    return target;
+}}
+function _setOwnFrameHeight(h){{
+    try {{
+        if (window.frameElement && window.frameElement.style) {{
+            window.frameElement.style.height = h + 'px';
+            window.frameElement.style.minHeight = h + 'px';
+            var p = window.frameElement.parentElement;
+            if (p && p.style) {{
+                p.style.height = h + 'px';
+                p.style.minHeight = h + 'px';
+            }}
+            return true;
+        }}
+    }} catch (_err) {{}}
+    return false;
+}}
+function _notifyFrameHeight(h){{
+    var frameH = Math.max(520, Math.floor(h + 10));
+    if (_setOwnFrameHeight(frameH)) return;
+    try {{
+        window.parent.postMessage({{
+            isStreamlitMessage: true,
+            type: "streamlit:setFrameHeight",
+            height: frameH
+        }}, "*");
+    }} catch (_err) {{}}
+}}
+function _applyResponsiveLayout(){{
+    var h = _targetGraphHeight();
+    if (_lastAppliedHeight === h) return;
+    _lastAppliedHeight = h;
+    _container.style.height = h + 'px';
+    network.setSize('100%', h + 'px');
+    network.redraw();
+    if (typeof _pin !== 'undefined' && _pin && _pin.style.display === 'block') {{
+        var py = parseFloat(_pin.style.top || '0');
+        if (isFinite(py) && py + 400 > h) _pin.style.top = Math.max(4, h - 404) + 'px';
+    }}
+    _notifyFrameHeight(h);
+}}
+var _resizeRaf = 0;
+var _lastAppliedHeight = 0;
+function _onWindowResize(){{
+    if (_resizeRaf) cancelAnimationFrame(_resizeRaf);
+    _resizeRaf = requestAnimationFrame(_applyResponsiveLayout);
+}}
+window.addEventListener('resize', _onWindowResize);
+window.addEventListener('orientationchange', _onWindowResize);
+setTimeout(_applyResponsiveLayout, 0);
+setTimeout(_applyResponsiveLayout, 120);
 var _done=false;
 function _stopPhys(){{if(!_done){{_done=true;network.setOptions({{physics:{{enabled:false}}}});document.getElementById('physOn').checked=false;}}}}
 network.on('stabilizationIterationsDone',_stopPhys);
@@ -488,7 +554,7 @@ network.on('click',function(params){{
     if(node&&node._tooltip){{
       _pin.innerHTML=node._tooltip;
       var cpos=network.canvasToDOM(network.getPosition(nid));
-      var netH={height};
+            var netH=_container.clientHeight||{height};
       var px=cpos.x+24; var py=Math.max(4,cpos.y-80);
       if(px+304>_container.offsetWidth) px=Math.max(4,cpos.x-324);
       if(py+400>netH) py=Math.max(4,netH-404);
@@ -783,7 +849,7 @@ elif page == "🕸️ KG Graph":
         nodes = st.session_state["kg_cached_nodes"]
         edges = st.session_state["kg_cached_edges"]
         html = build_visjs_html(
-            nodes, edges, height=620,
+            nodes, edges, height=680,
             physics_enabled=physics_on,
             grav_const=grav_const,
             central_gravity=central_gravity,
@@ -792,7 +858,7 @@ elif page == "🕸️ KG Graph":
             damping=damping,
             size_scale=size_scale,
         )
-        st.components.v1.html(html, height=640, scrolling=False)
+        st.components.v1.html(html, height=700, scrolling=False)
         st.caption(f"노드: {len(nodes)}  엣지: {len(edges)}")
 
         # legend
