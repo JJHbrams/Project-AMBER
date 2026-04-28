@@ -490,9 +490,17 @@ class OverlayApp:
     def restart(self):
         """overlay 프로세스를 재시작한다 (자신을 재실행)."""
         log.info("[overlay] 재시작 요청")
-        exe = sys.executable
-        args = sys.argv[:]
-        self.root.after(200, lambda: subprocess.Popen([exe] + args))
+        if getattr(sys, "frozen", False):
+            cmd = [sys.executable]
+        else:
+            cmd = [sys.executable, "-m", "overlay.main"]
+        cwd = str(PROJECT_ROOT)
+
+        # root.after() 는 root.destroy() 시 취소되므로 threading.Timer 사용
+        def _spawn():
+            subprocess.Popen(cmd, cwd=cwd)
+
+        threading.Timer(0.5, _spawn).start()
         self.request_quit()
 
     def request_quit(self):
