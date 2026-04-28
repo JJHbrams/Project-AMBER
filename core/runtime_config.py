@@ -56,6 +56,9 @@ _DEFAULT_CFG = {
             "item_max_chars": 100,
         },
     },
+    "session": {
+        "auto_inject": False,
+    },
     "copilot": {
         "model": "claude-sonnet-4.6",
         "allow_all_tools": True,
@@ -79,6 +82,9 @@ _USER_TEMPLATE = """# User runtime overrides for Engram.
 #     within_minutes: 120
 #   working:
 #     ttl_hours: 48
+#
+# session:
+#   auto_inject: false  # CLI 시작 시 자동 컨텍스트 주입 (활성화 시 토큰 추가 소모)
 #
 # copilot:
 #   model: "claude-sonnet-4.6"

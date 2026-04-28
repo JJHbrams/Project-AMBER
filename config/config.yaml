@@ -2,7 +2,7 @@
 # You can override these values in ~/.engram/user.config.yaml.
 
 db:
-  root_dir: "D:/AMBER_DB"
+  root_dir: "D:/intel_engram"
 
 memory:
   scope:
@@ -46,6 +46,11 @@ sync:
   watchdog_timeout_secs: 300
   # 마지막 sync 완료 후 재실행 최소 간격 (초). 짧은 시간 내 중복 실행 방지.
   cooldown_secs: 120
+
+session:
+  # CLI 공급자가 시작될 때 자동으로 engram 컨텍스트를 주입할지 여부
+  # 활성화 시 세션 시작마다 추가 컨텍스트 토큰이 소모됩니다
+  auto_inject: false
 
 copilot:
   model: "claude-sonnet-4.6"

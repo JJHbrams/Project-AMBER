@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import os
+import subprocess
 import tkinter as tk
 import tkinter.ttk as ttk
 from pathlib import Path
@@ -34,6 +35,57 @@ _PERSONA_DEFAULTS = {
     "humor": 0.3,
     "directness": 0.5,
 }
+
+# ── Autostart (Startup 폴더 .lnk) ───────────────────────────────────────
+_STARTUP_DIR = (
+    Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming"))
+    / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup"
+)
+_STARTUP_LINK = _STARTUP_DIR / "engram-overlay.lnk"
+_OVERLAY_CMD = Path.home() / ".engram" / "engram-overlay.cmd"
+_OVERLAY_EXE: Path | None = None  # resolved lazily
+
+
+def _resolve_overlay_target() -> Path | None:
+    if _OVERLAY_CMD.exists():
+        return _OVERLAY_CMD
+    global _OVERLAY_EXE
+    if _OVERLAY_EXE and _OVERLAY_EXE.exists():
+        return _OVERLAY_EXE
+    return None
+
+
+def _is_autostart_enabled() -> bool:
+    return _STARTUP_LINK.exists()
+
+
+def _set_autostart(enabled: bool) -> None:
+    if enabled:
+        target = _resolve_overlay_target()
+        if target is None:
+            raise RuntimeError(
+                "engram-overlay.cmd 를 찾을 수 없습니다.\n"
+                ".engram/ 폴더를 확인하세요."
+            )
+        _STARTUP_DIR.mkdir(parents=True, exist_ok=True)
+        ps = (
+            f'$s = New-Object -ComObject WScript.Shell; '
+            f'$sc = $s.CreateShortcut(\'{ _STARTUP_LINK }\'); '
+            f'$sc.TargetPath = \'{ target }\'; '
+            f'$sc.WorkingDirectory = \'{ target.parent }\'; '
+            f'$sc.Description = \'Engram Overlay \u2014 Auto Start\'; '
+            f'$sc.Save()'
+        )
+        subprocess.run(
+            ["powershell", "-NoProfile", "-WindowStyle", "Hidden", "-Command", ps],
+            capture_output=True,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    else:
+        try:
+            _STARTUP_LINK.unlink()
+        except FileNotFoundError:
+            pass
 
 _PERSONA_USER_TEMPLATE = """# engram persona 사용자 오버라이드
 # 이 파일은 "사용자 고정값(pinned)" 오버라이드입니다.
@@ -153,6 +205,8 @@ class _SettingsWindow:
         self._persona_numeric_pin_vars: dict[str, tk.BooleanVar] = {}
         self._persona_numeric_label_vars: dict[str, tk.StringVar] = {}
         self._persona_banner_var = tk.StringVar(value="현재 기본 페르소나가 적용되어 있습니다. 커스텀 페르소나를 적용해 보세요.")
+        self._autostart_var = tk.BooleanVar()
+        self._auto_inject_var = tk.BooleanVar()
 
         self._build_ui()
         self._load_current_values()
@@ -181,16 +235,19 @@ class _SettingsWindow:
         self._tab_cli = ttk.Frame(notebook)
         self._tab_persona = ttk.Frame(notebook)
         self._tab_terminal = ttk.Frame(notebook)
+        self._tab_global = ttk.Frame(notebook)
 
         notebook.add(self._tab_overlay, text="오버레이")
         notebook.add(self._tab_cli, text="CLI 공급자")
         notebook.add(self._tab_persona, text="페르소나")
         notebook.add(self._tab_terminal, text="터미널")
+        notebook.add(self._tab_global, text="전역")
 
         self._build_overlay_tab(PAD)
         self._build_cli_tab(PAD)
         self._build_persona_tab(PAD)
         self._build_terminal_tab(PAD)
+        self._build_global_tab(PAD)
 
         self._save_feedback_var = tk.StringVar(value="")
         ttk.Label(self.window, textvariable=self._save_feedback_var, foreground="gray").pack(fill="x", padx=12, pady=(0, 4))
@@ -392,7 +449,53 @@ class _SettingsWindow:
 
         f.columnconfigure(1, weight=1)
 
-    # ─────────────────────────────────────────────── 현재 값 로드 ──
+    def _build_global_tab(self, PAD: dict):
+        f = self._tab_global
+
+        # ── 자동 시작 ──
+        ttk.Label(f, text="시스템 설정", font=("", 9, "bold")).grid(
+            row=0, column=0, columnspan=2, sticky="w", padx=8, pady=(10, 2)
+        )
+        ttk.Checkbutton(
+            f,
+            text="재부팅 시 자동 실행",
+            variable=self._autostart_var,
+        ).grid(row=1, column=0, columnspan=2, sticky="w", padx=16, pady=(2, 0))
+        ttk.Label(
+            f,
+            text="Windows Startup 폴더에 바로가기를 추가합니다.",
+            foreground="gray",
+        ).grid(row=2, column=0, columnspan=2, sticky="w", padx=28, pady=(0, 8))
+
+        ttk.Separator(f, orient="horizontal").grid(
+            row=3, column=0, columnspan=2, sticky="ew", padx=8, pady=4
+        )
+
+        # ── 자동 컨텍스트 주입 ──
+        ttk.Label(f, text="세션 설정", font=("", 9, "bold")).grid(
+            row=4, column=0, columnspan=2, sticky="w", padx=8, pady=(4, 2)
+        )
+        ttk.Checkbutton(
+            f,
+            text="CLI 공급자 시작 시 자동으로 engram 컨텍스트 주입",
+            variable=self._auto_inject_var,
+        ).grid(row=5, column=0, columnspan=2, sticky="w", padx=16, pady=(2, 0))
+
+        warn_frame = tk.Frame(f, bd=1, relief="solid", bg="#fff8e1")
+        warn_frame.grid(row=6, column=0, columnspan=2, sticky="ew", padx=16, pady=(4, 8))
+        tk.Label(
+            warn_frame,
+            text=(
+                "⚠  활성화하면 세션 시작마다 engram_get_context 가 자동 호출됩니다.\n"
+                "    초기 컨텍스트 토큰이 추가로 소모됩니다."
+            ),
+            bg="#fff8e1",
+            anchor="w",
+            justify="left",
+            foreground="#7a5800",
+        ).pack(fill="x", padx=8, pady=6)
+
+        f.columnconfigure(1, weight=1)
 
     def _load_current_values(self):
         cfg = self._cfg
@@ -437,6 +540,11 @@ class _SettingsWindow:
         t_height = _nested_get(cfg, ["terminal", "height_ratio"], 0.60)
         self._term_height_var.set(float(t_height))
         self._theight_label.config(text=f"{float(t_height):.2f}")
+
+        # 전역 탭
+        self._autostart_var.set(_is_autostart_enabled())
+        auto_inject = bool(self._engram_user_cfg.get("session", {}).get("auto_inject", False))
+        self._auto_inject_var.set(auto_inject)
 
         self._load_persona_values()
 
@@ -657,12 +765,25 @@ class _SettingsWindow:
         if abs(t_height - float(default_th)) > 0.005:
             _nested_set(user, ["terminal", "height_ratio"], t_height)
 
-        # 파일 쓰기
+        # 파일 쓰기 (overlay.user.yaml)
         _USER_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
         _USER_CONFIG_PATH.write_text(
             yaml.safe_dump(user, allow_unicode=True, sort_keys=False),
             encoding="utf-8",
         )
+
+        # ── 전역 탭 — user.config.yaml ──
+        engram_user = _safe_load_yaml(_ENGRAM_USER_CONFIG_PATH)
+        auto_inject = bool(self._auto_inject_var.get())
+        _nested_set(engram_user, ["session", "auto_inject"], auto_inject if auto_inject else None)
+        _ENGRAM_USER_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _ENGRAM_USER_CONFIG_PATH.write_text(
+            yaml.safe_dump(engram_user, allow_unicode=True, sort_keys=False),
+            encoding="utf-8",
+        )
+
+        # ── 전역 탭 — 자동 시작 토글 ──
+        _set_autostart(bool(self._autostart_var.get()))
 
         return self._save_persona_user_file()
 

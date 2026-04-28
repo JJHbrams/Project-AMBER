@@ -53,6 +53,14 @@ if ($identityLookupExitCode -ne 0) {
     Write-Ok "Identity name already set: $currentIdentityNameValue (skip)"
 } else {
     Write-Host ""
+    Write-Host "  ┌─────────────────────────────────────────────────────────┐" -ForegroundColor Yellow
+    Write-Host "  │  이름은 engram의 정체성 핵심입니다.                       │" -ForegroundColor Yellow
+    Write-Host "  │                                                         │" -ForegroundColor Yellow
+    Write-Host "  │  • 이름은 서사(narrative)와 기억에 깊이 연결됩니다.        │" -ForegroundColor Yellow
+    Write-Host "  │  • 나중에 변경하면 기존 서사와 불일치가 생깁니다.          │" -ForegroundColor Yellow
+    Write-Host "  │  • 한 번 정하면 돌이키기 어려우니 신중히 선택하세요.       │" -ForegroundColor Yellow
+    Write-Host "  └─────────────────────────────────────────────────────────┘" -ForegroundColor Yellow
+    Write-Host ""
     Write-Host "  [설정] 이름/호칭 — engram이 자신을 부를 이름" -ForegroundColor White
     Write-Host "         현재값: (없음)" -ForegroundColor DarkGray
     $IdentityNameInput = Read-Host "  이름/호칭 (Enter = 나중에 설정)"
@@ -101,6 +109,7 @@ $WikiDirs = @(
     "$DbDir\docs\notes",
     "$DbDir\docs\people",
     "$DbDir\docs\projects",
+    "$DbDir\docs\protocols",
     "$DbDir\docs\references",
     "$DbDir\docs\research",
     "$DbDir\docs\tools"
@@ -119,7 +128,15 @@ $TemplateTargets = @(
     @{ Src = "concept.md";  Dest = "$DbDir\docs\_templates\concept.md" },
     @{ Src = "project.md";  Dest = "$DbDir\docs\_templates\project.md" },
     @{ Src = "research.md"; Dest = "$DbDir\docs\_templates\research.md" },
-    @{ Src = "person.md";   Dest = "$DbDir\docs\_templates\person.md" }
+    @{ Src = "person.md";   Dest = "$DbDir\docs\_templates\person.md" },
+    # Protocol guides
+    @{ Src = "protocols\_protocol-wiki-management-guide.md";   Dest = "$DbDir\docs\protocols\wiki-management-guide.md" },
+    @{ Src = "protocols\_protocol-git-branch-guide.md";        Dest = "$DbDir\docs\protocols\git-branch-guide.md" },
+    @{ Src = "protocols\_protocol-wiki-reminder-guide.md";     Dest = "$DbDir\docs\protocols\wiki-reminder-guide.md" },
+    @{ Src = "protocols\_protocol-activity-log-guide.md";      Dest = "$DbDir\docs\protocols\activity-log-guide.md" },
+    @{ Src = "protocols\_protocol-narrative-update-guide.md";  Dest = "$DbDir\docs\protocols\narrative-update-guide.md" },
+    @{ Src = "protocols\_protocol-reflection-trigger-guide.md"; Dest = "$DbDir\docs\protocols\reflection-trigger-guide.md" },
+    @{ Src = "protocols\_protocol-agent-collaboration-guide.md"; Dest = "$DbDir\docs\protocols\agent-collaboration-guide.md" }
 )
 
 # 충돌 파일 일괄 확인: 기본 정책은 유지(N), 명시적으로 y일 때만 덮어쓰기
