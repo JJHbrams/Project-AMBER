@@ -24,8 +24,11 @@ if ($condaCmd) {
         $PythonExe = $existingCondaPython
         if (Test-Path $EnvironmentYamlPath) {
             Write-Step "Conda env update (environment.yml)..."
+            Push-Location $ProjectRoot
             $condaUpdateOutput = Invoke-LiveLog { conda env update -n $CondaEnv -f $EnvironmentYamlPath }
-            if ($LASTEXITCODE -ne 0) {
+            $condaUpdateExit = $LASTEXITCODE
+            Pop-Location
+            if ($condaUpdateExit -ne 0) {
                 Write-Err "Failed: conda env update -n $CondaEnv -f environment.yml"
                 $condaUpdateOutput | Select-Object -Last 30 | ForEach-Object { Write-Host "      $_" -ForegroundColor DarkYellow }
                 exit 1
@@ -37,8 +40,11 @@ if ($condaCmd) {
     } else {
         if (Test-Path $EnvironmentYamlPath) {
             Write-Step "Conda env create (environment.yml)..."
+            Push-Location $ProjectRoot
             $condaCreateOutput = Invoke-LiveLog { conda env create -n $CondaEnv -f $EnvironmentYamlPath }
-            if ($LASTEXITCODE -ne 0) {
+            $condaCreateExit = $LASTEXITCODE
+            Pop-Location
+            if ($condaCreateExit -ne 0) {
                 Write-Err "Failed: conda env create -n $CondaEnv -f environment.yml"
                 $condaCreateOutput | Select-Object -Last 30 | ForEach-Object { Write-Host "      $_" -ForegroundColor DarkYellow }
                 exit 1
