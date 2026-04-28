@@ -255,6 +255,18 @@ def _extract_executable(command: str) -> str:
     return parts[0] if parts else ""
 
 
+def _inject_persona_hint(launch_args: list[str]) -> list[str]:
+    """cmd /k 실행 시 시작 줄에 persona 설정 힌트를 출력한다."""
+    if len(launch_args) < 3:
+        return launch_args
+    if launch_args[0].lower() != "cmd" or launch_args[1].lower() != "/k":
+        return launch_args
+
+    base = subprocess.list2cmdline(launch_args[2:])
+    hint = "echo [engram] Hint: %USERPROFILE%\\.engram\\persona.user.yaml values are pinned and override adaptive persona"
+    return ["cmd", "/k", f"{hint} & echo. & {base}"]
+
+
 def _force_kill_process_tree(pid: int | None):
     """직접 스폰한 콘솔 프로세스 트리를 강제 종료한다.
 
@@ -543,6 +555,7 @@ class ChatTerminal:
         workdir = str(get_workdir(cfg))
         provider = normalize_cli_provider(self._provider or get_cli_provider(cfg))
         provider, launch_args, _provider_label, launch_env, launch_warnings = _resolve_provider_launch(cfg, provider)
+        launch_args = _inject_persona_hint(launch_args)
         # 모든 REPL 세션을 overlay scope로 통일 (STM 프로모터가 관찰 가능하도록)
         spawn_env = {
             **os.environ,

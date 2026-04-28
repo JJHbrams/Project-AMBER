@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import os
 import tkinter as tk
 import tkinter.ttk as ttk
 from pathlib import Path
@@ -24,6 +25,77 @@ from overlay.config import (
 )
 
 _SUPPORTED_PROVIDERS = ["copilot", "gemini", "claude-code", "ollama"]
+_USER_PERSONA_PATH = Path.home() / ".engram" / "persona.user.yaml"
+_PROJECT_PERSONA_PATH = Path(__file__).parent.parent / "config" / "persona.yaml"
+_PERSONA_NUMERIC_FIELDS = ("warmth", "formality", "humor", "directness")
+_PERSONA_DEFAULTS = {
+    "warmth": 0.5,
+    "formality": 0.5,
+    "humor": 0.3,
+    "directness": 0.5,
+}
+
+_PERSONA_USER_TEMPLATE = """# engram persona 사용자 오버라이드
+# 이 파일은 "사용자 고정값(pinned)" 오버라이드입니다.
+# 값이 있는 필드는 DB 진화값보다 항상 우선 적용됩니다.
+#
+# 원하는 페르소나를 "항상 유지"하려면 아래 모든 필드에 값을 채우세요.
+# 일부 필드만 고정하고 싶다면 원하는 필드만 채우고 나머지는 비워두세요.
+
+# voice: ""
+# traits: []
+# quirks: []
+# values: []
+# warmth: 0.50
+# formality: 0.50
+# humor: 0.30
+# directness: 0.50
+"""
+
+
+def _coerce_persona_number(value, default: float) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        number = default
+    return round(max(0.0, min(1.0, number)), 2)
+
+
+def _coerce_persona_list(value) -> list[str]:
+    if isinstance(value, list):
+        out = []
+        for item in value:
+            s = str(item).strip()
+            if s:
+                out.append(s)
+        return out
+    if isinstance(value, str) and value.strip():
+        return [value.strip()]
+    return []
+
+
+def _parse_csv_field(raw: str) -> list[str]:
+    values = [token.strip() for token in str(raw or "").replace("，", ",").split(",")]
+    return [token for token in values if token]
+
+
+def _persona_has_custom_override(persona: dict | None) -> bool:
+    if not isinstance(persona, dict):
+        return False
+
+    voice = persona.get("voice")
+    if isinstance(voice, str) and voice.strip():
+        return True
+
+    for key in ("traits", "quirks", "values"):
+        if _coerce_persona_list(persona.get(key)):
+            return True
+
+    for key in _PERSONA_NUMERIC_FIELDS:
+        if isinstance(persona.get(key), (int, float)):
+            return True
+
+    return False
 
 
 def _nested_set(d: dict, keys: list[str], value) -> None:
@@ -61,6 +133,7 @@ class _SettingsWindow:
     def __init__(self, root: tk.Tk, on_saved: Callable[[], None] | None = None):
         self._root = root
         self._on_saved = on_saved
+        self._toast_after_id: str | None = None
 
         self.window = tk.Toplevel(root)
         self.window._is_settings_window = True
@@ -72,6 +145,14 @@ class _SettingsWindow:
         self._cfg = load_cfg()
         self._user_cfg = _safe_load_yaml(_USER_CONFIG_PATH)
         self._engram_user_cfg = _safe_load_yaml(_ENGRAM_USER_CONFIG_PATH)
+        self._persona_voice_var = tk.StringVar()
+        self._persona_traits_var = tk.StringVar()
+        self._persona_quirks_var = tk.StringVar()
+        self._persona_values_var = tk.StringVar()
+        self._persona_numeric_vars: dict[str, tk.DoubleVar] = {}
+        self._persona_numeric_pin_vars: dict[str, tk.BooleanVar] = {}
+        self._persona_numeric_label_vars: dict[str, tk.StringVar] = {}
+        self._persona_banner_var = tk.StringVar(value="현재 기본 페르소나가 적용되어 있습니다. 커스텀 페르소나를 적용해 보세요.")
 
         self._build_ui()
         self._load_current_values()
@@ -82,20 +163,37 @@ class _SettingsWindow:
     def _build_ui(self):
         PAD = {"padx": 8, "pady": 4}
 
+        tip_frame = tk.Frame(self.window, bd=1, relief="solid", bg="#f4f6e1")
+        tip_frame.pack(fill="x", padx=10, pady=(10, 0))
+        tk.Label(
+            tip_frame,
+            textvariable=self._persona_banner_var,
+            bg="#f4f6e1",
+            anchor="w",
+            justify="left",
+        ).pack(side="left", fill="x", expand=True, padx=8, pady=6)
+        ttk.Button(tip_frame, text="페르소나 열기", command=self._open_persona_file).pack(side="right", padx=6, pady=4)
+
         notebook = ttk.Notebook(self.window)
-        notebook.pack(fill="both", expand=True, padx=10, pady=10)
+        notebook.pack(fill="both", expand=True, padx=10, pady=(8, 10))
 
         self._tab_overlay = ttk.Frame(notebook)
         self._tab_cli = ttk.Frame(notebook)
+        self._tab_persona = ttk.Frame(notebook)
         self._tab_terminal = ttk.Frame(notebook)
 
         notebook.add(self._tab_overlay, text="오버레이")
         notebook.add(self._tab_cli, text="CLI 공급자")
+        notebook.add(self._tab_persona, text="페르소나")
         notebook.add(self._tab_terminal, text="터미널")
 
         self._build_overlay_tab(PAD)
         self._build_cli_tab(PAD)
+        self._build_persona_tab(PAD)
         self._build_terminal_tab(PAD)
+
+        self._save_feedback_var = tk.StringVar(value="")
+        ttk.Label(self.window, textvariable=self._save_feedback_var, foreground="gray").pack(fill="x", padx=12, pady=(0, 4))
 
         # 하단 버튼
         btn_frame = ttk.Frame(self.window)
@@ -175,7 +273,78 @@ class _SettingsWindow:
         self._gemini_cmd_var = tk.StringVar()
         ttk.Entry(f, textvariable=self._gemini_cmd_var, width=22).grid(row=4, column=1, sticky="ew", **PAD)
 
+        ttk.Label(
+            f,
+            text="힌트: persona.user.yaml에 작성한 값은 자동 진화보다 우선 적용됩니다.",
+            foreground="gray",
+        ).grid(row=5, column=0, columnspan=2, sticky="w", padx=8, pady=(8, 2))
+        ttk.Button(f, text="페르소나 파일 열기", command=self._open_persona_file).grid(row=6, column=0, columnspan=2, sticky="e", padx=8, pady=(0, 6))
+
         f.columnconfigure(1, weight=1)
+
+    def _build_persona_tab(self, PAD: dict):
+        f = self._tab_persona
+
+        ttk.Label(
+            f,
+            text="말투/가치는 직접 입력하고, 숫자 슬라이더는 pin 체크로 고정 여부를 선택하세요.",
+            foreground="gray",
+        ).grid(row=0, column=0, columnspan=4, sticky="w", padx=8, pady=(8, 2))
+
+        ttk.Label(f, text="voice:").grid(row=1, column=0, sticky="w", **PAD)
+        ttk.Entry(f, textvariable=self._persona_voice_var, width=44).grid(row=1, column=1, columnspan=3, sticky="ew", **PAD)
+
+        ttk.Label(f, text="traits (쉼표 구분):").grid(row=2, column=0, sticky="w", **PAD)
+        ttk.Entry(f, textvariable=self._persona_traits_var, width=44).grid(row=2, column=1, columnspan=3, sticky="ew", **PAD)
+
+        ttk.Label(f, text="quirks (쉼표 구분):").grid(row=3, column=0, sticky="w", **PAD)
+        ttk.Entry(f, textvariable=self._persona_quirks_var, width=44).grid(row=3, column=1, columnspan=3, sticky="ew", **PAD)
+
+        ttk.Label(f, text="values (쉼표 구분):").grid(row=4, column=0, sticky="w", **PAD)
+        ttk.Entry(f, textvariable=self._persona_values_var, width=44).grid(row=4, column=1, columnspan=3, sticky="ew", **PAD)
+
+        ttk.Separator(f, orient="horizontal").grid(row=5, column=0, columnspan=4, sticky="ew", padx=8, pady=(6, 2))
+        ttk.Label(f, text="Adaptive Slider", foreground="gray").grid(row=6, column=0, sticky="w", padx=8, pady=(2, 0))
+        ttk.Label(f, text="값", foreground="gray").grid(row=6, column=2, sticky="w", padx=(0, 6), pady=(2, 0))
+        ttk.Label(f, text="pin", foreground="gray").grid(row=6, column=3, sticky="w", padx=(0, 8), pady=(2, 0))
+
+        for idx, field in enumerate(_PERSONA_NUMERIC_FIELDS):
+            row = 7 + idx
+            value_var = tk.DoubleVar(value=_PERSONA_DEFAULTS[field])
+            pin_var = tk.BooleanVar(value=False)
+            label_var = tk.StringVar(value=f"{_PERSONA_DEFAULTS[field]:.2f}")
+
+            self._persona_numeric_vars[field] = value_var
+            self._persona_numeric_pin_vars[field] = pin_var
+            self._persona_numeric_label_vars[field] = label_var
+
+            ttk.Label(f, text=f"{field}:").grid(row=row, column=0, sticky="w", **PAD)
+            ttk.Scale(
+                f,
+                from_=0.0,
+                to=1.0,
+                variable=value_var,
+                orient="horizontal",
+                length=190,
+                command=lambda raw, key=field: self._on_persona_slider_changed(key, raw),
+            ).grid(row=row, column=1, sticky="ew", padx=8, pady=4)
+            ttk.Label(f, textvariable=label_var, width=5).grid(row=row, column=2, sticky="w", padx=(0, 6), pady=4)
+            ttk.Checkbutton(f, variable=pin_var).grid(row=row, column=3, sticky="w", padx=(0, 8), pady=4)
+
+        ttk.Label(
+            f,
+            text="pin 해제된 슬라이더는 persona.user.yaml에서 주석(adaptive)으로 기록되어 DB 학습을 허용합니다.",
+            foreground="gray",
+        ).grid(row=11, column=0, columnspan=4, sticky="w", padx=8, pady=(4, 8))
+
+        f.columnconfigure(1, weight=1)
+
+    def _on_persona_slider_changed(self, field: str, raw_value):
+        try:
+            value = float(raw_value)
+        except (TypeError, ValueError):
+            value = float(self._persona_numeric_vars[field].get())
+        self._persona_numeric_label_vars[field].set(f"{value:.2f}")
 
     def _build_terminal_tab(self, PAD: dict):
         f = self._tab_terminal
@@ -269,6 +438,43 @@ class _SettingsWindow:
         self._term_height_var.set(float(t_height))
         self._theight_label.config(text=f"{float(t_height):.2f}")
 
+        self._load_persona_values()
+
+    def _load_persona_values(self):
+        user_persona = _safe_load_yaml(_USER_PERSONA_PATH)
+        project_persona = _safe_load_yaml(_PROJECT_PERSONA_PATH)
+
+        voice = user_persona.get("voice")
+        self._persona_voice_var.set(voice.strip() if isinstance(voice, str) else "")
+        self._persona_traits_var.set(", ".join(_coerce_persona_list(user_persona.get("traits"))))
+        self._persona_quirks_var.set(", ".join(_coerce_persona_list(user_persona.get("quirks"))))
+        self._persona_values_var.set(", ".join(_coerce_persona_list(user_persona.get("values"))))
+
+        for field in _PERSONA_NUMERIC_FIELDS:
+            user_raw = user_persona.get(field)
+            project_raw = project_persona.get(field)
+            if isinstance(user_raw, (int, float)):
+                value = _coerce_persona_number(user_raw, _PERSONA_DEFAULTS[field])
+                pinned = True
+            else:
+                value = _coerce_persona_number(project_raw, _PERSONA_DEFAULTS[field])
+                pinned = False
+
+            self._persona_numeric_vars[field].set(value)
+            self._persona_numeric_pin_vars[field].set(pinned)
+            self._persona_numeric_label_vars[field].set(f"{value:.2f}")
+
+        self._update_persona_banner(user_persona)
+
+    def _update_persona_banner(self, user_persona: dict | None = None):
+        if user_persona is None:
+            user_persona = _safe_load_yaml(_USER_PERSONA_PATH)
+
+        if _persona_has_custom_override(user_persona):
+            self._persona_banner_var.set("현재 커스텀 페르소나가 적용되어 있습니다. 원하는 스타일로 계속 조정할 수 있습니다.")
+        else:
+            self._persona_banner_var.set("현재 기본 페르소나가 적용되어 있습니다. 커스텀 페르소나를 적용해 보세요.")
+
     # ─────────────────────────────────────────────────── 파일 탐색 ──
 
     def _browse_char_file(self):
@@ -293,18 +499,108 @@ class _SettingsWindow:
         if path:
             self._workdir_var.set(path)
 
+    def _ensure_user_persona_file(self) -> Path:
+        if _USER_PERSONA_PATH.exists():
+            return _USER_PERSONA_PATH
+        _USER_PERSONA_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _USER_PERSONA_PATH.write_text(_PERSONA_USER_TEMPLATE, encoding="utf-8")
+        return _USER_PERSONA_PATH
+
+    def _render_persona_user_yaml(
+        self,
+        persona_values: dict,
+        numeric_values: dict[str, float],
+        pin_map: dict[str, bool],
+    ) -> str:
+        lines = [
+            "# persona.user.yaml — 사용자 페르소나 오버라이드",
+            "# 값이 있는 필드는 DB 진화값보다 우선 적용됩니다.",
+            "# 슬라이더 pin이 해제된 항목은 주석(adaptive) 상태로 기록됩니다.",
+            "",
+            '# name: ""',
+            "",
+        ]
+
+        body = yaml.safe_dump(persona_values, allow_unicode=True, sort_keys=False).strip()
+        if body:
+            lines.append(body)
+            lines.append("")
+
+        lines.append("# --- adaptive sliders (pin off) ---")
+        adaptive_count = 0
+        for field in _PERSONA_NUMERIC_FIELDS:
+            if not pin_map[field]:
+                lines.append(f"# [adaptive] {field}: {numeric_values[field]:.2f}")
+                adaptive_count += 1
+        if adaptive_count == 0:
+            lines.append("# (none)")
+
+        return "\n".join(lines).rstrip() + "\n"
+
+    def _save_persona_user_file(self) -> int:
+        self._ensure_user_persona_file()
+
+        persona_values: dict = {}
+        voice = self._persona_voice_var.get().strip()
+        if voice:
+            persona_values["voice"] = voice
+
+        traits = _parse_csv_field(self._persona_traits_var.get())
+        if traits:
+            persona_values["traits"] = traits
+
+        quirks = _parse_csv_field(self._persona_quirks_var.get())
+        if quirks:
+            persona_values["quirks"] = quirks
+
+        values = _parse_csv_field(self._persona_values_var.get())
+        if values:
+            persona_values["values"] = values
+
+        pin_map: dict[str, bool] = {}
+        numeric_values: dict[str, float] = {}
+        pinned_count = 0
+        for field in _PERSONA_NUMERIC_FIELDS:
+            numeric = _coerce_persona_number(self._persona_numeric_vars[field].get(), _PERSONA_DEFAULTS[field])
+            pinned = bool(self._persona_numeric_pin_vars[field].get())
+            pin_map[field] = pinned
+            numeric_values[field] = numeric
+            if pinned:
+                persona_values[field] = numeric
+                pinned_count += 1
+
+        rendered = self._render_persona_user_yaml(persona_values, numeric_values, pin_map)
+        _USER_PERSONA_PATH.write_text(rendered, encoding="utf-8")
+        return pinned_count
+
+    def _open_persona_file(self):
+        try:
+            path = self._ensure_user_persona_file()
+            os.startfile(str(path))
+        except Exception as e:
+            messagebox.showerror("열기 실패", f"persona 파일을 열 수 없습니다.\n{e}", parent=self.window)
+
+    def _show_toast(self, text: str):
+        self._save_feedback_var.set(text)
+        if self._toast_after_id:
+            try:
+                self.window.after_cancel(self._toast_after_id)
+            except Exception:
+                pass
+        self._toast_after_id = self.window.after(2400, lambda: self._save_feedback_var.set(""))
+
     # ──────────────────────────────────────────────────────── 저장 ──
 
     def _save(self):
         try:
-            self._do_save()
+            pinned_count = self._do_save()
+            self._update_persona_banner()
             if self._on_saved:
                 try:
                     self._on_saved()
                 except Exception:
                     pass
-            messagebox.showinfo("저장 완료", "설정이 저장되었습니다.\n오버레이를 재시작하면 전체 반영됩니다.", parent=self.window)
-            self.window.destroy()
+            self._show_toast(f"저장되었습니다. 슬라이더 고정 {pinned_count}/4, 나머지는 adaptive로 유지됩니다.")
         except Exception as e:
             messagebox.showerror("저장 실패", str(e), parent=self.window)
 
@@ -367,6 +663,8 @@ class _SettingsWindow:
             yaml.safe_dump(user, allow_unicode=True, sort_keys=False),
             encoding="utf-8",
         )
+
+        return self._save_persona_user_file()
 
     # ──────────────────────────────────────────── 창 위치 조정 ──
 
