@@ -79,13 +79,13 @@ AMBER is a **local persistent memory runtime** for AI agents. It gives your AI t
 ### Install
 
 ```powershell
-git clone https://github.com/YOUR_USERNAME/amber-mcp.git
-cd amber-mcp
+git clone https://github.com/JJHbrams/Project-AMBER.git
+cd Project-AMBER
 powershell -ExecutionPolicy Bypass -File ./INSTALL.ps1
 ```
 
 The installer will guide you through:
-1. **DB path** — where memories and knowledge are stored (default: `D:\amber_data\`)
+1. **DB path** — where memories and knowledge are stored (default: `D:\intel_engram`)
 2. **Working directory** — directory the terminal opens to when AMBER starts
 3. **Default AI tool** — which tool to use with the `amber` shortcut command
 4. **Auto-start** — register AMBER overlay to launch on Windows startup
@@ -173,7 +173,7 @@ AMBER's knowledge graph syncs bidirectionally with an **Obsidian vault**. Write 
 
 1. Install [Obsidian](https://obsidian.md/download)
 2. Open vault → point to the `docs/` subfolder inside your AMBER data path  
-   (e.g. `D:\amber_data\docs\`)
+   (e.g. `D:\intel_engram\docs\`)
 3. The `kg_watcher` daemon auto-syncs changes while the overlay runs  
    Manual sync: `engram-sync-kg`
 
@@ -238,7 +238,7 @@ Smaller models may ignore instructions or skip memory loading. If your hardware 
 | CLI shortcuts | `engram`, `engram-copilot`, `engram-gemini`, `engram-claude`, `engram-goose`, `engram-overlay` |
 | AI tool configs | MCP connection auto-configured for all detected tools |
 | User config | `~/.engram/` — all settings live here |
-| Data directory | User-specified path (default: `D:\amber_data\`) |
+| Data directory | User-specified path (default: `D:\intel_engram`) |
 | Startup entry | Optional overlay auto-start on Windows login |
 
 ---

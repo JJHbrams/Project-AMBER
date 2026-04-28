@@ -1,19 +1,19 @@
-﻿<div align="center">
+<div align="center">
 
-> ?눖?눟 ?쒓뎅??(?꾩옱) 쨌 ?눣?눡 [English README](README.en.md)
+> 🇰🇷 한국어 (현재) · 🇺🇸 [English README](README.en.md)
 
 ```
-  ?댿뻽?댿뻽?댿븮 ?댿뻽?댿븮   ?댿뻽?댿븮?댿뻽?댿뻽?댿뻽???댿뻽?댿뻽?댿뻽?댿븮?댿뻽?댿뻽?댿뻽??
- ?댿뻽?붴븧?먥뻽?댿븮?댿뻽?댿뻽???댿뻽?댿뻽?묅뻽?댿븫?먥븧?댿뻽?쀢뻽?댿븫?먥븧?먥븧?앪뻽?댿븫?먥븧?댿뻽??
- ?댿뻽?댿뻽?댿뻽?댿븨?댿뻽?붴뻽?댿뻽?댿븫?댿뻽?묅뻽?댿뻽?댿뻽?댿븫?앪뻽?댿뻽?댿뻽?? ?댿뻽?댿뻽?댿뻽?붴븴
- ?댿뻽?붴븧?먥뻽?댿븨?댿뻽?묅븱?댿뻽?붴븴?댿뻽?묅뻽?댿븫?먥븧?댿뻽?쀢뻽?댿븫?먥븧?? ?댿뻽?붴븧?먥뻽?댿븮
- ?댿뻽?? ?댿뻽?묅뻽?댿븨 ?싢븧???댿뻽?묅뻽?댿뻽?댿뻽?댿븫?앪뻽?댿뻽?댿뻽?댿뻽?쀢뻽?댿븨  ?댿뻽??
- ?싢븧?? ?싢븧?앪븱?먥븴     ?싢븧?앪븱?먥븧?먥븧?먥븴 ?싢븧?먥븧?먥븧?먥븴?싢븧?? ?싢븧??
+  █████╗ ███╗   ███╗██████╗ ███████╗██████╗
+ ██╔══██╗████╗ ████║██╔══██╗██╔════╝██╔══██╗
+ ███████║██╔████╔██║██████╔╝█████╗  ██████╔╝
+ ██╔══██║██║╚██╔╝██║██╔══██╗██╔══╝  ██╔══██╗
+ ██║  ██║██║ ╚═╝ ██║██████╔╝███████╗██║  ██║
+ ╚═╝  ╚═╝╚═╝     ╚═╝╚═════╝ ╚══════╝╚═╝  ╚═╝
 ```
 
 **Agent Memory Backend with Episodic Recall**
 
-*?몃컯???섎갚留??꾩쓽 ?앸챸??蹂댁〈?섎벏, AMBER??AI??湲곗뼲怨??뺤껜?깆쓣 蹂댁〈?⑸땲??*
+*호박이 수백만 년의 생명을 보존하듯, AMBER는 AI의 기억과 정체성을 보존합니다.*
 
 <br/>
 
@@ -27,26 +27,26 @@
 
 <br/>
 
-`Copilot` 쨌 `Gemini CLI` 쨌 `Claude Code` 쨌 `Ollama` 쨌 `Goose` 쨌 `Desktop Overlay` 쨌 `Discord`
+`Copilot` · `Gemini CLI` · `Claude Code` · `Ollama` · `Goose` · `Desktop Overlay` · `Discord`
 
-**?쇨낢 媛쒖쓽 ?명꽣?섏씠?? ?섎굹???곗냽??議댁옱**
+**일곱 개의 인터페이스, 하나의 연속적 존재**
 
 </div>
 
 ---
 
-## AMBER??
+## AMBER란?
 
-AMBER??**濡쒖뺄?먯꽌 ?숈옉?섎뒗 AI 吏??硫붾え由??고???*?낅땲??  
-?몄뀡??諛붾뚯뼱?? ?꾧뎄媛 ?щ씪?몃룄, PC瑜??щ??낇빐????AI??湲곗뼲怨??뺤껜?깆? ?댁뼱吏묐땲??
+AMBER는 **로컬에서 동작하는 AI 지속 메모리 런타임**입니다.  
+세션이 바뀌어도, 도구가 달라져도, PC를 재부팅해도 — AI의 기억과 정체성은 이어집니다.
 
 <table><tr><td valign="top">
 
-- **?몄뀡 ?곗냽??* ?????留λ씫怨?湲곗뼲??留??몄뀡留덈떎 ?댁뼱吏묐땲??
-- **?꾧뎄 媛?怨듭쑀 硫붾え由?* ??Copilot, Claude, Gemini, Goose媛 媛숈? 湲곗뼲???곷땲??
-- **吏??洹몃옒??* ??Obsidian vault媛 ?쒕㎤??硫붾え由??덉씠?대줈 ?곕룞?⑸땲??
-- **?곗뒪?ы깙 ?ㅻ쾭?덉씠** ????긽 硫붾え由ъ뿉 ?곌껐???뚮줈??梨꾪똿 李?
-- **濡쒖뺄 & ?꾨씪?대퉿** ??紐⑤뱺 ?곗씠?곕뒗 ??PC?? ?대씪?곕뱶濡??섍?吏 ?딆뒿?덈떎
+- **세션 연속성** — 대화 맥락과 기억이 매 세션마다 이어집니다
+- **도구 간 공유 메모리** — Copilot, Claude, Gemini, Goose가 같은 기억을 씁니다
+- **지식 그래프** — Obsidian vault가 시맨틱 메모리 레이어로 연동됩니다
+- **데스크탑 오버레이** — 항상 메모리에 연결된 플로팅 채팅 창
+- **로컬 & 프라이빗** — 모든 데이터는 내 PC에, 클라우드로 나가지 않습니다
 
 </td><td valign="top" align="right" width="320">
 
@@ -56,54 +56,54 @@ AMBER??**濡쒖뺄?먯꽌 ?숈옉?섎뒗 AI 吏??硫붾え由??고???*?낅땲?
 
 ---
 
-## 鍮좊Ⅸ ?쒖옉
+## 빠른 시작
 
-### ?ъ쟾 ?붽뎄?ы빆
+### 사전 요구사항
 
-**?꾩닔:**
+**필수:**
 - Windows 10/11 + PowerShell
-- [Miniconda](https://docs.conda.io/en/latest/miniconda.html) ?먮뒗 Python 3.11+
-- ?꾨옒 AI ?꾧뎄 以?理쒖냼 ?섎굹
+- [Miniconda](https://docs.conda.io/en/latest/miniconda.html) 또는 Python 3.11+
+- 아래 AI 도구 중 최소 하나
 
-**吏??AI ?꾧뎄:**
+**지원 AI 도구:**
 
-| ?꾧뎄 | 鍮꾩슜 | ?ㅼ튂 諛⑸쾿 |
+| 도구 | 비용 | 설치 방법 |
 |------|------|-----------|
-| [Gemini CLI](https://ai.google.dev/gemini-api/docs/cli) 狩?異붿쿇 | 臾대즺 (Google 怨꾩젙留? | `npm i -g @google/gemini-cli` |
-| [Claude Code](https://docs.anthropic.com/en/docs/claude-code) | API ??(臾대즺 ?щ젅???ы븿) | `npm i -g @anthropic-ai/claude-code` |
-| [GitHub Copilot CLI](https://docs.github.com/copilot/how-tos/copilot-cli) | ?좊즺 援щ룆 | `npm i -g @githubnext/github-copilot-cli` |
-| [Ollama](https://ollama.ai) | ?꾩쟾 臾대즺 (濡쒖뺄) | installer ?ㅼ슫濡쒕뱶 |
-| [Goose](https://block.github.io/goose) | 臾대즺 (Ollama ?곕룞) | installer ?ㅼ슫濡쒕뱶 |
+| [Gemini CLI](https://ai.google.dev/gemini-api/docs/cli) ⭐ 추천 | 무료 (Google 계정만) | `npm i -g @google/gemini-cli` |
+| [Claude Code](https://docs.anthropic.com/en/docs/claude-code) | API 키 (무료 크레딧 포함) | `npm i -g @anthropic-ai/claude-code` |
+| [GitHub Copilot CLI](https://docs.github.com/copilot/how-tos/copilot-cli) | 유료 구독 | `npm i -g @githubnext/github-copilot-cli` |
+| [Ollama](https://ollama.ai) | 완전 무료 (로컬) | installer 다운로드 |
+| [Goose](https://block.github.io/goose) | 무료 (Ollama 연동) | installer 다운로드 |
 
-> AI ?꾧뎄 ?놁씠 癒쇱? ?ㅼ튂?대룄 ?⑸땲?? ?섏쨷??異붽??섍퀬 ?ㅻ쾭?덉씠 ?ㅼ젙?먯꽌 蹂寃쏀븷 ???덉뒿?덈떎.
+> AI 도구 없이 먼저 설치해도 됩니다. 나중에 추가하고 오버레이 설정에서 변경할 수 있습니다.
 
-### ?ㅼ튂
+### 설치
 
 ```powershell
-git clone https://github.com/YOUR_USERNAME/amber-mcp.git
-cd amber-mcp
+git clone https://github.com/JJHbrams/Project-AMBER.git
+cd Project-AMBER
 powershell -ExecutionPolicy Bypass -File ./INSTALL.ps1
 ```
 
-?ㅼ튂 ?ㅽ겕由쏀듃媛 ?쒖꽌?濡??덈궡?⑸땲??
-1. **DB 寃쎈줈** ??湲곗뼲怨?吏?앹씠 ??λ맆 ?대뜑 (湲곕낯媛? `D:\amber_data\`)
-2. **?묒뾽 ?붾젆?좊━** ??AMBER ?ㅽ뻾 ???곕??먯씠 ?먮룞?쇰줈 ?대룞??寃쎈줈
-3. **湲곕낯 AI ?꾧뎄** ??`amber` ?⑥텞 紐낅졊???곌껐???꾧뎄 ?좏깮
-4. **?먮룞 ?ㅽ뻾** ??Windows ?쒖옉 ???ㅻ쾭?덉씠 ?먮룞 耳쒓린 ?щ?
-5. **?뺤껜???대쫫** ??AI??吏???뺤껜?깆뿉 遺숈씪 ?대쫫
+설치 스크립트가 순서대로 안내합니다:
+1. **DB 경로** — 기억과 지식이 저장될 폴더 (기본값: `D:\intel_engram`)
+2. **작업 디렉토리** — AMBER 실행 시 터미널이 자동으로 이동할 경로
+3. **기본 AI 도구** — `amber` 단축 명령에 연결할 도구 선택
+4. **자동 실행** — Windows 시작 시 오버레이 자동 켜기 여부
+5. **정체성 이름** — AI의 지속 정체성에 붙일 이름
 
-### ?ㅽ뻾
+### 실행
 
-**?곗뒪?ы깙 ?ㅻ쾭?덉씠 (?쇰컲 ?ъ슜??異붿쿇):**
+**데스크탑 오버레이 (일반 사용자 추천):**
 ```powershell
 engram-overlay
 ```
-?붾㈃ ?곗륫??梨꾪똿 李쎌씠 ?④퀬, `Alt+F12`濡??좉??⑸땲??  
-?ㅻ쾭?덉씠媛 耳쒖졇 ?덈뒗 ?숈븞 ?곌껐??紐⑤뱺 AI ?꾧뎄媛 媛숈? 湲곗뼲???묎렐?⑸땲??
+화면 우측에 채팅 창이 뜨고, `Alt+F12`로 토글됩니다.  
+오버레이가 켜져 있는 동안 연결된 모든 AI 도구가 같은 기억에 접근합니다.
 
-**?곕???CLI:**
+**터미널 CLI:**
 ```powershell
-engram               # ?ㅼ젙??湲곕낯 AI ?꾧뎄濡??ㅽ뻾
+engram               # 설정한 기본 AI 도구로 실행
 engram-gemini        # Gemini CLI
 engram-claude        # Claude Code
 engram-copilot       # GitHub Copilot CLI
@@ -111,91 +111,91 @@ engram-goose         # Goose
 ```
 
 ```powershell
-engram -p "吏덈Ц ?댁슜"   # ?뱀젙 硫붿떆吏濡?諛붾줈 ?쒖옉
-engram --continue       # ?댁쟾 ????댁뼱??
+engram -p "질문 내용"   # 특정 메시지로 바로 시작
+engram --continue       # 이전 대화 이어서
 ```
 
 ---
 
-## ?숈옉 ?먮━
+## 동작 원리
 
 ```
-?뚢???????????????????????????????????????????????????
-??                 AMBER Runtime                  ??
-??                                                ??
-?? ?뚢????????????  MCP ?쒕쾭 (port 17385)            ??
-?? ???뺤껜??  ?귘뾼????????????????????????????????  ??
-?? ??湲곗뼲     ??                              ??  ??
-?? ??KG/Wiki  ??  STM 釉뚮줈而?(port 17384)     ??  ??
-?? ?붴???????????섃뾼???????????????????????????? ??  ??
-??                                        ?? ??  ??
-?붴??????????????????????????????????????????쇄???쇄?????
-                                          ?? ??
-          ?뚢????????????р???????????р?????????? ??
-          ??          ??         ??           ??
-     VS Code     Claude Code  Gemini CLI  ?ㅻ쾭?덉씠
+┌─────────────────────────────────────────────────┐
+│                  AMBER Runtime                  │
+│                                                 │
+│  ┌──────────┐   MCP 서버 (port 17385)            │
+│  │ 정체성   │◄──────────────────────────────┐   │
+│  │ 기억     │                               │   │
+│  │ KG/Wiki  │   STM 브로커 (port 17384)     │   │
+│  └──────────┘◄──────────────────────────┐  │   │
+│                                         │  │   │
+└─────────────────────────────────────────┼──┼───┘
+                                          │  │
+          ┌───────────┬──────────┬────────┘  │
+          │           │          │            │
+     VS Code     Claude Code  Gemini CLI  오버레이
      Copilot        MCP          MCP       (GUI)
 ```
 
-- **MCP ?쒕쾭** ??SSE濡?46媛??꾧뎄 ?쒓났. MCP ?명솚 ?대씪?댁뼵?멸? ?먮룞 ?곌껐?⑸땲??
-- **STM 釉뚮줈而?* ???곗뒪?ы깙 ?ㅻ쾭?덉씠??寃쎈웾 HTTP 釉뚮━吏
-- **SQLite WAL** ???먰뵾?뚮뱶 湲곗뼲, ?뺤껜?? 吏?쒕Ц, ?멸린?ъ쓣 ???
-- **KuzuDB** ??`paraphrase-multilingual-MiniLM-L12-v2` ?꾨쿋??湲곕컲 ?쒕㎤??洹몃옒??
-- **kg_watcher** ??Obsidian vault 蹂寃쎌쓣 媛먯???KG瑜??ㅼ떆媛??숆린??
+- **MCP 서버** — SSE로 46개 도구 제공. MCP 호환 클라이언트가 자동 연결됩니다.
+- **STM 브로커** — 데스크탑 오버레이용 경량 HTTP 브리지
+- **SQLite WAL** — 에피소드 기억, 정체성, 지시문, 호기심을 저장
+- **KuzuDB** — `paraphrase-multilingual-MiniLM-L12-v2` 임베딩 기반 시맨틱 그래프
+- **kg_watcher** — Obsidian vault 변경을 감지해 KG를 실시간 동기화
 
 ---
 
-## 吏??洹몃옒????쒕낫??
+## 지식 그래프 대시보드
 
-湲곗뼲, ?꾪궎 ?몃뱶, ?쒕㎤??愿怨꾨? 釉뚮씪?곗??먯꽌 ?쒓컖?곸쑝濡??먯깋?⑸땲??
+기억, 위키 노드, 시맨틱 관계를 브라우저에서 시각적으로 탐색합니다.
 
 ![dashboard](resource/asset/dashboard.png)
 
-?ㅻ쾭?덉씠 ?ㅽ뻾 以?**http://localhost:8501** 濡??묒냽?⑸땲??
+오버레이 실행 중 **http://localhost:8501** 로 접속합니다.
 
-| ?섏씠吏 | ?댁슜 |
+| 페이지 | 내용 |
 |--------|------|
-| ?뱤 Overview | ?뺤껜???붿빟, 理쒓렐 湲곗뼲, ?쒖꽦 吏?쒕Ц |
-| ?빖截?KG Graph | ?명꽣?숉떚釉?吏??洹몃옒??+ ?쒕㎤???ｌ? ?좉? |
-| ?뱷 Wiki Nodes | ?꾪궎 ?몃뱶 紐⑸줉 + ?먮Ц + ?곌껐 愿怨?|
-| ?뮡 Memories | ?먰뵾?뚮뱶 湲곗뼲 ?꾨Ц 議고쉶 |
-| ?뱥 Directives | ?댁쁺 吏?쒕Ц 紐⑸줉 |
-| ?뙋 Semantic | ?먯뿰???쒕㎤??寃??|
+| 📊 Overview | 정체성 요약, 최근 기억, 활성 지시문 |
+| 🕸️ KG Graph | 인터랙티브 지식 그래프 + 시맨틱 엣지 토글 |
+| 📝 Wiki Nodes | 위키 노드 목록 + 원문 + 연결 관계 |
+| 💭 Memories | 에피소드 기억 전문 조회 |
+| 📋 Directives | 운영 지시문 목록 |
+| 🌐 Semantic | 자연어 시맨틱 검색 |
 
-> 理쒖큹 ?ㅽ뻾 ??`pip install streamlit pandas pyvis` ?꾩슂
+> 최초 실행 전 `pip install streamlit pandas pyvis` 필요
 
 ---
 
-## Obsidian ?곕룞
+## Obsidian 연동
 
-AMBER??吏??洹몃옒?꾨뒗 **Obsidian vault**? ?묐갑?μ쑝濡??숆린?붾맗?덈떎.  
-?명듃瑜??곕㈃ AI媛 ?쎄퀬, AI媛 ???명듃瑜?Obsidian?먯꽌 諛붾줈 ?????덉뒿?덈떎.
+AMBER의 지식 그래프는 **Obsidian vault**와 양방향으로 동기화됩니다.  
+노트를 쓰면 AI가 읽고, AI가 쓴 노트를 Obsidian에서 바로 열 수 있습니다.
 
-### ?ㅼ젙
+### 설정
 
-1. [Obsidian](https://obsidian.md/download) ?ㅼ튂
-2. Vault ?닿린 ??AMBER ?곗씠??寃쎈줈 ?섏쐞??`docs/` ?대뜑瑜?vault濡?吏?? 
-   (?? `D:\amber_data\docs\`)
-3. `kg_watcher` ?곕が???ㅻ쾭?덉씠 ?ㅽ뻾 以?蹂寃??ы빆???먮룞 ?숆린?? 
-   ?섎룞 ?숆린?? `engram-sync-kg`
+1. [Obsidian](https://obsidian.md/download) 설치
+2. Vault 열기 → AMBER 데이터 경로 하위의 `docs/` 폴더를 vault로 지정  
+   (예: `D:\intel_engram\docs\`)
+3. `kg_watcher` 데몬이 오버레이 실행 중 변경 사항을 자동 동기화  
+   수동 동기화: `engram-sync-kg`
 
-### ???댁슱由щ뒗 ?댁쑀
+### 잘 어울리는 이유
 
-| 湲곕뒫 | ?④낵 |
+| 기능 | 효과 |
 |------|------|
-| ?쒖닔 `.md` ?뚯씪 | 蹂???놁씠 AMBER媛 吏곸젒 ?쎌쓬 |
-| `[[?꾪궎 留곹겕]]` | KG ?ｌ?濡??먮룞 留ㅽ븨 |
-| 洹몃옒??酉?| AMBER媛 蹂대뒗 ?곌껐 愿怨꾨? ?щ엺???쒓컖??|
-| ?щ엺 + AI 怨듬룞 ?몄쭛 | 媛숈? 吏??踰좎씠?ㅼ뿉???④퍡 ? |
+| 순수 `.md` 파일 | 변환 없이 AMBER가 직접 읽음 |
+| `[[위키 링크]]` | KG 엣지로 자동 매핑 |
+| 그래프 뷰 | AMBER가 보는 연결 관계를 사람도 시각화 |
+| 사람 + AI 공동 편집 | 같은 지식 베이스에서 함께 씀 |
 
-**異붿쿇 ?뚮윭洹몄씤:** Dataview 쨌 Templater 쨌 Graph Analysis
+**추천 플러그인:** Dataview · Templater · Graph Analysis
 
 ---
 
-## Discord ?곕룞 (?좏깮)
+## Discord 연동 (선택)
 
-1. `~/.engram/.env` ??Discord 遊??좏겙(`DISCORD_BOT_TOKEN`) 異붽?
-2. `~/.engram/overlay.user.yaml` ?먯꽌 ?쒕쾭/梨꾨꼸/?ъ슜??ID ?ㅼ젙:
+1. `~/.engram/.env` 에 Discord 봇 토큰(`DISCORD_BOT_TOKEN`) 추가
+2. `~/.engram/overlay.user.yaml` 에서 서버/채널/사용자 ID 설정:
 
 ```yaml
 discord:
@@ -205,66 +205,66 @@ discord:
     - "YOUR_USER_ID"
 ```
 
-3. ?ㅻ쾭?덉씠 ?ㅽ뻾 ??Discord 遊뉗씠 ?먮룞 ?쒖꽦?붾맗?덈떎.
+3. 오버레이 실행 시 Discord 봇이 자동 활성화됩니다.
 
 ---
 
-## MCP ?대씪?댁뼵???곕룞
+## MCP 클라이언트 연동
 
-?ㅼ튂 ?ㅽ겕由쏀듃媛 媛먯???紐⑤뱺 AI ?꾧뎄??AMBER ?곌껐???먮룞 ?ㅼ젙?⑸땲??  
-**?ㅻ쾭?덉씠媛 癒쇱? ?ㅽ뻾 以묒씠?댁빞** 媛??대씪?댁뼵?멸? AMBER???묎렐?????덉뒿?덈떎.
+설치 스크립트가 감지된 모든 AI 도구에 AMBER 연결을 자동 설정합니다.  
+**오버레이가 먼저 실행 중이어야** 각 클라이언트가 AMBER에 접근할 수 있습니다.
 
 ```
-?ㅻ쾭?덉씠 ?ㅽ뻾 以?
-  ?쒋?? VS Code Copilot Chat  ???먮룞 ?곌껐
-  ?쒋?? Claude Code           ???먮룞 ?곌껐
-  ?쒋?? Gemini CLI            ???먮룞 ?곌껐
-  ?붴?? Goose                 ???먮룞 ?곌껐
+오버레이 실행 중
+  ├── VS Code Copilot Chat  → 자동 연결
+  ├── Claude Code           → 자동 연결
+  ├── Gemini CLI            → 자동 연결
+  └── Goose                 → 자동 연결
 ```
 
-?곌껐????????
-- ?ㅻ쾭?덉씠 ?ㅽ뻾 ?щ? ?뺤씤 (濡쒓렇: `~/.engram/mcp-http.log`)
-- VS Code: Reload Window ??MCP 紐⑸줉??AMBER ?쒕쾭媛 蹂댁씠?붿? ?뺤씤
+연결이 안 될 때:
+- 오버레이 실행 여부 확인 (로그: `~/.engram/mcp-http.log`)
+- VS Code: Reload Window 후 MCP 목록에 AMBER 서버가 보이는지 확인
 
-### Ollama ?ъ슜 ??二쇱쓽
+### Ollama 사용 시 주의
 
-AMBER??湲곗뼲쨌?뺤껜?굿룹???????됱쓽 而⑦뀓?ㅽ듃瑜?AI???꾨떖?⑸땲??  
-**沅뚯옣 理쒖냼 ?ъ뼇: 14B ?댁긽 紐⑤뜽, VRAM 16GB ?댁긽**
+AMBER는 기억·정체성·지식 등 대량의 컨텍스트를 AI에 전달합니다.  
+**권장 최소 사양: 14B 이상 모델, VRAM 16GB 이상**
 
-?ъ뼇??遺議깊븯硫?Claude API / Copilot / Gemini CLI ?ъ슜??沅뚯옣?⑸땲??
+사양이 부족하면 Claude API / Copilot / Gemini CLI 사용을 권장합니다.
 
 ---
 
-## ?ㅼ튂 ???앹꽦?섎뒗 ??ぉ
+## 설치 후 생성되는 항목
 
-| ??ぉ | ?댁슜 |
+| 항목 | 내용 |
 |------|------|
-| CLI ?⑥텞 紐낅졊 | `engram`, `engram-copilot`, `engram-gemini`, `engram-claude`, `engram-goose`, `engram-overlay` |
-| AI ?꾧뎄 ?곕룞 | 媛먯???紐⑤뱺 ?꾧뎄??MCP ?곌껐 ?먮룞 ?ㅼ젙 |
-| ?ъ슜???ㅼ젙 | `~/.engram/` ?대뜑?????|
-| ?곗씠???붾젆?좊━ | ?ㅼ튂 ??吏?뺥븳 寃쎈줈 (湲곕낯媛? `D:\amber_data\`) |
-| ?쒖옉?꾨줈洹몃옩 | Windows 濡쒓렇?????ㅻ쾭?덉씠 ?먮룞 ?ㅽ뻾 (?좏깮) |
+| CLI 단축 명령 | `engram`, `engram-copilot`, `engram-gemini`, `engram-claude`, `engram-goose`, `engram-overlay` |
+| AI 도구 연동 | 감지된 모든 도구에 MCP 연결 자동 설정 |
+| 사용자 설정 | `~/.engram/` 폴더에 저장 |
+| 데이터 디렉토리 | 설치 시 지정한 경로 (기본값: `D:\intel_engram`) |
+| 시작프로그램 | Windows 로그인 시 오버레이 자동 실행 (선택) |
 
 ---
 
-## ?쒓굅
+## 제거
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\INSTALL.ps1 -Uninstall
 ```
 
-> 湲곗뼲 ?곗씠?곗? AI ?꾧뎄 ?ㅼ젙? ?먮룞?쇰줈 ??젣?섏? ?딆뒿?덈떎.
+> 기억 데이터와 AI 도구 설정은 자동으로 삭제되지 않습니다.
 
 ---
 
-## 臾몄꽌
+## 문서
 
-- [?꾪궎?띿쿂 媛쒖슂](docs/architecture.md)
-- [硫붾え由?怨꾩링 ?ㅺ퀎](docs/memory-tiering.md)
-- [硫붾え由??⑦넧濡쒖? 濡쒕뱶留?(docs/memory-ontology-roadmap.md)
+- [아키텍처 개요](docs/architecture.md)
+- [메모리 계층 설계](docs/memory-tiering.md)
+- [메모리 온톨로지 로드맵](docs/memory-ontology-roadmap.md)
 
 ---
 
-## ?쇱씠?좎뒪
+## 라이선스
 
-MIT 짤 2026
+MIT © 2026
