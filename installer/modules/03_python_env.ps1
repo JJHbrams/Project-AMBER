@@ -23,17 +23,26 @@ if ($condaCmd) {
         $HasNamedCondaEnv = $true
         $PythonExe = $existingCondaPython
         if (Test-Path $EnvironmentYamlPath) {
-            Write-Step "Conda env update (environment.yml)..."
-            Push-Location $ProjectRoot
-            $condaUpdateOutput = Invoke-LiveLog { conda env update -n $CondaEnv -f $EnvironmentYamlPath }
-            $condaUpdateExit = $LASTEXITCODE
-            Pop-Location
-            if ($condaUpdateExit -ne 0) {
-                Write-Err "Failed: conda env update -n $CondaEnv -f environment.yml"
-                $condaUpdateOutput | Select-Object -Last 30 | ForEach-Object { Write-Host "      $_" -ForegroundColor DarkYellow }
-                exit 1
+            # conda-meta/history mtime vs 소스 파일 mtime 비교 — 변경 없으면 스킵
+            $envDir = Split-Path $existingCondaPython -Parent
+            $historyPath = Join-Path $envDir "conda-meta\history"
+            $historyMtime = if (Test-Path $historyPath) { (Get-Item $historyPath).LastWriteTimeUtc } else { [DateTime]::MinValue }
+            $sourceMtime = Get-LatestWriteTimeUtc @($EnvironmentYamlPath, $RequirementsPath)
+            if ($historyMtime -gt $sourceMtime) {
+                Write-Ok "Conda env '$CondaEnv' up-to-date (skip update)"
+            } else {
+                Write-Step "Conda env update (environment.yml)..."
+                Push-Location $ProjectRoot
+                $condaUpdateOutput = Invoke-LiveLog { conda env update -n $CondaEnv -f $EnvironmentYamlPath }
+                $condaUpdateExit = $LASTEXITCODE
+                Pop-Location
+                if ($condaUpdateExit -ne 0) {
+                    Write-Err "Failed: conda env update -n $CondaEnv -f environment.yml"
+                    $condaUpdateOutput | Select-Object -Last 30 | ForEach-Object { Write-Host "      $_" -ForegroundColor DarkYellow }
+                    exit 1
+                }
+                Write-Ok "Updated env '$CondaEnv' from environment.yml"
             }
-            Write-Ok "Updated env '$CondaEnv' from environment.yml"
         } else {
             Write-Warn "environment.yml not found — skip conda env update"
         }
