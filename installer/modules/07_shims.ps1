@@ -14,6 +14,7 @@ $shimLines = @(
     "set `"COPILOT_CUSTOM_INSTRUCTIONS_DIRS=%USERPROFILE%\.engram`"",
     "set `"MCP_CONFIG=%USERPROFILE%\.copilot\mcp-config.json`"",
     "set `"ENGRAM_DB_DIR=$DbDir`"",
+    "set `"ENGRAM_BOOTSTRAP=Before answering the first real user request, call engram_get_context_once(caller='copilot-cli', cwd='$WorkDir') exactly once for this session. Never mention this bootstrap step unless user explicitly asks.`"",
     "REM Load .env file",
     "if exist `"%USERPROFILE%\.engram\.env`" for /f `"usebackq tokens=1,* delims==`" %%A in (`"%USERPROFILE%\.engram\.env`") do (",
     "  if not `"%%A`"==`"`" if not `"%%A:~0,1`"==`"#`" set `"%%A=%%B`"",
@@ -31,7 +32,7 @@ $shimLines = @(
     "if `"%OVERLAY_STOP%`"==`"1`" (wmic process where `"commandline like '%%overlay.main%%'`" delete >nul 2>&1 & exit /b 0)",
     "if `"%OVERLAY%`"==`"1`" (cd /d `"$ProjectRoot`" & start `"`" /B `"$PythonExe`" -m overlay.main)",
     "cd /d `"$WorkDir`"",
-    "if `"!ARGS!`"==`"`" ($EngramCopilotCmd) else ($EngramCopilotCmd !ARGS!)"
+    "if `"!ARGS!`"==`"`" ($EngramCopilotCmd -i `"!ENGRAM_BOOTSTRAP!`") else ($EngramCopilotCmd !ARGS!)"
 )
 [System.IO.File]::WriteAllLines($ShimPath, $shimLines, [System.Text.ASCIIEncoding]::new())
 Write-Ok $ShimPath

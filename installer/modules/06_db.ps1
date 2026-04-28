@@ -110,11 +110,50 @@ foreach ($d in $WikiDirs) {
     else { Write-Ok "Exists:  $d" }
 }
 
-# 스타터 파일: HOME (moc)
+# 스타터 파일 경로/템플릿 메타
+$TemplateDate = Get-Date -Format "yyyy-MM-dd"
+$InstallerTemplatesDir = Join-Path $ProjectRoot "installer\templates"
 $WikiHome = "$DbDir\docs\moc\000-HOME.md"
+$WikiGuide = "$DbDir\docs\guides\Wiki 관리 지침.md"
+$TemplateTargets = @(
+    @{ Src = "concept.md";  Dest = "$DbDir\docs\_templates\concept.md" },
+    @{ Src = "project.md";  Dest = "$DbDir\docs\_templates\project.md" },
+    @{ Src = "research.md"; Dest = "$DbDir\docs\_templates\research.md" },
+    @{ Src = "person.md";   Dest = "$DbDir\docs\_templates\person.md" }
+)
+
+# 충돌 파일 일괄 확인: 기본 정책은 유지(N), 명시적으로 y일 때만 덮어쓰기
+$WikiStarterConflictPaths = [System.Collections.Generic.List[string]]::new()
+if (Test-Path $WikiHome) { [void]$WikiStarterConflictPaths.Add($WikiHome) }
+if (Test-Path $WikiGuide) { [void]$WikiStarterConflictPaths.Add($WikiGuide) }
+foreach ($tmpl in $TemplateTargets) {
+    if (Test-Path $tmpl.Dest) {
+        [void]$WikiStarterConflictPaths.Add($tmpl.Dest)
+    }
+}
+
+$OverwriteWikiStarters = $false
+if ($WikiStarterConflictPaths.Count -gt 0) {
+    Write-Step "Wiki starter conflict check..."
+    Write-Host "  다음 파일이 이미 존재합니다:" -ForegroundColor White
+    foreach ($existingPath in $WikiStarterConflictPaths) {
+        Write-Host "    - $existingPath" -ForegroundColor DarkGray
+    }
+
+    $overwriteAnswer = (Read-Host "  겹치는 파일을 템플릿으로 덮어쓸까요? [y/N]").Trim().ToLower()
+    if ($overwriteAnswer -in @("y", "yes")) {
+        $OverwriteWikiStarters = $true
+        Write-Ok "Conflict policy: overwrite starter files"
+    } else {
+        Write-Ok "Conflict policy: keep existing starter files"
+    }
+}
+
+# 스타터 파일: HOME (moc)
 $WikiIsNew = $false
-if (-not (Test-Path $WikiHome)) {
-    $WikiIsNew = $true
+$HomeExists = Test-Path $WikiHome
+if ((-not $HomeExists) -or $OverwriteWikiStarters) {
+    $WikiIsNew = -not $HomeExists
     $today = Get-Date -Format "yyyy-MM-dd"
     $homeSrc = Join-Path $ProjectRoot "installer\templates\_home.md"
     if (Test-Path $homeSrc) {
@@ -139,26 +178,22 @@ updated: $today
 관리 지침: ``docs/guides/Wiki 관리 지침.md``
 "@ | Out-File -FilePath $WikiHome -Encoding utf8 -NoNewline
     }
-    Write-Ok "Created: $WikiHome"
+
+    if ($HomeExists) { Write-Ok "Overwritten: $WikiHome" }
+    else { Write-Ok "Created: $WikiHome" }
 } else { Write-Ok "Exists:  $WikiHome" }
 
 # 스타터 파일: 템플릿들 (installer/templates/ 에서 읽어 날짜 치환 후 배포)
-$TemplateDate = Get-Date -Format "yyyy-MM-dd"
-$InstallerTemplatesDir = Join-Path $ProjectRoot "installer\templates"
-$TemplateTargets = @(
-    @{ Src = "concept.md";  Dest = "$DbDir\docs\_templates\concept.md" },
-    @{ Src = "project.md";  Dest = "$DbDir\docs\_templates\project.md" },
-    @{ Src = "research.md"; Dest = "$DbDir\docs\_templates\research.md" },
-    @{ Src = "person.md";   Dest = "$DbDir\docs\_templates\person.md" }
-)
 foreach ($tmpl in $TemplateTargets) {
     $dest = $tmpl.Dest
-    if (-not (Test-Path $dest)) {
+    $destExists = Test-Path $dest
+    if ((-not $destExists) -or $OverwriteWikiStarters) {
         $srcPath = Join-Path $InstallerTemplatesDir $tmpl.Src
         if (Test-Path $srcPath) {
             $content = (Get-Content $srcPath -Raw -Encoding UTF8).Replace("__DATE__", $TemplateDate)
             [System.IO.File]::WriteAllText($dest, $content, [System.Text.UTF8Encoding]::new($false))
-            Write-Ok "Created: $dest"
+            if ($destExists) { Write-Ok "Overwritten: $dest" }
+            else { Write-Ok "Created: $dest" }
         } else {
             Write-Warn "Template source not found: $srcPath — skipping $($tmpl.Src)"
         }
@@ -166,8 +201,8 @@ foreach ($tmpl in $TemplateTargets) {
 }
 
 # 스타터 파일: Wiki 관리 지침 (guides/) - installer/templates/_wiki-guide.md에서 읽음
-$WikiGuide = "$DbDir\docs\guides\Wiki 관리 지침.md"
-if (-not (Test-Path $WikiGuide)) {
+$GuideExists = Test-Path $WikiGuide
+if ((-not $GuideExists) -or $OverwriteWikiStarters) {
     $today = Get-Date -Format "yyyy-MM-dd"
     $guideSrc = Join-Path $ProjectRoot "installer\templates\_wiki-guide.md"
     if (Test-Path $guideSrc) {
@@ -177,7 +212,8 @@ if (-not (Test-Path $WikiGuide)) {
         $guideContent = "---`ntitle: Wiki 관리 지침`nnote_type: concept`ntags:`n  - guide`ncreated: $today`nupdated: $today`n---`n`n# Wiki 관리 지침`n"
     }
     [System.IO.File]::WriteAllText($WikiGuide, $guideContent, [System.Text.UTF8Encoding]::new($false))
-    Write-Ok "Created: $WikiGuide"
+    if ($GuideExists) { Write-Ok "Overwritten: $WikiGuide" }
+    else { Write-Ok "Created: $WikiGuide" }
 } else { Write-Ok "Exists:  $WikiGuide" }
 
 # 6c. Directives 템플릿 시딩 (INSERT OR IGNORE — 기존 커스터마이징 보존)

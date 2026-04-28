@@ -22,6 +22,7 @@ dist/
 # User config (contains personal paths/tokens)
 config/overlay.user.yaml
 *.user.yaml
+.mcp.json
 .env
 *.env
 
