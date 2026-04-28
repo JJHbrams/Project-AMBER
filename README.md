@@ -1,17 +1,19 @@
-<div align="center">
+﻿<div align="center">
+
+> ?눖?눟 ?쒓뎅??(?꾩옱) 쨌 ?눣?눡 [English README](README.en.md)
 
 ```
-  █████╗ ███╗   ███╗██████╗ ███████╗██████╗
- ██╔══██╗████╗ ████║██╔══██╗██╔════╝██╔══██╗
- ███████║██╔████╔██║██████╔╝█████╗  ██████╔╝
- ██╔══██║██║╚██╔╝██║██╔══██╗██╔══╝  ██╔══██╗
- ██║  ██║██║ ╚═╝ ██║██████╔╝███████╗██║  ██║
- ╚═╝  ╚═╝╚═╝     ╚═╝╚═════╝ ╚══════╝╚═╝  ╚═╝
+  ?댿뻽?댿뻽?댿븮 ?댿뻽?댿븮   ?댿뻽?댿븮?댿뻽?댿뻽?댿뻽???댿뻽?댿뻽?댿뻽?댿븮?댿뻽?댿뻽?댿뻽??
+ ?댿뻽?붴븧?먥뻽?댿븮?댿뻽?댿뻽???댿뻽?댿뻽?묅뻽?댿븫?먥븧?댿뻽?쀢뻽?댿븫?먥븧?먥븧?앪뻽?댿븫?먥븧?댿뻽??
+ ?댿뻽?댿뻽?댿뻽?댿븨?댿뻽?붴뻽?댿뻽?댿븫?댿뻽?묅뻽?댿뻽?댿뻽?댿븫?앪뻽?댿뻽?댿뻽?? ?댿뻽?댿뻽?댿뻽?붴븴
+ ?댿뻽?붴븧?먥뻽?댿븨?댿뻽?묅븱?댿뻽?붴븴?댿뻽?묅뻽?댿븫?먥븧?댿뻽?쀢뻽?댿븫?먥븧?? ?댿뻽?붴븧?먥뻽?댿븮
+ ?댿뻽?? ?댿뻽?묅뻽?댿븨 ?싢븧???댿뻽?묅뻽?댿뻽?댿뻽?댿븫?앪뻽?댿뻽?댿뻽?댿뻽?쀢뻽?댿븨  ?댿뻽??
+ ?싢븧?? ?싢븧?앪븱?먥븴     ?싢븧?앪븱?먥븧?먥븧?먥븴 ?싢븧?먥븧?먥븧?먥븴?싢븧?? ?싢븧??
 ```
 
 **Agent Memory Backend with Episodic Recall**
 
-*Amber preserves life for millions of years. So does AMBER.*
+*?몃컯???섎갚留??꾩쓽 ?앸챸??蹂댁〈?섎벏, AMBER??AI??湲곗뼲怨??뺤껜?깆쓣 蹂댁〈?⑸땲??*
 
 <br/>
 
@@ -25,25 +27,26 @@
 
 <br/>
 
-`Copilot` · `Gemini CLI` · `Claude Code` · `Ollama` · `Goose` · `Desktop Overlay` · `Discord`
+`Copilot` 쨌 `Gemini CLI` 쨌 `Claude Code` 쨌 `Ollama` 쨌 `Goose` 쨌 `Desktop Overlay` 쨌 `Discord`
 
-**Seven interfaces. One persistent identity.**
+**?쇨낢 媛쒖쓽 ?명꽣?섏씠?? ?섎굹???곗냽??議댁옱**
 
 </div>
 
 ---
 
-## What is AMBER?
+## AMBER??
 
-AMBER is a **local persistent memory runtime** for AI agents. It gives your AI tools a continuous identity — memories, personality, and knowledge — that survives across sessions, tools, and reboots.
+AMBER??**濡쒖뺄?먯꽌 ?숈옉?섎뒗 AI 吏??硫붾え由??고???*?낅땲??  
+?몄뀡??諛붾뚯뼱?? ?꾧뎄媛 ?щ씪?몃룄, PC瑜??щ??낇빐????AI??湲곗뼲怨??뺤껜?깆? ?댁뼱吏묐땲??
 
 <table><tr><td valign="top">
 
-- **Session continuity** — Memories and context persist across every conversation
-- **Cross-tool memory** — Copilot, Claude, Gemini, and Goose all share the same memory
-- **Knowledge graph** — Your Obsidian vault becomes a semantic memory layer
-- **Desktop overlay** — A floating chat window always connected to the memory backend
-- **Local & private** — Everything runs on your PC, nothing goes to the cloud
+- **?몄뀡 ?곗냽??* ?????留λ씫怨?湲곗뼲??留??몄뀡留덈떎 ?댁뼱吏묐땲??
+- **?꾧뎄 媛?怨듭쑀 硫붾え由?* ??Copilot, Claude, Gemini, Goose媛 媛숈? 湲곗뼲???곷땲??
+- **吏??洹몃옒??* ??Obsidian vault媛 ?쒕㎤??硫붾え由??덉씠?대줈 ?곕룞?⑸땲??
+- **?곗뒪?ы깙 ?ㅻ쾭?덉씠** ????긽 硫붾え由ъ뿉 ?곌껐???뚮줈??梨꾪똿 李?
+- **濡쒖뺄 & ?꾨씪?대퉿** ??紐⑤뱺 ?곗씠?곕뒗 ??PC?? ?대씪?곕뱶濡??섍?吏 ?딆뒿?덈떎
 
 </td><td valign="top" align="right" width="320">
 
@@ -53,28 +56,28 @@ AMBER is a **local persistent memory runtime** for AI agents. It gives your AI t
 
 ---
 
-## Quick Start
+## 鍮좊Ⅸ ?쒖옉
 
-### Prerequisites
+### ?ъ쟾 ?붽뎄?ы빆
 
-**Required:**
+**?꾩닔:**
 - Windows 10/11 + PowerShell
-- [Miniconda](https://docs.conda.io/en/latest/miniconda.html) or Python 3.11+
-- At least one AI tool (see table below)
+- [Miniconda](https://docs.conda.io/en/latest/miniconda.html) ?먮뒗 Python 3.11+
+- ?꾨옒 AI ?꾧뎄 以?理쒖냼 ?섎굹
 
-**Supported AI tools:**
+**吏??AI ?꾧뎄:**
 
-| Tool | Cost | Install |
-|------|------|---------|
-| [Gemini CLI](https://ai.google.dev/gemini-api/docs/cli) ⭐ recommended | Free (Google account) | `npm i -g @google/gemini-cli` |
-| [Claude Code](https://docs.anthropic.com/en/docs/claude-code) | API key (free credits) | `npm i -g @anthropic-ai/claude-code` |
-| [GitHub Copilot CLI](https://docs.github.com/copilot/how-tos/copilot-cli) | Subscription | `npm i -g @githubnext/github-copilot-cli` |
-| [Ollama](https://ollama.ai) | Free (local) | Download installer |
-| [Goose](https://block.github.io/goose) | Free (Ollama) | Download installer |
+| ?꾧뎄 | 鍮꾩슜 | ?ㅼ튂 諛⑸쾿 |
+|------|------|-----------|
+| [Gemini CLI](https://ai.google.dev/gemini-api/docs/cli) 狩?異붿쿇 | 臾대즺 (Google 怨꾩젙留? | `npm i -g @google/gemini-cli` |
+| [Claude Code](https://docs.anthropic.com/en/docs/claude-code) | API ??(臾대즺 ?щ젅???ы븿) | `npm i -g @anthropic-ai/claude-code` |
+| [GitHub Copilot CLI](https://docs.github.com/copilot/how-tos/copilot-cli) | ?좊즺 援щ룆 | `npm i -g @githubnext/github-copilot-cli` |
+| [Ollama](https://ollama.ai) | ?꾩쟾 臾대즺 (濡쒖뺄) | installer ?ㅼ슫濡쒕뱶 |
+| [Goose](https://block.github.io/goose) | 臾대즺 (Ollama ?곕룞) | installer ?ㅼ슫濡쒕뱶 |
 
-> You can install AMBER first and connect an AI tool later.
+> AI ?꾧뎄 ?놁씠 癒쇱? ?ㅼ튂?대룄 ?⑸땲?? ?섏쨷??異붽??섍퀬 ?ㅻ쾭?덉씠 ?ㅼ젙?먯꽌 蹂寃쏀븷 ???덉뒿?덈떎.
 
-### Install
+### ?ㅼ튂
 
 ```powershell
 git clone https://github.com/YOUR_USERNAME/amber-mcp.git
@@ -82,25 +85,25 @@ cd amber-mcp
 powershell -ExecutionPolicy Bypass -File ./INSTALL.ps1
 ```
 
-The installer will guide you through:
-1. **DB path** — where memories and knowledge are stored (default: `D:\amber_data\`)
-2. **Working directory** — directory the terminal opens to when AMBER starts
-3. **Default AI tool** — which tool to use with the `amber` shortcut command
-4. **Auto-start** — register AMBER overlay to launch on Windows startup
-5. **Identity name** — a name for your AI's persistent identity
+?ㅼ튂 ?ㅽ겕由쏀듃媛 ?쒖꽌?濡??덈궡?⑸땲??
+1. **DB 寃쎈줈** ??湲곗뼲怨?吏?앹씠 ??λ맆 ?대뜑 (湲곕낯媛? `D:\amber_data\`)
+2. **?묒뾽 ?붾젆?좊━** ??AMBER ?ㅽ뻾 ???곕??먯씠 ?먮룞?쇰줈 ?대룞??寃쎈줈
+3. **湲곕낯 AI ?꾧뎄** ??`amber` ?⑥텞 紐낅졊???곌껐???꾧뎄 ?좏깮
+4. **?먮룞 ?ㅽ뻾** ??Windows ?쒖옉 ???ㅻ쾭?덉씠 ?먮룞 耳쒓린 ?щ?
+5. **?뺤껜???대쫫** ??AI??吏???뺤껜?깆뿉 遺숈씪 ?대쫫
 
-### Run
+### ?ㅽ뻾
 
-**Desktop Overlay (recommended for most users):**
+**?곗뒪?ы깙 ?ㅻ쾭?덉씠 (?쇰컲 ?ъ슜??異붿쿇):**
 ```powershell
 engram-overlay
 ```
-A chat window appears on the right side of your screen. Toggle with `Alt+F12`.  
-All connected AI tools automatically share memory while the overlay is running.
+?붾㈃ ?곗륫??梨꾪똿 李쎌씠 ?④퀬, `Alt+F12`濡??좉??⑸땲??  
+?ㅻ쾭?덉씠媛 耳쒖졇 ?덈뒗 ?숈븞 ?곌껐??紐⑤뱺 AI ?꾧뎄媛 媛숈? 湲곗뼲???묎렐?⑸땲??
 
-**Terminal CLI:**
+**?곕???CLI:**
 ```powershell
-engram               # uses your configured default AI tool
+engram               # ?ㅼ젙??湲곕낯 AI ?꾧뎄濡??ㅽ뻾
 engram-gemini        # Gemini CLI
 engram-claude        # Claude Code
 engram-copilot       # GitHub Copilot CLI
@@ -108,90 +111,91 @@ engram-goose         # Goose
 ```
 
 ```powershell
-engram -p "your message"   # start with a specific prompt
-engram --continue          # resume last conversation
+engram -p "吏덈Ц ?댁슜"   # ?뱀젙 硫붿떆吏濡?諛붾줈 ?쒖옉
+engram --continue       # ?댁쟾 ????댁뼱??
 ```
 
 ---
 
-## How It Works
+## ?숈옉 ?먮━
 
 ```
-┌─────────────────────────────────────────────────┐
-│                  AMBER Runtime                  │
-│                                                 │
-│  ┌──────────┐   MCP Server (port 17385)         │
-│  │ Identity │◄──────────────────────────────┐  │
-│  │ Memory   │                               │  │
-│  │ KG/Wiki  │   STM Broker (port 17384)     │  │
-│  └──────────┘◄──────────────────────────┐  │  │
-│                                         │  │  │
-└─────────────────────────────────────────┼──┼──┘
-                                          │  │
-          ┌───────────┬──────────┬────────┘  │
-          │           │          │            │
-     VS Code     Claude Code  Gemini CLI  Overlay
+?뚢???????????????????????????????????????????????????
+??                 AMBER Runtime                  ??
+??                                                ??
+?? ?뚢????????????  MCP ?쒕쾭 (port 17385)            ??
+?? ???뺤껜??  ?귘뾼????????????????????????????????  ??
+?? ??湲곗뼲     ??                              ??  ??
+?? ??KG/Wiki  ??  STM 釉뚮줈而?(port 17384)     ??  ??
+?? ?붴???????????섃뾼???????????????????????????? ??  ??
+??                                        ?? ??  ??
+?붴??????????????????????????????????????????쇄???쇄?????
+                                          ?? ??
+          ?뚢????????????р???????????р?????????? ??
+          ??          ??         ??           ??
+     VS Code     Claude Code  Gemini CLI  ?ㅻ쾭?덉씠
      Copilot        MCP          MCP       (GUI)
 ```
 
-- **MCP Server** — exposes 46 tools over SSE. Any MCP-compatible client connects automatically.
-- **STM Broker** — lightweight HTTP bridge for the desktop overlay
-- **SQLite WAL** — stores episodic memories, identity, directives, and curiosities
-- **KuzuDB** — semantic graph layer with `paraphrase-multilingual-MiniLM-L12-v2` embeddings
-- **kg_watcher** — file watcher daemon that syncs your Obsidian vault to the KG in real time
+- **MCP ?쒕쾭** ??SSE濡?46媛??꾧뎄 ?쒓났. MCP ?명솚 ?대씪?댁뼵?멸? ?먮룞 ?곌껐?⑸땲??
+- **STM 釉뚮줈而?* ???곗뒪?ы깙 ?ㅻ쾭?덉씠??寃쎈웾 HTTP 釉뚮━吏
+- **SQLite WAL** ???먰뵾?뚮뱶 湲곗뼲, ?뺤껜?? 吏?쒕Ц, ?멸린?ъ쓣 ???
+- **KuzuDB** ??`paraphrase-multilingual-MiniLM-L12-v2` ?꾨쿋??湲곕컲 ?쒕㎤??洹몃옒??
+- **kg_watcher** ??Obsidian vault 蹂寃쎌쓣 媛먯???KG瑜??ㅼ떆媛??숆린??
 
 ---
 
-## Knowledge Graph Dashboard
+## 吏??洹몃옒????쒕낫??
 
-Visually explore memories, wiki nodes, and semantic relationships in your browser.
+湲곗뼲, ?꾪궎 ?몃뱶, ?쒕㎤??愿怨꾨? 釉뚮씪?곗??먯꽌 ?쒓컖?곸쑝濡??먯깋?⑸땲??
 
 ![dashboard](resource/asset/dashboard.png)
 
-Access at **http://localhost:8501** while the overlay is running.
+?ㅻ쾭?덉씠 ?ㅽ뻾 以?**http://localhost:8501** 濡??묒냽?⑸땲??
 
-| Page | Contents |
-|------|----------|
-| 📊 Overview | Identity summary, recent memories, active directives |
-| 🕸️ KG Graph | Interactive knowledge graph with semantic edge overlay |
-| 📝 Wiki Nodes | Wiki node list + full text + connection graph |
-| 💭 Memories | Full episodic memory browser |
-| 📋 Directives | Active operational directives |
-| 🌐 Semantic | Natural language semantic search |
+| ?섏씠吏 | ?댁슜 |
+|--------|------|
+| ?뱤 Overview | ?뺤껜???붿빟, 理쒓렐 湲곗뼲, ?쒖꽦 吏?쒕Ц |
+| ?빖截?KG Graph | ?명꽣?숉떚釉?吏??洹몃옒??+ ?쒕㎤???ｌ? ?좉? |
+| ?뱷 Wiki Nodes | ?꾪궎 ?몃뱶 紐⑸줉 + ?먮Ц + ?곌껐 愿怨?|
+| ?뮡 Memories | ?먰뵾?뚮뱶 湲곗뼲 ?꾨Ц 議고쉶 |
+| ?뱥 Directives | ?댁쁺 吏?쒕Ц 紐⑸줉 |
+| ?뙋 Semantic | ?먯뿰???쒕㎤??寃??|
 
-> First run requires: `pip install streamlit pandas pyvis`
-
----
-
-## Obsidian Integration
-
-AMBER's knowledge graph syncs bidirectionally with an **Obsidian vault**. Write notes → AI reads them. AI writes notes → read them in Obsidian.
-
-### Setup
-
-1. Install [Obsidian](https://obsidian.md/download)
-2. Open vault → point to the `docs/` subfolder inside your AMBER data path  
-   (e.g. `D:\amber_data\docs\`)
-3. The `kg_watcher` daemon auto-syncs changes while the overlay runs  
-   Manual sync: `engram-sync-kg`
-
-### Why it works well
-
-| Feature | Benefit |
-|---------|---------|
-| Plain `.md` files | No conversion — AMBER reads them directly |
-| `[[wiki links]]` | Automatically mapped to KG edges |
-| Graph view | Visualize the same connections AMBER sees |
-| Human + AI edits | You and the AI write to the same knowledge base |
-
-**Recommended plugins:** Dataview · Templater · Graph Analysis
+> 理쒖큹 ?ㅽ뻾 ??`pip install streamlit pandas pyvis` ?꾩슂
 
 ---
 
-## Discord Integration (optional)
+## Obsidian ?곕룞
 
-1. Add `DISCORD_BOT_TOKEN` to `~/.engram/.env`
-2. Configure in `~/.engram/overlay.user.yaml`:
+AMBER??吏??洹몃옒?꾨뒗 **Obsidian vault**? ?묐갑?μ쑝濡??숆린?붾맗?덈떎.  
+?명듃瑜??곕㈃ AI媛 ?쎄퀬, AI媛 ???명듃瑜?Obsidian?먯꽌 諛붾줈 ?????덉뒿?덈떎.
+
+### ?ㅼ젙
+
+1. [Obsidian](https://obsidian.md/download) ?ㅼ튂
+2. Vault ?닿린 ??AMBER ?곗씠??寃쎈줈 ?섏쐞??`docs/` ?대뜑瑜?vault濡?吏?? 
+   (?? `D:\amber_data\docs\`)
+3. `kg_watcher` ?곕が???ㅻ쾭?덉씠 ?ㅽ뻾 以?蹂寃??ы빆???먮룞 ?숆린?? 
+   ?섎룞 ?숆린?? `engram-sync-kg`
+
+### ???댁슱由щ뒗 ?댁쑀
+
+| 湲곕뒫 | ?④낵 |
+|------|------|
+| ?쒖닔 `.md` ?뚯씪 | 蹂???놁씠 AMBER媛 吏곸젒 ?쎌쓬 |
+| `[[?꾪궎 留곹겕]]` | KG ?ｌ?濡??먮룞 留ㅽ븨 |
+| 洹몃옒??酉?| AMBER媛 蹂대뒗 ?곌껐 愿怨꾨? ?щ엺???쒓컖??|
+| ?щ엺 + AI 怨듬룞 ?몄쭛 | 媛숈? 吏??踰좎씠?ㅼ뿉???④퍡 ? |
+
+**異붿쿇 ?뚮윭洹몄씤:** Dataview 쨌 Templater 쨌 Graph Analysis
+
+---
+
+## Discord ?곕룞 (?좏깮)
+
+1. `~/.engram/.env` ??Discord 遊??좏겙(`DISCORD_BOT_TOKEN`) 異붽?
+2. `~/.engram/overlay.user.yaml` ?먯꽌 ?쒕쾭/梨꾨꼸/?ъ슜??ID ?ㅼ젙:
 
 ```yaml
 discord:
@@ -201,64 +205,66 @@ discord:
     - "YOUR_USER_ID"
 ```
 
-3. Start the overlay — the Discord bot activates automatically.
+3. ?ㅻ쾭?덉씠 ?ㅽ뻾 ??Discord 遊뉗씠 ?먮룞 ?쒖꽦?붾맗?덈떎.
 
 ---
 
-## MCP Client Setup
+## MCP ?대씪?댁뼵???곕룞
 
-The installer auto-configures all detected AI tools. **The overlay must be running** for clients to connect.
+?ㅼ튂 ?ㅽ겕由쏀듃媛 媛먯???紐⑤뱺 AI ?꾧뎄??AMBER ?곌껐???먮룞 ?ㅼ젙?⑸땲??  
+**?ㅻ쾭?덉씠媛 癒쇱? ?ㅽ뻾 以묒씠?댁빞** 媛??대씪?댁뼵?멸? AMBER???묎렐?????덉뒿?덈떎.
 
 ```
-Overlay running
-  ├── VS Code Copilot Chat  → auto-connected
-  ├── Claude Code           → auto-connected
-  ├── Gemini CLI            → auto-connected
-  └── Goose                 → auto-connected
+?ㅻ쾭?덉씠 ?ㅽ뻾 以?
+  ?쒋?? VS Code Copilot Chat  ???먮룞 ?곌껐
+  ?쒋?? Claude Code           ???먮룞 ?곌껐
+  ?쒋?? Gemini CLI            ???먮룞 ?곌껐
+  ?붴?? Goose                 ???먮룞 ?곌껐
 ```
 
-If a client can't connect:
-- Verify the overlay is running (log: `~/.engram/mcp-http.log`)
-- VS Code: reload the window and check that the AMBER server appears in the MCP list
+?곌껐????????
+- ?ㅻ쾭?덉씠 ?ㅽ뻾 ?щ? ?뺤씤 (濡쒓렇: `~/.engram/mcp-http.log`)
+- VS Code: Reload Window ??MCP 紐⑸줉??AMBER ?쒕쾭媛 蹂댁씠?붿? ?뺤씤
 
-### Ollama note
+### Ollama ?ъ슜 ??二쇱쓽
 
-AMBER passes a large context (memories, identity, directives, KG) to the AI.  
-**Minimum recommended:** 14B+ model, 16GB+ VRAM.  
-Smaller models may ignore instructions or skip memory loading. If your hardware is limited, use Claude API, Copilot, or Gemini CLI instead.
+AMBER??湲곗뼲쨌?뺤껜?굿룹???????됱쓽 而⑦뀓?ㅽ듃瑜?AI???꾨떖?⑸땲??  
+**沅뚯옣 理쒖냼 ?ъ뼇: 14B ?댁긽 紐⑤뜽, VRAM 16GB ?댁긽**
 
----
-
-## What Gets Installed
-
-| Item | Details |
-|------|---------|
-| CLI shortcuts | `engram`, `engram-copilot`, `engram-gemini`, `engram-claude`, `engram-goose`, `engram-overlay` |
-| AI tool configs | MCP connection auto-configured for all detected tools |
-| User config | `~/.engram/` — all settings live here |
-| Data directory | User-specified path (default: `D:\amber_data\`) |
-| Startup entry | Optional overlay auto-start on Windows login |
+?ъ뼇??遺議깊븯硫?Claude API / Copilot / Gemini CLI ?ъ슜??沅뚯옣?⑸땲??
 
 ---
 
-## Uninstall
+## ?ㅼ튂 ???앹꽦?섎뒗 ??ぉ
+
+| ??ぉ | ?댁슜 |
+|------|------|
+| CLI ?⑥텞 紐낅졊 | `engram`, `engram-copilot`, `engram-gemini`, `engram-claude`, `engram-goose`, `engram-overlay` |
+| AI ?꾧뎄 ?곕룞 | 媛먯???紐⑤뱺 ?꾧뎄??MCP ?곌껐 ?먮룞 ?ㅼ젙 |
+| ?ъ슜???ㅼ젙 | `~/.engram/` ?대뜑?????|
+| ?곗씠???붾젆?좊━ | ?ㅼ튂 ??吏?뺥븳 寃쎈줈 (湲곕낯媛? `D:\amber_data\`) |
+| ?쒖옉?꾨줈洹몃옩 | Windows 濡쒓렇?????ㅻ쾭?덉씠 ?먮룞 ?ㅽ뻾 (?좏깮) |
+
+---
+
+## ?쒓굅
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\INSTALL.ps1 -Uninstall
 ```
 
-> Memory data and AI tool configs are **not** deleted automatically.
+> 湲곗뼲 ?곗씠?곗? AI ?꾧뎄 ?ㅼ젙? ?먮룞?쇰줈 ??젣?섏? ?딆뒿?덈떎.
 
 ---
 
-## Documentation
+## 臾몄꽌
 
-- [Architecture overview](docs/architecture.md)
-- [Memory tiering design](docs/memory-tiering.md)
-- [Memory ontology roadmap](docs/memory-ontology-roadmap.md)
+- [?꾪궎?띿쿂 媛쒖슂](docs/architecture.md)
+- [硫붾え由?怨꾩링 ?ㅺ퀎](docs/memory-tiering.md)
+- [硫붾え由??⑦넧濡쒖? 濡쒕뱶留?(docs/memory-ontology-roadmap.md)
 
 ---
 
-## License
+## ?쇱씠?좎뒪
 
-MIT © 2026
+MIT 짤 2026
