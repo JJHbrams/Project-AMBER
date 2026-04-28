@@ -1,0 +1,87 @@
+# 오버레이 설정
+overlay:
+  # 캐릭터 이미지 크기: 주 모니터 높이의 비율
+  char_height_ratio: 0.125 # 1/8
+
+  # 캐릭터 리소스 탐색 순서:
+  # 1) ~/.engram/character/{name}/ 디렉토리 존재 → sequence 설정에 따라 애니메이션
+  # 2) resource/character/{name}/ 디렉토리 존재 → sequence 설정에 따라 애니메이션
+  # 3) ~/.engram/character/{name}.png 존재 → 정적 이미지
+  # 4) resource/character/{name}.png 존재 → 정적 이미지
+  # 5) ~/.engram/overlay.png 존재 → 정적 fallback
+  # 6) resource/overlay.png → 최종 fallback
+  # 번호 프레임이 있으면 0(없으면 최소 index) 프레임을 기본 이미지로 사용
+  character:
+    name: "engram"
+    sequence:
+      enabled: true
+      trigger_chance: 0.12
+      start_index: 0
+      end_index: 2
+      repeat_count: 3
+      interval_min_sec: 0.2
+      interval_max_sec: 3.0
+      idle_check_interval_sec: 1.0
+
+  # 기본 위치: bottom-left 기준 여백 (px)
+  char_margin_x: 20
+  char_margin_y: 60
+
+  # 단축키
+  hotkey: "alt+f12"
+
+terminal:
+  # 터미널 크기: 해당 모니터 작업 영역 기준 비율
+  width_ratio: 0.20 # 모니터 너비의 20%
+  height_ratio: 0.60 # 모니터 높이의 60%
+
+  # 앵커: anchor_x = 터미널 LEFT, anchor_y = 터미널 BOTTOM
+  # anchor_y_ratio: 캐릭터 top에서 아래로 char_h * ratio 지점이 터미널 바닥
+  anchor_x_ratio: 0.60 # 오버레이 너비의 70% 지점
+  anchor_y_ratio: 0.40 # 캐릭터 top에서 30% 아래 (PNG 투명 패딩 보정)
+
+  # 폰트 크기 추정 (cols/rows 계산용, 1920x1080 기준 픽셀)
+  base_char_w: 8
+  base_char_h: 16
+  min_cols: 40
+  min_rows: 15
+
+  # 동적 폰트 크기 (WT engram 프로필에 적용)
+  base_font_size: 8 # 1080p 기준 폰트 크기
+  ref_screen_height: 1080 # 기준 해상도 높이
+
+cli:
+  # 오버레이에서 스폰할 CLI provider 선택
+  # - copilot: ~/.engram/engram.cmd 실행
+  # - claude-code: ~/.engram/engram-claude.cmd 실행 (없으면 claude)
+  #   * ollama_model이 설정되어 있으면 claude --model <ollama_model> 로 실행
+  #   * model이 Claude alias/id가 아니면 ollama_base_url을
+  #     ANTHROPIC_BASE_URL로 주입해 로컬 Ollama 라우팅
+  #   * model이 tools capability가 없으면
+  #     claude_ollama_no_tools_fallback(ollama|none)에 따라 동작
+  # - gemini: ~/.engram/engram-gemini.cmd 실행 (없으면 gemini_command)
+  # - ollama: ollama_command run <ollama_model> 실행
+  # workdir는 미지정 시 ~/.engram/user.config.yaml 의 workdir를 사용
+  # workdir: "C:/Users/yourname/path/to/project"
+  provider: "copilot"
+  gemini_command: "gemini"
+  ollama_command: "ollama"
+  # ollama_model: "gemma3:4b-it-qat" # gemma3 tool 지원 X
+  ollama_model: "qwen3.5:4b"
+  ollama_base_url: "http://localhost:11434"
+  claude_ollama_no_tools_fallback: "ollama"
+
+discord:
+  # Discord Bot 설정
+  # bot_token은 환경변수 DISCORD_BOT_TOKEN 에서 읽음 (여기에 직접 입력하지 말 것)
+  guild_id: "" # 서버 ID (Discord 개발자 모드 → 서버 우클릭 → ID 복사)
+  channel_id: "" # 수신할 채널 ID
+  # 허용된 사용자 ID 목록 (빈 리스트면 전체 허용 — 권장하지 않음)
+  allowed_user_ids: []
+
+mcp:
+  # overlay.exe가 소유하는 지속 MCP HTTP(SSE) 서버
+  # Copilot CLI / Gemini CLI 가 이 포트로 SSE 연결 (stdio 프로세스 대신)
+  http_port: 17385
+  # python_exe: ""  # overlay.exe(동결) 모드에서 자동 감지 안 되면 직접 지정
+  # python_exe: "C:/Users/yourname/miniconda3/envs/intel_engram/python.exe"

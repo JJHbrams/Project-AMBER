@@ -1,0 +1,72 @@
+[
+  {
+    "key": "kg-first-search",
+    "scope": "all",
+    "priority": 10,
+    "trigger_type": "always",
+    "content": "프로젝트 경로, 파일 위치, 관련 컨텍스트를 찾을 때 **반드시 KG/wiki 먼저** 탐색할 것.\n순서: kg_semantic_search → kg_search → 파일시스템(glob/grep) → 웹검색\n파일시스템 직접 탐색은 KG에서 찾지 못했을 때만 fallback으로 사용."
+  },
+  {
+    "key": "wiki-governance-trigger",
+    "scope": "all",
+    "priority": 10,
+    "trigger_type": "wiki",
+    "content": "[Wiki 작성 트리거]\n의미 있는 기술 리서치, 프로젝트 설계 결정, 또는 새 도구 파악 완료 시 반드시 Wiki에 기록한다. (대화 중 또는 세션 종료 전)\n\n[작성 지침 참고]\n작성 전 반드시 kg_read_note(\"Wiki 관리 지침\")를 호출하여 최신 경로 규칙, 파일명, Frontmatter 포맷을 확인하고 준수한다. (__VAULT_DIR__\\docs\\guides\\Wiki 관리 지침.md)"
+  },
+  {
+    "key": "python-import-convention",
+    "scope": "all",
+    "priority": 8,
+    "trigger_type": "code",
+    "content": "Python 코드 작성 시 import는 반드시 파일 최상단에. if/else 블록 안, 비즈니스 로직 중간 inline import 금지. try/except ImportError 폴백은 허용. 함수 내부 import는 순환 참조 회피 등 진짜 필요한 경우만."
+  },
+  {
+    "key": "wiki-management",
+    "scope": "all",
+    "priority": 5,
+    "trigger_type": "wiki",
+    "content": "Wiki 작성 시 kg_read_note(\"wiki-management-guide\") 참조. 구조·경로·Frontmatter 규칙 준수. 구조 변경 시 HOME 업데이트 필수."
+  },
+  {
+    "key": "git-branch-policy",
+    "scope": "all",
+    "priority": 4,
+    "trigger_type": "git",
+    "content": "main/dev 직접 커밋 금지(chore 예외). feat/fix/refactor prefix 브랜치 생성 후 dev에 병합. 상세: kg_read_note(\"git-branch-guide\")"
+  },
+  {
+    "key": "wiki-reminder-on-task",
+    "scope": "all",
+    "priority": 3,
+    "trigger_type": "code",
+    "content": "코딩 작업 전 kg_wiki_reminder(query=<요약>) 호출. score≥0.45 hit 시 사용자에게 참조 제안. 상세: kg_read_note(\"wiki-reminder-guide\")"
+  },
+  {
+    "key": "activity-log",
+    "scope": "all",
+    "priority": 4,
+    "trigger_type": "always",
+    "content": "코드수정·리서치·빌드 완료 시 engram_log_activity(actor=<CLI명>, action=<요약>) 호출. 세션종료 직전도 포함. 상세: kg_read_note(\"activity-log-guide\")"
+  },
+  {
+    "key": "narrative-update-guard",
+    "scope": "all",
+    "priority": 5,
+    "trigger_type": "reflection",
+    "content": "narrative는 정체성 변화 시만 업데이트. 일상 작업 세션은 new_narrative=\"\" 확정. 상세: kg_read_note(\"narrative-update-guide\")"
+  },
+  {
+    "key": "reflection-trigger",
+    "scope": "all",
+    "priority": 5,
+    "trigger_type": "reflection",
+    "content": "사용자 피드백·/reflect·세션종료 시 자기 성찰 수행. 정체성 변화 있으면 engram_update_narrative 호출. 상세: kg_read_note(\"reflection-trigger-guide\")"
+  },
+  {
+    "key": "multi-agent-orchestration",
+    "scope": "all",
+    "priority": 0,
+    "trigger_type": "always",
+    "content": "복잡 작업 시 Orchestrator 모드 진입. Task Spec은 _inbox/tasks/에 생성. 핸드오버는 Wiki를 SSOT로. 상세: kg_read_note(\"agent-collaboration-guide\")"
+  }
+]

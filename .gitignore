@@ -1,0 +1,48 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# PyInstaller
+dist/
+*.spec.bak
+
+# User config (contains personal paths/tokens)
+config/overlay.user.yaml
+*.user.yaml
+.env
+*.env
+
+# DB & runtime data
+*.db
+*.db-wal
+*.db-shm
+semantic_graph/
+
+# Logs
+logs/
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Temp
+_copy_amber.ps1
+NUL

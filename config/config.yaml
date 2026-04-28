@@ -1,0 +1,52 @@
+# Runtime settings for memory tiers and Copilot invocation.
+# You can override these values in ~/.engram/user.config.yaml.
+
+db:
+  root_dir: "D:/intel_engram"
+
+memory:
+  scope:
+    default_main: "default:main"
+    default_fallback: "default:main"
+    default_global: "global:main"
+    project_prefix: "project:"
+    discord_prefix: "discord:"
+
+  short_term:
+    limit_turns: 8
+    within_minutes: 120
+    max_turn_chars: 80
+
+  working:
+    ttl_hours: 48
+    max_compact_length: 900
+    prompt_summary_max_chars: 240
+    store_summary_max_chars: 1200
+    store_open_intents_max_chars: 600
+    user_clip_chars: 120
+    assistant_clip_chars: 160
+
+  long_term:
+    search_limit: 2
+    item_max_chars: 100
+
+  wiki_reminder:
+    # 세션 시작 시 user_query와 유사한 wiki 노트를 자동 리마인드
+    enabled: true
+    top_k: 3
+    threshold: 0.45 # long_term KG snippet(0.35)보다 높게 — 고신뢰도 hits만
+    item_max_chars: 120
+    # project 타입은 _kg_context_snippet에서 이미 처리 — 중복 제외
+    exclude_types:
+      - project
+
+sync:
+  # post-session KG sync 워치독 타임아웃 (초). 이 시간 초과 시 강제 취소.
+  # 오케스트레이터만 trigger_sync=True로 호출해야 한다; subagent는 trigger_sync=False 전달.
+  watchdog_timeout_secs: 300
+  # 마지막 sync 완료 후 재실행 최소 간격 (초). 짧은 시간 내 중복 실행 방지.
+  cooldown_secs: 120
+
+copilot:
+  model: "claude-sonnet-4.6"
+  allow_all_tools: true

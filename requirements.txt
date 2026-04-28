@@ -1,0 +1,30 @@
+# Project Intel Continuum
+# Python 3.11 (conda: intel_continuum)
+
+# 필수 패키지
+mcp>=1.0.0                      # MCP 서버 (Claude Code 연동)
+# anthropic SDK 불필요 — claude CLI를 subprocess로 호출
+
+# 표준 라이브러리 (별도 설치 불필요)
+# sqlite3, json, re, os, sys, pathlib
+
+# 빌드 도구
+pyinstaller>=6.0.0              # exe 빌드 (overlay.debug.bat)
+
+# 윈도우 오버레이
+pillow>=10.0.0                  # 이미지 처리 (PNG 투명도)
+pystray>=0.19.0                 # 시스템 트레이 아이콘
+keyboard>=0.13.5                # 전역 단축키
+pyyaml>=6.0                     # 설정 파일 파싱
+pywin32>=306                    # 멀티모니터 좌표 처리
+discord.py>=2.3.0               # Discord 봇 연동
+
+# 선택적 (로컬 임베딩 검색 확장 시):
+sentence-transformers>=2.2.0
+kuzu>=0.6.0                     # KuzuDB — KG semantic graph (kg_semantic_search 필수)
+# numpy>=1.24
+
+# 개발 도구 (대시보드 — scripts/dev/engram_dashboard.py)
+streamlit>=1.30.0
+pandas>=2.0.0
+pyvis>=0.3.2                    # KG 그래프 시각화
