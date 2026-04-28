@@ -136,8 +136,23 @@ if (-not (Test-Path $specFile)) {
 # 10. Overlay launcher (engram-overlay command)
 Write-Step "Overlay launcher..."
 $OverlayCmdPath = Join-Path $ShimDir "engram-overlay.cmd"
-$overlayCmdContent = "@echo off`r`nstart `"`" `"$DistExe`""
-[System.IO.File]::WriteAllText($OverlayCmdPath, $overlayCmdContent, [System.Text.ASCIIEncoding]::new())
+$overlayCmdLines = @(
+    "@echo off",
+    "setlocal",
+    "set `"DIST_EXE=`"",
+    "if not `"%ENGRAM_PROJECT_ROOT%`"==`"`" if exist `"%ENGRAM_PROJECT_ROOT%\dist\engram-overlay\engram-overlay.exe`" set `"DIST_EXE=%ENGRAM_PROJECT_ROOT%\dist\engram-overlay\engram-overlay.exe`"",
+    "if `"%DIST_EXE%`"==`"`" if not `"%ENGRAM_WORKDIR%`"==`"`" if exist `"%ENGRAM_WORKDIR%\dist\engram-overlay\engram-overlay.exe`" set `"DIST_EXE=%ENGRAM_WORKDIR%\dist\engram-overlay\engram-overlay.exe`"",
+    "if `"%DIST_EXE%`"==`"`" if exist `"$DistExe`" set `"DIST_EXE=$DistExe`"",
+    "if `"%DIST_EXE%`"==`"`" (",
+    "  echo [engram-overlay] exe not found.",
+    "  echo   looked for: %%ENGRAM_PROJECT_ROOT%%\\dist\\engram-overlay\\engram-overlay.exe",
+    "  echo   fallback:   %%ENGRAM_WORKDIR%%\\dist\\engram-overlay\\engram-overlay.exe",
+    "  echo   installed:  $DistExe",
+    "  exit /b 1",
+    ")",
+    "start `"`" `"%DIST_EXE%`""
+)
+[System.IO.File]::WriteAllLines($OverlayCmdPath, $overlayCmdLines, [System.Text.ASCIIEncoding]::new())
 Write-Ok $OverlayCmdPath
 
 # 11. User config (~/.engram/overlay.user.yaml)

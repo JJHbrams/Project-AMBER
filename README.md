@@ -79,10 +79,18 @@ AMBER는 **로컬에서 동작하는 AI 지속 메모리 런타임**입니다.
 
 ### 설치
 
+아래 명령을 **한 줄씩** 복사해서 순서대로 실행하세요.
+
 ```powershell
 git clone https://github.com/JJHbrams/Project-AMBER.git
+```
+
+```powershell
 cd Project-AMBER
-powershell -ExecutionPolicy Bypass -File ./INSTALL.ps1
+```
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\INSTALL.ps1
 ```
 
 설치 스크립트가 순서대로 안내합니다:
@@ -95,11 +103,21 @@ powershell -ExecutionPolicy Bypass -File ./INSTALL.ps1
 ### 실행
 
 **데스크탑 오버레이 (일반 사용자 추천):**
-```powershell
-engram-overlay
-```
-화면 우측에 채팅 창이 뜨고, `Alt+F12`로 토글됩니다.  
+
+1. Windows 시작 메뉴를 열고 `engram-overlay`를 검색해 실행합니다.
+2. 실행 후 작업표시줄 트레이에 ENGRAM 아이콘이 나타납니다.
+3. 화면 우측에 채팅 창이 뜨며, `Alt+F12`로 열기/닫기 토글이 됩니다.
+
+
 오버레이가 켜져 있는 동안 연결된 모든 AI 도구가 같은 기억에 접근합니다.
+
+**오버레이/트레이 메뉴 `설정`:**
+
+- 트레이 아이콘 우클릭 → `설정`
+- `오버레이` 탭: 캐릭터(파일/폴더), 캐릭터 높이 비율, 작업 디렉토리
+- `CLI 공급자` 탭: 기본 공급자(`copilot`, `gemini`, `claude-code`, `ollama`), Ollama/Gemini 명령 설정
+- `터미널` 탭: 폰트 크기, 터미널 너비/높이 비율
+- 저장 시 사용자 변경분이 `~/.engram/overlay.user.yaml`에 저장됩니다.
 
 **터미널 CLI:**
 ```powershell
@@ -114,6 +132,14 @@ engram-goose         # Goose
 engram -p "질문 내용"   # 특정 메시지로 바로 시작
 engram --continue       # 이전 대화 이어서
 ```
+
+**CLI 채팅창에서 바로 요청 가능한 동작 예시:**
+
+- 작업 중간 저장: `현재 세션 내용 정리해서 메모리에 기록해줘`
+- 자료 조사 + 위키 기록: `xxx에 대해 조사해서 위키에 기록해줘`
+- 과거 진행 회상: `우리 xxx 어떻게 했었지?`
+
+위와 같은 자연어 요청을 입력하면 메모리 저장, 조사, 위키 기록, 과거 회상 흐름이 내부 도구 호출로 연결됩니다.
 
 ---
 

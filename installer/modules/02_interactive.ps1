@@ -36,7 +36,7 @@ $DbInput = Read-Host "  DB 경로 (Enter = 기본값)"
 $DbDir = if ($DbInput.Trim()) { $DbInput.Trim() } else { $DbDefault }
 
 # ── 작업 디렉토리 ─────────────────────────────────────────
-$WdDefault = if ($ExistingWorkDir) { $ExistingWorkDir } else { $ProjectRoot }
+$WdDefault = $ProjectRoot
 Write-Host ""
 Write-Host "  [설정] 작업 디렉토리 — engram 실행 시 자동 이동할 경로" -ForegroundColor White
 Write-Host "         기본값: $WdDefault" -ForegroundColor DarkGray

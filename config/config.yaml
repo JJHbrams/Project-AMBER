@@ -2,7 +2,7 @@
 # You can override these values in ~/.engram/user.config.yaml.
 
 db:
-  root_dir: "D:/intel_engram"
+  root_dir: "D:/AMBER_DB"
 
 memory:
   scope:

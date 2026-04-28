@@ -3,12 +3,21 @@
 #
 
 $DistExe = Join-Path $ProjectRoot "dist\engram-overlay\engram-overlay.exe"
+$OverlayCmdPath = Join-Path $ShimDir "engram-overlay.cmd"
 
 # 12. Start Menu shortcut (Windows Search)
 Write-Step "Start Menu shortcut..."
 $StartMenuDir = [Environment]::GetFolderPath("Programs")
 $StartMenuLink = Join-Path $StartMenuDir "Engram Overlay.lnk"
-if (Test-Path $DistExe) {
+if (Test-Path $OverlayCmdPath) {
+    $shell = New-Object -ComObject WScript.Shell
+    $shortcut = $shell.CreateShortcut($StartMenuLink)
+    $shortcut.TargetPath = $OverlayCmdPath
+    $shortcut.WorkingDirectory = $ShimDir
+    $shortcut.Description = "Engram Overlay"
+    $shortcut.Save()
+    Write-Ok $StartMenuLink
+} elseif (Test-Path $DistExe) {
     $shell = New-Object -ComObject WScript.Shell
     $shortcut = $shell.CreateShortcut($StartMenuLink)
     $shortcut.TargetPath = $DistExe
@@ -16,14 +25,22 @@ if (Test-Path $DistExe) {
     $shortcut.Description = "Engram Overlay"
     $shortcut.Save()
     Write-Ok $StartMenuLink
-} else { Write-Warn "Skipped — exe not found" }
+} else { Write-Warn "Skipped — launcher/exe not found" }
 
 # 13. Startup shortcut (auto-start on boot)
 $StartupDir = [Environment]::GetFolderPath("Startup")
 $StartupLink = Join-Path $StartupDir "engram-overlay.lnk"
 if ($EnableAutoStart) {
     Write-Step "Startup registration (자동시작)..."
-    if (Test-Path $DistExe) {
+    if (Test-Path $OverlayCmdPath) {
+        $shell = New-Object -ComObject WScript.Shell
+        $shortcut = $shell.CreateShortcut($StartupLink)
+        $shortcut.TargetPath = $OverlayCmdPath
+        $shortcut.WorkingDirectory = $ShimDir
+        $shortcut.Description = "Engram Overlay — Auto Start"
+        $shortcut.Save()
+        Write-Ok $StartupLink
+    } elseif (Test-Path $DistExe) {
         $shell = New-Object -ComObject WScript.Shell
         $shortcut = $shell.CreateShortcut($StartupLink)
         $shortcut.TargetPath = $DistExe
@@ -31,7 +48,7 @@ if ($EnableAutoStart) {
         $shortcut.Description = "Engram Overlay — Auto Start"
         $shortcut.Save()
         Write-Ok $StartupLink
-    } else { Write-Warn "Skipped — exe not found" }
+    } else { Write-Warn "Skipped — launcher/exe not found" }
 } else {
     Write-Step "Startup registration (건너뜀 — 사용자 선택)..."
     if (Test-Path $StartupLink) {

@@ -30,6 +30,15 @@ if ($existingWd -ne $WorkDir) {
     Write-Warn "Restart terminal for ENGRAM_WORKDIR to take effect"
 } else { Write-Ok "ENGRAM_WORKDIR already set: $WorkDir" }
 
+# ENGRAM_PROJECT_ROOT
+Write-Step "Persistent environment variable (ENGRAM_PROJECT_ROOT)..."
+$existingProjectRoot = [Environment]::GetEnvironmentVariable("ENGRAM_PROJECT_ROOT", "User")
+if ($existingProjectRoot -ne $ProjectRoot) {
+    [Environment]::SetEnvironmentVariable("ENGRAM_PROJECT_ROOT", $ProjectRoot, "User")
+    Write-Ok "ENGRAM_PROJECT_ROOT=$ProjectRoot (User-level, persistent)"
+    Write-Warn "Restart terminal for ENGRAM_PROJECT_ROOT to take effect"
+} else { Write-Ok "ENGRAM_PROJECT_ROOT already set: $ProjectRoot" }
+
 # 8b. persona.user.yaml 템플릿 생성 (없을 때만)
 Write-Step "User persona config (~/.engram/persona.user.yaml)..."
 $UserPersonaYaml = Join-Path $env:USERPROFILE ".engram\persona.user.yaml"
@@ -88,16 +97,40 @@ print(name.strip())
     $charName = & $PythonExe -c $resolveCharNameScript 2>$null
     $charName = ($charName | Select-Object -Last 1).Trim()
     if ($charName) {
-        $candidates = @(
-            (Join-Path $CharacterDir "$($charName)_00.png"),
-            (Join-Path $CharacterDir "$($charName)_0.png"),
-            (Join-Path $CharacterDir "$($charName).png")
+        $leafName = Split-Path $charName -Leaf
+        $localBaseName = [System.IO.Path]::GetFileNameWithoutExtension($leafName)
+        if (-not $localBaseName) { $localBaseName = $charName }
+
+        $directPathCandidates = @(
+            (Join-Path $CharacterDir "$($localBaseName)_00.png"),
+            (Join-Path $CharacterDir "$($localBaseName)_0.png"),
+            (Join-Path $CharacterDir "$($localBaseName).png"),
+            (Join-Path $CharacterDir $leafName),
+            (Join-Path $ProjectRoot $charName),
+            $charName
         )
-        foreach ($src in $candidates) {
-            if (Test-Path $src) {
+        foreach ($src in $directPathCandidates | Select-Object -Unique) {
+            if ($src -and (Test-Path $src -PathType Leaf)) {
                 Copy-Item $src $OverlayPngPath -Force
                 $syncedChar = $src
                 break
+            }
+        }
+
+        if (-not $syncedChar) {
+            $baseName = [System.IO.Path]::GetFileNameWithoutExtension($leafName)
+            if (-not $baseName) { $baseName = $charName }
+            $namedCandidates = @(
+                (Join-Path $CharacterDir "$($baseName)_00.png"),
+                (Join-Path $CharacterDir "$($baseName)_0.png"),
+                (Join-Path $CharacterDir "$($baseName).png")
+            )
+            foreach ($src in $namedCandidates | Select-Object -Unique) {
+                if (Test-Path $src -PathType Leaf) {
+                    Copy-Item $src $OverlayPngPath -Force
+                    $syncedChar = $src
+                    break
+                }
             }
         }
     }
