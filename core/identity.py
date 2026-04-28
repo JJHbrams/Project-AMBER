@@ -121,6 +121,7 @@ DEFAULT_PERSONA = {
     "traits": [],  # 성격 키워드 (max 5)
     "quirks": [],  # 고유 습관/버릇 (max 3)
     "values": [],  # 중시하는 가치 (max 3)
+    "fewshot": "",  # 말투 예시 대화 (few-shot examples)
     "warmth": 0.5,  # 0.0 차가운 ↔ 1.0 따뜻한
     "formality": 0.5,  # 0.0 반말/캐주얼 ↔ 1.0 격식
     "humor": 0.3,  # 0.0 진지 ↔ 1.0 유머러스
@@ -171,6 +172,8 @@ def render_persona(persona: dict) -> str:
         lines.append(f"values: {', '.join(p['values'])}")
     dims = [f"{d}:{p[d]}" for d in ("warmth", "formality", "humor", "directness")]
     lines.append(" ".join(dims))
+    if p.get("fewshot"):
+        lines.append(f"[examples]\n{p['fewshot']}")
     return "\n".join(lines)
 
 

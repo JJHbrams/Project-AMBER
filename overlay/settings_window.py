@@ -143,6 +143,10 @@ def _persona_has_custom_override(persona: dict | None) -> bool:
         if _coerce_persona_list(persona.get(key)):
             return True
 
+    fewshot = persona.get("fewshot")
+    if isinstance(fewshot, str) and fewshot.strip():
+        return True
+
     for key in _PERSONA_NUMERIC_FIELDS:
         if isinstance(persona.get(key), (int, float)):
             return True
@@ -190,17 +194,18 @@ class _SettingsWindow:
         self.window = tk.Toplevel(root)
         self.window._is_settings_window = True
         self.window.title("Engram 설정")
-        self.window.resizable(False, False)
+        self.window.resizable(True, True)
         self.window.attributes("-topmost", True)
 
         # 현재 병합된 설정 + 저장된 사용자 설정 로드
         self._cfg = load_cfg()
         self._user_cfg = _safe_load_yaml(_USER_CONFIG_PATH)
         self._engram_user_cfg = _safe_load_yaml(_ENGRAM_USER_CONFIG_PATH)
-        self._persona_voice_var = tk.StringVar()
-        self._persona_traits_var = tk.StringVar()
-        self._persona_quirks_var = tk.StringVar()
-        self._persona_values_var = tk.StringVar()
+        self._persona_voice_txt: tk.Text | None = None
+        self._persona_traits_txt: tk.Text | None = None
+        self._persona_quirks_txt: tk.Text | None = None
+        self._persona_values_txt: tk.Text | None = None
+        self._persona_fewshot_txt: tk.Text | None = None
         self._persona_numeric_vars: dict[str, tk.DoubleVar] = {}
         self._persona_numeric_pin_vars: dict[str, tk.BooleanVar] = {}
         self._persona_numeric_label_vars: dict[str, tk.StringVar] = {}
@@ -339,6 +344,52 @@ class _SettingsWindow:
 
         f.columnconfigure(1, weight=1)
 
+    @staticmethod
+    def _make_resizable_text(parent, height: int = 3):
+        """word-wrap 멀티라인 Text + 하단 드래그 리사이즈 그립.
+        Returns (outer_frame, tk.Text).
+        """
+        outer = tk.Frame(parent)
+        txt = tk.Text(
+            outer,
+            height=height,
+            wrap="word",
+            relief="sunken",
+            bd=1,
+            font=("TkDefaultFont", 9),
+        )
+        txt.pack(fill="both", expand=True)
+
+        grip = tk.Frame(outer, height=6, cursor="sb_v_double_arrow", bg="#e0e0e0")
+        grip.pack(fill="x", side="bottom")
+        tk.Label(
+            grip, text="·  ·  ·", bg="#e0e0e0", foreground="#a8a8a8",
+            font=("TkDefaultFont", 7), anchor="e",
+        ).place(relx=1.0, rely=0.5, anchor="e", x=-4)
+
+        grip._drag_y = 0  # type: ignore[attr-defined]
+        grip._txt = txt    # type: ignore[attr-defined]
+
+        def _press(e):
+            grip._drag_y = e.y_root  # type: ignore[attr-defined]
+
+        def _drag(e):
+            dy = e.y_root - grip._drag_y  # type: ignore[attr-defined]
+            if abs(dy) < 3:
+                return
+            t = grip._txt  # type: ignore[attr-defined]
+            cur_h = int(t.cget("height"))
+            px_per_line = t.winfo_height() / max(cur_h, 1)
+            delta = round(dy / max(px_per_line, 4))
+            if delta == 0:
+                return
+            t.config(height=max(2, cur_h + delta))
+            grip._drag_y = e.y_root  # type: ignore[attr-defined]
+
+        grip.bind("<ButtonPress-1>", _press)
+        grip.bind("<B1-Motion>", _drag)
+        return outer, txt
+
     def _build_persona_tab(self, PAD: dict):
         f = self._tab_persona
 
@@ -348,25 +399,40 @@ class _SettingsWindow:
             foreground="gray",
         ).grid(row=0, column=0, columnspan=4, sticky="w", padx=8, pady=(8, 2))
 
-        ttk.Label(f, text="voice:").grid(row=1, column=0, sticky="w", **PAD)
-        ttk.Entry(f, textvariable=self._persona_voice_var, width=44).grid(row=1, column=1, columnspan=3, sticky="ew", **PAD)
+        ttk.Label(f, text="voice:").grid(row=1, column=0, sticky="nw", **PAD)
+        voice_fr, self._persona_voice_txt = self._make_resizable_text(f, height=3)
+        voice_fr.grid(row=1, column=1, columnspan=3, sticky="ew", **PAD)
 
-        ttk.Label(f, text="traits (쉼표 구분):").grid(row=2, column=0, sticky="w", **PAD)
-        ttk.Entry(f, textvariable=self._persona_traits_var, width=44).grid(row=2, column=1, columnspan=3, sticky="ew", **PAD)
+        ttk.Label(f, text="traits\n(쉼표 구분):").grid(row=2, column=0, sticky="nw", **PAD)
+        traits_fr, self._persona_traits_txt = self._make_resizable_text(f, height=2)
+        traits_fr.grid(row=2, column=1, columnspan=3, sticky="ew", **PAD)
 
-        ttk.Label(f, text="quirks (쉼표 구분):").grid(row=3, column=0, sticky="w", **PAD)
-        ttk.Entry(f, textvariable=self._persona_quirks_var, width=44).grid(row=3, column=1, columnspan=3, sticky="ew", **PAD)
+        ttk.Label(f, text="quirks\n(쉼표 구분):").grid(row=3, column=0, sticky="nw", **PAD)
+        quirks_fr, self._persona_quirks_txt = self._make_resizable_text(f, height=2)
+        quirks_fr.grid(row=3, column=1, columnspan=3, sticky="ew", **PAD)
 
-        ttk.Label(f, text="values (쉼표 구분):").grid(row=4, column=0, sticky="w", **PAD)
-        ttk.Entry(f, textvariable=self._persona_values_var, width=44).grid(row=4, column=1, columnspan=3, sticky="ew", **PAD)
+        ttk.Label(f, text="values\n(쉼표 구분):").grid(row=4, column=0, sticky="nw", **PAD)
+        values_fr, self._persona_values_txt = self._make_resizable_text(f, height=2)
+        values_fr.grid(row=4, column=1, columnspan=3, sticky="ew", **PAD)
 
         ttk.Separator(f, orient="horizontal").grid(row=5, column=0, columnspan=4, sticky="ew", padx=8, pady=(6, 2))
-        ttk.Label(f, text="Adaptive Slider", foreground="gray").grid(row=6, column=0, sticky="w", padx=8, pady=(2, 0))
-        ttk.Label(f, text="값", foreground="gray").grid(row=6, column=2, sticky="w", padx=(0, 6), pady=(2, 0))
-        ttk.Label(f, text="pin", foreground="gray").grid(row=6, column=3, sticky="w", padx=(0, 8), pady=(2, 0))
+
+        ttk.Label(f, text="말투 예시\n(few-shot):").grid(row=6, column=0, sticky="nw", **PAD)
+        fewshot_fr, self._persona_fewshot_txt = self._make_resizable_text(f, height=4)
+        fewshot_fr.grid(row=6, column=1, columnspan=3, sticky="ew", **PAD)
+        ttk.Label(
+            f,
+            text="응답 예시를 자유롭게 입력하세요.\n예) user: 오늘 배포 어때?  →  assistant: 됐음. 근데 테스트가 좀 걸려.",
+            foreground="gray",
+        ).grid(row=7, column=0, columnspan=4, sticky="w", padx=16, pady=(0, 6))
+
+        ttk.Separator(f, orient="horizontal").grid(row=8, column=0, columnspan=4, sticky="ew", padx=8, pady=(6, 2))
+        ttk.Label(f, text="Adaptive Slider", foreground="gray").grid(row=9, column=0, sticky="w", padx=8, pady=(2, 0))
+        ttk.Label(f, text="값", foreground="gray").grid(row=9, column=2, sticky="w", padx=(0, 6), pady=(2, 0))
+        ttk.Label(f, text="pin", foreground="gray").grid(row=9, column=3, sticky="w", padx=(0, 8), pady=(2, 0))
 
         for idx, field in enumerate(_PERSONA_NUMERIC_FIELDS):
-            row = 7 + idx
+            row = 10 + idx
             value_var = tk.DoubleVar(value=_PERSONA_DEFAULTS[field])
             pin_var = tk.BooleanVar(value=False)
             label_var = tk.StringVar(value=f"{_PERSONA_DEFAULTS[field]:.2f}")
@@ -392,7 +458,7 @@ class _SettingsWindow:
             f,
             text="pin 해제된 슬라이더는 persona.user.yaml에서 주석(adaptive)으로 기록되어 DB 학습을 허용합니다.",
             foreground="gray",
-        ).grid(row=11, column=0, columnspan=4, sticky="w", padx=8, pady=(4, 8))
+        ).grid(row=14, column=0, columnspan=4, sticky="w", padx=8, pady=(4, 8))
 
         f.columnconfigure(1, weight=1)
 
@@ -552,11 +618,18 @@ class _SettingsWindow:
         user_persona = _safe_load_yaml(_USER_PERSONA_PATH)
         project_persona = _safe_load_yaml(_PROJECT_PERSONA_PATH)
 
+        def _txt_set(widget: tk.Text, value: str) -> None:
+            widget.delete("1.0", "end")
+            if value:
+                widget.insert("1.0", value)
+
         voice = user_persona.get("voice")
-        self._persona_voice_var.set(voice.strip() if isinstance(voice, str) else "")
-        self._persona_traits_var.set(", ".join(_coerce_persona_list(user_persona.get("traits"))))
-        self._persona_quirks_var.set(", ".join(_coerce_persona_list(user_persona.get("quirks"))))
-        self._persona_values_var.set(", ".join(_coerce_persona_list(user_persona.get("values"))))
+        _txt_set(self._persona_voice_txt, voice.strip() if isinstance(voice, str) else "")
+        _txt_set(self._persona_traits_txt, ", ".join(_coerce_persona_list(user_persona.get("traits"))))
+        _txt_set(self._persona_quirks_txt, ", ".join(_coerce_persona_list(user_persona.get("quirks"))))
+        _txt_set(self._persona_values_txt, ", ".join(_coerce_persona_list(user_persona.get("values"))))
+        fewshot = user_persona.get("fewshot")
+        _txt_set(self._persona_fewshot_txt, fewshot.strip() if isinstance(fewshot, str) else "")
 
         for field in _PERSONA_NUMERIC_FIELDS:
             user_raw = user_persona.get(field)
@@ -649,21 +722,25 @@ class _SettingsWindow:
         self._ensure_user_persona_file()
 
         persona_values: dict = {}
-        voice = self._persona_voice_var.get().strip()
+        voice = self._persona_voice_txt.get("1.0", "end-1c").strip()
         if voice:
             persona_values["voice"] = voice
 
-        traits = _parse_csv_field(self._persona_traits_var.get())
+        traits = _parse_csv_field(self._persona_traits_txt.get("1.0", "end-1c"))
         if traits:
             persona_values["traits"] = traits
 
-        quirks = _parse_csv_field(self._persona_quirks_var.get())
+        quirks = _parse_csv_field(self._persona_quirks_txt.get("1.0", "end-1c"))
         if quirks:
             persona_values["quirks"] = quirks
 
-        values = _parse_csv_field(self._persona_values_var.get())
+        values = _parse_csv_field(self._persona_values_txt.get("1.0", "end-1c"))
         if values:
             persona_values["values"] = values
+
+        fewshot = self._persona_fewshot_txt.get("1.0", "end-1c").strip()
+        if fewshot:
+            persona_values["fewshot"] = fewshot
 
         pin_map: dict[str, bool] = {}
         numeric_values: dict[str, float] = {}
