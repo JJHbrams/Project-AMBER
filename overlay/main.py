@@ -348,7 +348,7 @@ class OverlayApp:
             log.warning("[mcp_http] Python 또는 mcp_server.py를 찾을 수 없어 MCP HTTP 서버 시작 스킵")
             return None
         try:
-            from core.runtime_config import get_db_root_dir
+            from core.config.runtime_config import get_db_root_dir
 
             env = os.environ.copy()
             env["ENGRAM_DB_DIR"] = get_db_root_dir()
@@ -566,7 +566,7 @@ class OverlayApp:
         keyboard.unhook_all()
         # STM → LTM 승격 (최대 15초 대기)
         try:
-            from core.stm_promoter import maybe_promote_async
+            from core.graph.semantic import maybe_promote_async
 
             t = maybe_promote_async(scope_key="overlay")
             t.join(timeout=15)
@@ -614,3 +614,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+

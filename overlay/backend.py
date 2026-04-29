@@ -7,19 +7,19 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Optional
 
 if TYPE_CHECKING:
-    from core.memory_bus import MemorySession
+    from core.memory.bus import MemorySession
 
 ENGRAM_CMD = Path.home() / ".engram" / "engram-copilot.cmd"
 
 logger = logging.getLogger(__name__)
 
 try:
-    from core.memory_bus import MemorySession, memory_bus as _memory_bus
+    from core.memory.bus import MemorySession, memory_bus as _memory_bus
     _STM_AVAILABLE = True
 except Exception as _import_err:
     _memory_bus = None  # type: ignore[assignment]
     _STM_AVAILABLE = False
-    logger.warning("STM 비활성: core.memory_bus import 실패 (%s)", _import_err)
+    logger.warning("STM 비활성: core.memory import 실패 (%s)", _import_err)
 
 
 class EngramBackend:
@@ -75,7 +75,9 @@ class EngramBackend:
         """세션 종료 시 STM → LTM 승격 트리거 (Discord/programmatic 세션용)."""
         if self._session is not None:
             try:
-                from core.stm_promoter import maybe_promote
+                from core.graph.semantic import maybe_promote
                 maybe_promote(scope_key=self._session.scope_key, session_id=self._session.session_id)
             except Exception as e:
                 logger.debug("STM promote on close 실패: %s", e)
+
+

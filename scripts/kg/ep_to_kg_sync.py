@@ -18,7 +18,7 @@ from pathlib import Path
 # 프로젝트 루트를 sys.path에 추가
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from core.semantic_graph import get_semantic_graph
+from core.graph.semantic import get_semantic_graph
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -29,7 +29,7 @@ def backfill_memories(sg) -> dict:
     이미 존재하는 EpisodeNode는 upsert이므로 중복 없이 안전하게 재실행 가능.
     upsert_episode() 내부에서 EP_TO_KG 자동 연결까지 수행한다.
     """
-    from core.db import get_connection
+    from core.storage.db import get_connection
 
     conn = get_connection()
     rows = conn.execute(
@@ -119,3 +119,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+

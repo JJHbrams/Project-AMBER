@@ -4,8 +4,8 @@
 """
 
 from typing import Dict, List, Optional
-from .db import get_connection
-from .sanitizer import sanitize
+from core.storage.db import get_connection
+from core.common.sanitizer import sanitize
 
 
 def add_curiosity(topic: str, reason: str = "") -> int:
@@ -68,3 +68,4 @@ def render_curiosity_prompt(limit: int = 1) -> Optional[str]:
             line += f" ({item['reason']})"
         parts.append(line)
     return "[궁금증] " + " | ".join(parts)
+

@@ -6,7 +6,7 @@ DB 경로: <db.root_dir>\\engram.db
 import sqlite3
 from pathlib import Path
 
-from .runtime_config import get_db_root_dir
+from core.config.runtime_config import get_db_root_dir
 
 
 def _get_db_dir() -> Path:
@@ -244,9 +244,11 @@ def initialize_db():
     conn.execute("CREATE INDEX IF NOT EXISTS idx_working_memory_expires ON working_memory(expires_at)")
 
     # Knowledge Graph 테이블 초기화
-    from .knowledge_graph import initialize_kg_tables
+    from core.graph.knowledge import initialize_kg_tables
 
     initialize_kg_tables()
 
     conn.close()
     return str(_get_db_dir() / "engram.db")
+
+

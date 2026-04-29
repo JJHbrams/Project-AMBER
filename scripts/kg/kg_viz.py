@@ -15,8 +15,8 @@ from collections import defaultdict
 _ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(_ROOT))
 
-from core.db import initialize_db
-from core.knowledge_graph import get_kg, NODE_COLORS
+from core.storage.db import initialize_db
+from core.graph.knowledge import get_kg, NODE_COLORS
 
 try:
     from pyvis.network import Network
@@ -55,7 +55,7 @@ MEMORY_NODE_COLORS = {
 
 def load_memory_layer() -> tuple[list, list]:
     """identity / memories / directives / curiosities를 그래프 노드로 변환"""
-    from core.db import get_connection
+    from core.storage.db import get_connection
     import json as _json
 
     conn = get_connection()
@@ -132,7 +132,7 @@ def load_memory_layer() -> tuple[list, list]:
 
 def build_subgraph(kg, focus_id: str, hops: int) -> tuple[list, list]:
     """특정 노드 중심 서브그래프"""
-    from core.db import get_connection
+    from core.storage.db import get_connection
     from collections import deque
 
     visited = {focus_id}
@@ -383,3 +383,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+

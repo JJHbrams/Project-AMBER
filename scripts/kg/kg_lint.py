@@ -22,9 +22,9 @@ from datetime import datetime
 _ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(_ROOT))
 
-from core.db import initialize_db
-from core.knowledge_graph import get_kg
-from core.runtime_config import get_db_root_dir
+from core.storage.db import initialize_db
+from core.graph.knowledge import get_kg
+from core.config.runtime_config import get_db_root_dir
 
 REQUIRED_FM_FIELDS = {"title", "note_type", "tags"}
 # 기존 파일은 "type:" 키를 사용 — 두 가지 모두 허용
@@ -268,3 +268,5 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     run_lint(Path(args.vault), fix_summary=args.fix_summary, verbose=args.verbose)
+
+

@@ -139,7 +139,7 @@ def _try_semantic_sync_via_mcp() -> bool:
 def _do_sync(vault_path: Path) -> None:
     """Vault 전체 싱크 — SQLite + KuzuDB (MCP 서버 경유 우선)"""
     try:
-        from core.knowledge_graph import get_kg
+        from core.graph.knowledge import get_kg
 
         docs_dir = vault_path / "docs"
         kg = get_kg()
@@ -157,7 +157,7 @@ def _do_sync(vault_path: Path) -> None:
 
         # 시맨틱 싱크: MCP 서버가 살아있으면 위임, 아니면 직접 처리
         if not _try_semantic_sync_via_mcp():
-            from core.semantic_graph import get_semantic_graph
+            from core.graph.semantic import get_semantic_graph
             sg = get_semantic_graph()
             sem = sg.sync_from_kg()
             logger.info(
@@ -226,8 +226,8 @@ def _sync_project_file(src_path: Path, project_name: str, vault_path: Path) -> b
     )
 
     try:
-        from core.knowledge_graph import get_kg
-        from core.semantic_graph import get_semantic_graph
+        from core.graph.knowledge import get_kg
+        from core.graph.semantic import get_semantic_graph
 
         docs_dir = vault_path / "docs"
         kg = get_kg()
@@ -374,7 +374,7 @@ def main() -> None:
     if args.vault:
         vault_path = Path(args.vault)
     else:
-        from core.runtime_config import get_db_root_dir
+        from core.config.runtime_config import get_db_root_dir
 
         vault_path = Path(get_db_root_dir())
 
@@ -389,7 +389,7 @@ def main() -> None:
         logger.error("watchdog 미설치. `pip install watchdog`")
         sys.exit(1)
 
-    from core.runtime_config import get_watch_workspaces, get_watch_conceptual_files
+    from core.config.runtime_config import get_watch_workspaces, get_watch_conceptual_files
 
     observer = Observer()
     proj_debouncer = _ProjectDebounce(vault_path, delay=args.debounce)
@@ -436,3 +436,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+

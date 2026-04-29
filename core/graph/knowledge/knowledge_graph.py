@@ -17,7 +17,7 @@ from typing import Optional
 
 import yaml  # PyYAML (requirements.txt에 있음)
 
-from .db import get_connection
+from core.storage.db import get_connection
 
 # ── 타입 정의 ─────────────────────────────────────────────
 
@@ -562,3 +562,4 @@ def get_kg() -> KnowledgeGraph:
     if _kg_instance is None:
         _kg_instance = KnowledgeGraph()
     return _kg_instance
+

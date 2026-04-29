@@ -1,0 +1,52 @@
+/* engram dashboard — vis.js 그래프 위젯 스타일 */
+body { margin: 0; padding: 0; background: #0d1117; color: #c9d1d9; font-family: monospace; overflow: hidden; }
+#mynetwork { width: 100%; height: 680px; background: #0d1117; }  /* JS가 동적 높이를 덮어씀 */
+.vis-tooltip {
+  background: #161b22 !important;
+  border: 1px solid #30363d !important;
+  border-radius: 8px !important;
+  padding: 0 !important;
+  width: 300px !important;
+  max-width: 300px !important;
+  white-space: normal !important;
+  word-break: break-word !important;
+  overflow-wrap: break-word !important;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.6) !important;
+  font-family: monospace !important;
+  font-size: 12px !important;
+  color: #c9d1d9 !important;
+  pointer-events: none;
+}
+.eg-tip { padding: 10px 12px; box-sizing: border-box; width: 100%; }
+.eg-tip-title { font-weight: bold; font-size: 13px; color: #e6edf3; margin-bottom: 2px; word-break: break-word; white-space: normal; }
+.eg-tip-type { font-size: 10px; color: #8b949e; margin-bottom: 6px; }
+.eg-tip-body { color: #c9d1d9; line-height: 1.6; max-height: 220px; overflow-y: auto; overflow-x: hidden; white-space: normal; word-break: break-word; }
+.eg-tip-body code { background: #0d1117; padding: 1px 4px; border-radius: 3px; }
+.eg-tip-tags { margin-top: 6px; font-size: 10px; color: #8b949e; border-top: 1px solid #30363d; padding-top: 4px; white-space: normal; word-break: break-word; }
+#eg-pin {
+  display: none; position: absolute; z-index: 20;
+  width: 300px; max-height: 380px;
+  overflow-y: auto; overflow-x: hidden;
+  background: #161b22;
+  border: 1.5px solid #58a6ff;
+  border-radius: 8px;
+  box-shadow: 0 4px 20px rgba(0,0,0,0.8);
+  font-family: monospace; font-size: 12px; color: #c9d1d9;
+  box-sizing: border-box;
+  white-space: normal; word-break: break-word;
+  cursor: default;
+}
+#eg-pin .eg-tip-body { max-height: none; overflow-y: visible; }
+#ctrl {
+  position: absolute; top: 8px; right: 8px; z-index: 10;
+  background: rgba(22,27,34,0.93);
+  border: 1px solid #30363d; border-radius: 6px;
+  padding: 8px 10px; font-size: 11px; min-width: 158px;
+  box-shadow: 0 2px 10px rgba(0,0,0,0.6);
+}
+#ctrl summary { cursor: pointer; color: #58a6ff; font-weight: bold; user-select: none; outline: none; }
+.cl { color: #8b949e; margin-top: 5px; margin-bottom: 1px; display: flex; justify-content: space-between; }
+.cv { color: #79c0ff; }
+input[type=range] { width: 100%; accent-color: #58a6ff; margin: 1px 0; }
+label { cursor: pointer; }
+hr.sep { border: none; border-top: 1px solid #30363d; margin: 6px 0; }

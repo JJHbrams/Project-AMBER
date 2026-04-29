@@ -7,8 +7,8 @@ import re
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
-from .db import get_connection
-from .sanitizer import sanitize
+from core.storage.db import get_connection
+from core.common.sanitizer import sanitize
 
 try:
     import yaml as _yaml
@@ -473,3 +473,4 @@ def _extract_themes(text: str) -> List[str]:
         "없는",
     }
     return [w for w in candidates if w not in stop]
+

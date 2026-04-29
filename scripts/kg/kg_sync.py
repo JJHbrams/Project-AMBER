@@ -13,8 +13,8 @@ from pathlib import Path
 _ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(_ROOT))
 
-from core.db import initialize_db
-from core.knowledge_graph import get_kg
+from core.storage.db import initialize_db
+from core.graph.knowledge import get_kg
 
 
 def sync(vault_path: Path, verbose: bool = False):
@@ -47,7 +47,7 @@ def sync(vault_path: Path, verbose: bool = False):
     kg.resolve_links(docs_dir)
 
     # 통계
-    from core.db import get_connection
+    from core.storage.db import get_connection
 
     conn = get_connection()
     node_count = conn.execute("SELECT COUNT(*) FROM kg_nodes").fetchone()[0]
@@ -74,3 +74,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
