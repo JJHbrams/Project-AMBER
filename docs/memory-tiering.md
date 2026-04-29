@@ -65,13 +65,13 @@
 
 ## 코드 변경 요약
 
-## 1) core/db.py
+## 1) core/storage/db.py
 
 - sessions에 `scope_key` 추가
 - working_memory 테이블 추가
 - scope_key 마이그레이션 및 인덱스 생성 순서 보정
 
-## 2) core/memory.py
+## 2) core/memory/store.py
 
 - `create_session(scope_key)` 추가
 - `get_recent_messages_by_scope(...)` 추가
@@ -108,7 +108,7 @@ messages 테이블에 턴 데이터가 쌓이지 않음.
 - 구현 예정: `overlay/backend.py` 수정
 - `save_memory`가 `session_id=None`도 허용하도록 확장
 
-## 3) core/context_builder.py
+## 3) core/context/context_builder.py
 
 - `build_system_prompt(..., scope_key="")`로 확장
 - 컨텍스트 합성 순서:
@@ -118,7 +118,7 @@ messages 테이블에 턴 데이터가 쌓이지 않음.
   4. long-term memories
   5. curiosity
 
-## 3.5) core/memory_bus.py
+## 3.5) core/memory/bus.py
 
 - 기존 `memory.py` / `context_builder.py` 헬퍼 위에 얇은 orchestration 레이어 추가
 - 담당 범위:
@@ -133,7 +133,7 @@ messages 테이블에 턴 데이터가 쌓이지 않음.
 ## 4) engram.py (기본 REPL)
 
 - 기본 스코프: 현재 프로젝트에서 자동 파생되는 `project:<slug>-<hash>` (없으면 `global:main`)
-- 메모리 관련 orchestration을 `core.memory_bus`로 일원화
+- 메모리 관련 orchestration을 `core.memory.bus`로 일원화
 - 새 세션 생성은 유지하되, 스코프 기반으로 생성
 - 매 턴 응답 후 working memory 갱신
 - system prompt 조립 시 scope_key 전달
@@ -144,12 +144,12 @@ messages 테이블에 턴 데이터가 쌓이지 않음.
 - 메시지마다 새 세션 생성 후 user/assistant 메시지 저장
 - system prompt 조립 시 채널 스코프 전달
 - 응답 후 working memory 갱신
-- 메모리 orchestration은 `core.memory_bus`를 통해 수행
+- 메모리 orchestration은 `core.memory.bus`를 통해 수행
 - 봇 시작 시 DB 초기화 보장
 
 ## 6) mcp_server.py
 
-- `engram_get_context`는 `core.memory_bus`를 통해 context를 조립
+- `engram_get_context`는 `core.memory.bus`를 통해 context를 조립
 - `engram_get_context` / `engram_start_session`은 `scope_key` 또는 `project_key`를 받을 수 있음
 - 둘 다 비어 있으면 MCP 서버의 현재 프로젝트에서 scope를 자동 파생
 - long-term memory는 전역 풀을 유지하고, short-term / working memory만 project scope를 따름

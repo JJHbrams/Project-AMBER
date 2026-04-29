@@ -13,7 +13,7 @@ if ((Test-Path $LegacyDbDir) -and -not (Test-Path $DbDir)) {
 $env:ENGRAM_DB_DIR = $DbDir
 $escapedRoot = $ProjectRoot -replace '\\', '\\\\'
 $escapedDbDir = $DbDir -replace '\\', '\\\\'
-$dbPath = & $PythonExe -c "import sys, os; sys.path.insert(0,'$escapedRoot'); os.environ['ENGRAM_DB_DIR']='$escapedDbDir'; from core.db import initialize_db; print(initialize_db())" 2>&1
+$dbPath = & $PythonExe -c "import sys, os; sys.path.insert(0,'$escapedRoot'); os.environ['ENGRAM_DB_DIR']='$escapedDbDir'; from core.storage.db import initialize_db; print(initialize_db())" 2>&1
 Write-Ok "DB: $dbPath"
 
 # 6a. Identity name setup (interactive)
@@ -22,7 +22,7 @@ $getIdentityNameScript = @"
 import os, sys
 sys.path.insert(0, r'$($ProjectRoot -replace '\\', '/')')
 os.environ['ENGRAM_DB_DIR'] = r'$($DbDir -replace '\\', '/')'
-from core.db import initialize_db, get_connection
+from core.storage.db import initialize_db, get_connection
 initialize_db()
 conn = get_connection()
 row = conn.execute("SELECT name FROM identity WHERE id=1").fetchone()
@@ -74,7 +74,7 @@ if ($identityLookupExitCode -ne 0) {
 import os, sys
 sys.path.insert(0, r'$($ProjectRoot -replace '\\', '/')')
 os.environ['ENGRAM_DB_DIR'] = r'$($DbDir -replace '\\', '/')'
-from core.db import initialize_db, get_connection
+from core.storage.db import initialize_db, get_connection
 initialize_db()
 name = os.environ.get('ENGRAM_INSTALL_NAME', '').strip()
 if name:
@@ -241,7 +241,7 @@ if (Test-Path $dirTemplPath) {
 import sys, os, json
 sys.path.insert(0, r'$($ProjectRoot -replace '\\', '/')')
 os.environ['ENGRAM_DB_DIR'] = r'$($DbDir -replace '\\', '/')'
-from core.db import initialize_db, get_connection
+from core.storage.db import initialize_db, get_connection
 initialize_db()
 template_path = r'$($dirTemplPath -replace '\\', '/')'
 vault_dir = r'$($DbDir -replace '\\', '/')'
