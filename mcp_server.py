@@ -5,6 +5,7 @@ MCP 클라이언트가 호출 가능한 도구로 DB 연산을 노출하는 stdi
 
 import sys
 import os
+import re
 import threading
 import time
 
@@ -1446,11 +1447,25 @@ def kg_wiki_reminder(
     }
 
 
+def _is_dangerous_cypher(cypher: str) -> bool:
+    """필터 없는 전체 삭제 및 DROP TABLE 차단."""
+    upper = cypher.upper()
+    if re.search(r'\bDROP\s+(NODE\s+TABLE|REL\s+TABLE|TABLE)\b', upper):
+        return True
+    if re.search(r'\b(DETACH\s+)?DELETE\b', upper):
+        has_filter = bool(re.search(r'\bWHERE\b|\{', cypher))
+        return not has_filter
+    return False
+
+
 @engramMCP.tool()
 def kg_cypher(cypher: str) -> list:
     """KuzuDB에 직접 Cypher 쿼리를 실행합니다. (고급 그래프 탐색)
     예시: "MATCH (a:KGNode)-[e:KG_EDGE]->(b:KGNode) WHERE a.type='concept' RETURN a.title, e.rel_type, b.title LIMIT 10"
+    DELETE는 WHERE 또는 {} 필터가 있을 때만 허용됩니다. DROP TABLE은 항상 차단됩니다.
     - cypher: Cypher 쿼리문"""
+    if _is_dangerous_cypher(cypher):
+        return [{"error": "차단된 쿼리: 필터 없는 전체 삭제 또는 DROP TABLE은 허용되지 않습니다."}]
     sg = get_semantic_graph()
     if not sg.enabled:
         return [{"error": "SemanticGraph 비활성화"}]
