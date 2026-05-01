@@ -7,7 +7,7 @@ overlay.exe가 실행 중일 때 localhost:PORT에 바인딩하여
   POST /stm/session/start          → { scope_key } → { session_id, scope_key }
   POST /stm/message                → { session_id, role, content, request_id? } → { status }
   GET  /stm/messages?scope_key=... → [{ role, content }]
-  POST /stm/session/close          → { session_id, scope_key } → { status }
+  POST /stm/session/close          → { session_id?, scope_key?, summary? } → { status, closed_session_id }
   GET  /health                     → { status: "ok", pid }
 """
 
@@ -26,6 +26,43 @@ _SEEN_REQUEST_IDS: set[str] = set()
 _SEEN_LOCK = threading.Lock()
 _MAX_SEEN = 1000
 _shutdown_callback: "Optional[callable]" = None
+
+
+def _resolve_open_session_id(session_id: object, scope_key: Optional[str]) -> Optional[int]:
+    """닫을 세션 id를 결정한다. session_id 우선, 없으면 scope_key 기준 최신 open 세션."""
+    if session_id is not None:
+        try:
+            sid = int(session_id)
+            if sid > 0:
+                return sid
+        except (TypeError, ValueError):
+            return None
+
+    try:
+        from core.storage.db import get_connection
+
+        conn = get_connection()
+        if scope_key:
+            row = conn.execute(
+                "SELECT id FROM sessions WHERE ended_at IS NULL AND scope_key = ? "
+                "ORDER BY started_at DESC, id DESC LIMIT 1",
+                (scope_key,),
+            ).fetchone()
+        else:
+            row = conn.execute(
+                "SELECT id FROM sessions WHERE ended_at IS NULL "
+                "ORDER BY started_at DESC, id DESC LIMIT 1"
+            ).fetchone()
+        conn.close()
+    except Exception:
+        return None
+
+    if not row:
+        return None
+    try:
+        return int(row[0])
+    except (TypeError, ValueError, IndexError, KeyError):
+        return None
 
 
 def _get_port() -> int:
@@ -130,10 +167,15 @@ class _STMHandler(BaseHTTPRequestHandler):
                 self._send_json({"status": "duplicate_ignored"})
                 return
             session_id = body.get("session_id")
+            scope_key = body.get("scope_key")
             role = body.get("role", "user")
             content = body.get("content", "")
+            # scope_key로 session_id 자동 resolve
+            if session_id is None and scope_key:
+                from core.memory import resolve_session_id_by_scope
+                session_id = resolve_session_id_by_scope(scope_key)
             if session_id is None:
-                self._send_json({"error": "session_id required"}, 400)
+                self._send_json({"error": "session_id 또는 scope_key가 필요합니다."}, 400)
                 return
             try:
                 from core.memory import save_message
@@ -147,14 +189,20 @@ class _STMHandler(BaseHTTPRequestHandler):
         elif path == "/stm/session/close":
             session_id = body.get("session_id")
             scope_key = body.get("scope_key") or None
+            summary = body.get("summary", "") or ""
             try:
+                closed_session_id = _resolve_open_session_id(session_id, scope_key)
+                if closed_session_id is not None:
+                    from core.memory import close_session as _close_session
+
+                    _close_session(closed_session_id, str(summary))
                 if scope_key:
                     import threading
                     from core.graph.semantic import maybe_promote
 
                     t = threading.Thread(target=maybe_promote, kwargs={"scope_key": scope_key}, daemon=True)
                     t.start()
-                self._send_json({"status": "ok"})
+                self._send_json({"status": "ok", "closed_session_id": closed_session_id})
             except Exception as e:
                 logger.error("session/close 실패: %s", e)
                 self._send_json({"error": str(e)}, 500)

@@ -118,6 +118,17 @@ _USER_TEMPLATE = """\
 #     "123456789012345678": "gemini"
 #   guild_cli_overrides:
 #     "987654321098765432": "ollama"
+#   # scope_key 우선순위:
+#   # 1) channel_scope_overrides[channel_id]
+#   # 2) guild_scope_overrides[guild_id]
+#   # 3) scope_key_template
+#   # 4) 기본값 "{prefix}{channel_id}"
+#   # 템플릿 토큰: {prefix}, {guild_id}, {channel_id}, {route_id}
+#   scope_key_template: ""
+#   channel_scope_overrides:
+#     "123456789012345678": "{prefix}team-alpha"
+#   guild_scope_overrides:
+#     "987654321098765432": "{prefix}guild:{guild_id}"
 #   deny_guild_ids: []
 #   deny_channel_ids: []
 #   deny_user_ids: []

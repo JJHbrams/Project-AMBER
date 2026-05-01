@@ -10,6 +10,7 @@ from typing import Optional
 _INJECTION_PATTERNS = [
     # 시스템/지침 위장 시도
     r"\[시스템\]",
+    r"\[시스템\s*지침\]",
     r"\[system\]",
     r"\[지침\]",
     r"\[instruction[s]?\]",
@@ -36,9 +37,9 @@ _COMPILED_PATTERNS = [re.compile(p, re.MULTILINE) for p in _INJECTION_PATTERNS]
 
 # 토큰 낭비 정리 패턴
 _NOISE_PATTERNS = [
-    (re.compile(r"\n{3,}"), "\n\n"),           # 과도한 빈 줄
-    (re.compile(r"[ \t]{4,}"), "  "),           # 과도한 공백
-    (re.compile(r"(.)\1{10,}"), r"\1\1\1"),    # 같은 문자 10+ 반복
+    (re.compile(r"\n{3,}"), "\n\n"),  # 과도한 빈 줄
+    (re.compile(r"[ \t]{4,}"), "  "),  # 과도한 공백
+    (re.compile(r"(.)\1{10,}"), r"\1\1\1"),  # 같은 문자 10+ 반복
 ]
 
 

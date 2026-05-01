@@ -12,6 +12,7 @@ from .store import (
     get_working_memory,
     link_session_projects,
     list_memories,
+    resolve_session_id_by_scope,
     save_memory,
     save_message,
     search_memories,

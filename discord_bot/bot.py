@@ -76,6 +76,7 @@ _CLAUDE_MODEL_ALIASES = {
 class _PendingTask:
     token: str
     channel_id: str
+    guild_id: str
     message_id: str
     content: str
     provider: str
@@ -249,6 +250,38 @@ def _to_provider_overrides(raw: object) -> dict[str, str]:
             continue
         overrides[target_id] = normalize_cli_provider(str(value or "").strip())
     return overrides
+
+
+def _to_scope_overrides(raw: object) -> dict[str, str]:
+    overrides: dict[str, str] = {}
+    if not isinstance(raw, dict):
+        return overrides
+
+    for key, value in raw.items():
+        target_id = str(key or "").strip()
+        if not target_id:
+            continue
+        template = str(value or "").strip()
+        if not template:
+            continue
+        overrides[target_id] = template
+    return overrides
+
+
+def _render_scope_key_template(template: str, channel_id: str, guild_id: str) -> str:
+    rendered = str(template or "").strip()
+    if not rendered:
+        return ""
+
+    replacements = {
+        "{prefix}": DISCORD_SCOPE_PREFIX,
+        "{channel_id}": str(channel_id or "").strip(),
+        "{guild_id}": str(guild_id or "").strip(),
+        "{route_id}": str(guild_id or channel_id or "").strip(),
+    }
+    for token, value in replacements.items():
+        rendered = rendered.replace(token, value)
+    return rendered.strip()
 
 
 def _setup_file_logging():
@@ -554,7 +587,7 @@ def _to_session_preview(raw: str, max_chars: int = SESSION_PREVIEW_MAX_CHARS) ->
 
 
 def _build_scoped_bootstrap_prompt(content: str, scope_key: str, caller: str) -> str:
-    """첫 턴에 채널 스코프 컨텍스트 초기화를 강제하는 프롬프트를 만든다."""
+    """첫 턴에 라우팅 스코프 컨텍스트 초기화를 강제하는 프롬프트를 만든다."""
     safe_scope = str(scope_key or "").replace("'", "\\'")
     safe_caller = str(caller or "copilot-cli").replace("'", "\\'")
     bootstrap = (
@@ -566,10 +599,18 @@ def _build_scoped_bootstrap_prompt(content: str, scope_key: str, caller: str) ->
     return f"{bootstrap}\n\n{content}"
 
 
+def _should_inject_bootstrap_prompt(provider: str, use_resume: bool) -> bool:
+    """Bootstrap is meaningful only when the provider supports resume sessions."""
+    if use_resume:
+        return False
+    return _provider_supports_resume(provider)
+
+
 def _run_cli_command(
     cmd_args: list[str],
     stop_event: threading.Event,
     extra_env: dict[str, str] | None = None,
+    timeout_seconds: int | None = None,
 ) -> tuple[int, str, str, bool]:
     """CLI subprocess를 실행하고 (code, stdout, stderr, cancelled)를 반환."""
     env = os.environ.copy()
@@ -588,11 +629,28 @@ def _run_cli_command(
         creationflags=creation_flags,
     )
 
+    timeout_value = int(timeout_seconds or 0)
+    deadline = time.monotonic() + timeout_value if timeout_value > 0 else None
+
     while proc.poll() is None:
         if stop_event.wait(timeout=0.5):
             proc.kill()
             log.info("[discord] 종료 신호로 응답 생성 취소")
             return -1, "", "", True
+
+        if deadline is not None and time.monotonic() >= deadline:
+            proc.kill()
+            stdout = ""
+            stderr = ""
+            try:
+                stdout, stderr = proc.communicate(timeout=2)
+            except Exception:
+                pass
+            timeout_msg = f"timeout after {timeout_value}s"
+            if stderr:
+                timeout_msg = f"{timeout_msg}\n{stderr}"
+            log.warning("[discord] CLI 시간 초과로 종료: cmd=%s timeout=%ss", cmd_args[0], timeout_value)
+            return -2, stdout or "", timeout_msg, False
 
     stdout, stderr = proc.communicate()
     return proc.returncode, stdout or "", stderr or "", False
@@ -602,6 +660,7 @@ def _generate_and_send(
     bot: "EngramDiscordBot",
     token: str,
     channel_id: str,
+    guild_id: str,
     message_id: str,
     content: str,
     provider: str,
@@ -611,7 +670,7 @@ def _generate_and_send(
     if stop_event.is_set():
         return
 
-    session, channel_lock = bot._get_or_create_channel_state(channel_id)
+    session, channel_lock = bot._get_or_create_channel_state(channel_id, guild_id=guild_id)
     provider = normalize_cli_provider(provider or bot.get_cli_provider())
     cli_cfg = bot.get_cli_cfg()
     provider_caller = _provider_caller_name(provider)
@@ -623,7 +682,10 @@ def _generate_and_send(
             use_resume = _provider_supports_resume(provider) and bot.has_provider_session(provider, session.session_id)
             memory_bus.record_user_message(session, content)
 
-            prompt_text = content if use_resume else _build_scoped_bootstrap_prompt(content, session.scope_key, provider_caller)
+            inject_bootstrap = _should_inject_bootstrap_prompt(provider, use_resume)
+            prompt_text = content
+            if inject_bootstrap:
+                prompt_text = _build_scoped_bootstrap_prompt(content, session.scope_key, provider_caller)
             cmd_args, used_resume = _build_provider_command(
                 provider,
                 prompt_text,
@@ -638,14 +700,17 @@ def _generate_and_send(
                 cmd_args,
                 stop_event,
                 extra_env={"ENGRAM_SCOPE_KEY": session.scope_key},
+                timeout_seconds=bot.get_cli_timeout_seconds(),
             )
             if cancelled:
                 return
 
             # resume 실패 시 1회 신규 세션(name)로 자동 복구
-            if code != 0 and used_resume:
+            if code != 0 and used_resume and code != -2:
                 log.warning(f"[discord] {provider} resume 실패로 신규 세션 생성 재시도")
-                retry_prompt = _build_scoped_bootstrap_prompt(content, session.scope_key, provider_caller)
+                retry_prompt = content
+                if _should_inject_bootstrap_prompt(provider, False):
+                    retry_prompt = _build_scoped_bootstrap_prompt(content, session.scope_key, provider_caller)
                 retry_args, _ = _build_provider_command(
                     provider,
                     retry_prompt,
@@ -657,6 +722,7 @@ def _generate_and_send(
                     retry_args,
                     stop_event,
                     extra_env={"ENGRAM_SCOPE_KEY": session.scope_key},
+                    timeout_seconds=bot.get_cli_timeout_seconds(),
                 )
                 if cancelled:
                     return
@@ -672,7 +738,10 @@ def _generate_and_send(
         else:
             reply = None
         if not reply:
-            reply = "(응답 생성 실패)"
+            if code == -2:
+                reply = f"(응답 생성 시간 초과: {bot.get_cli_timeout_seconds()}s 내 완료되지 않아 중단했어. 다시 시도해줘.)"
+            else:
+                reply = "(응답 생성 실패)"
             log.error(f"[discord] {provider} 오류: {stderr[:200]}")
     except Exception as e:
         reply = "(응답 생성 중 오류 발생)"
@@ -713,8 +782,11 @@ class EngramDiscordBot:
         self._cfg: dict = {}
         self._cli_cfg: dict = {}
         self._cli_provider: str = "copilot"
+        self._scope_key_template: str = ""
         self._channel_provider_overrides: dict[str, str] = {}
         self._guild_provider_overrides: dict[str, str] = {}
+        self._channel_scope_overrides: dict[str, str] = {}
+        self._guild_scope_overrides: dict[str, str] = {}
         self._allowed_guild_ids: set[str] = set()
         self._allowed_channel_ids: set[str] = set()
         self._allowed_user_ids: set[str] = set()
@@ -760,8 +832,11 @@ class EngramDiscordBot:
         self._cfg = cfg.get("discord", {}) if isinstance(cfg.get("discord", {}), dict) else {}
         self._cli_cfg = cfg.get("cli", {}) if isinstance(cfg.get("cli", {}), dict) else {}
         self._cli_provider = normalize_cli_provider(self._cfg.get("provider") or self._cli_cfg.get("provider"))
+        self._scope_key_template = str(self._cfg.get("scope_key_template") or "").strip()
         self._channel_provider_overrides = _to_provider_overrides(self._cfg.get("channel_cli_overrides"))
         self._guild_provider_overrides = _to_provider_overrides(self._cfg.get("guild_cli_overrides"))
+        self._channel_scope_overrides = _to_scope_overrides(self._cfg.get("channel_scope_overrides"))
+        self._guild_scope_overrides = _to_scope_overrides(self._cfg.get("guild_scope_overrides"))
         self._allowed_guild_ids = _to_id_set(self._cfg.get("guild_id"), self._cfg.get("guild_ids"))
         self._allowed_channel_ids = _to_id_set(self._cfg.get("channel_id"), self._cfg.get("channel_ids"))
         self._allowed_user_ids = _to_id_set(None, self._cfg.get("allowed_user_ids"))
@@ -783,10 +858,13 @@ class EngramDiscordBot:
         self._queue_semaphore = threading.Semaphore(self._max_parallel_channels)
         self._new_session_triggers = _load_new_session_triggers(self._cfg)
         log.info(
-            "[discord] provider=%s route_override(ch=%s,g=%s) allow(g=%s,c=%s,u=%s) deny(g=%s,c=%s,u=%s) queue(max=%s, ttl=%ss, drop=%s, parallel=%s, notice=%s, ttl_notice=%s)",
+            "[discord] provider=%s route_override(ch=%s,g=%s) scope_override(ch=%s,g=%s,tpl=%s) allow(g=%s,c=%s,u=%s) deny(g=%s,c=%s,u=%s) queue(max=%s, ttl=%ss, drop=%s, parallel=%s, notice=%s, ttl_notice=%s)",
             self._cli_provider,
             len(self._channel_provider_overrides),
             len(self._guild_provider_overrides),
+            len(self._channel_scope_overrides),
+            len(self._guild_scope_overrides),
+            bool(self._scope_key_template),
             len(self._allowed_guild_ids),
             len(self._allowed_channel_ids),
             len(self._allowed_user_ids),
@@ -833,9 +911,37 @@ class EngramDiscordBot:
         with self._state_lock:
             return dict(self._cli_cfg)
 
+    def get_cli_timeout_seconds(self) -> int:
+        with self._state_lock:
+            timeout_seconds = int(self._queue_ttl_seconds)
+        return max(10, timeout_seconds)
+
+    def _refresh_runtime_cli_routing(self) -> None:
+        """메시지 처리 직전에 provider/cli 라우팅 설정을 디스크 기준으로 갱신한다."""
+        cfg = load_cfg()
+        discord_cfg = cfg.get("discord", {}) if isinstance(cfg.get("discord", {}), dict) else {}
+        cli_cfg = cfg.get("cli", {}) if isinstance(cfg.get("cli", {}), dict) else {}
+        cli_provider = normalize_cli_provider(discord_cfg.get("provider") or cli_cfg.get("provider"))
+
+        with self._state_lock:
+            self._cfg = discord_cfg
+            self._cli_cfg = cli_cfg
+            self._cli_provider = cli_provider
+            self._scope_key_template = str(discord_cfg.get("scope_key_template") or "").strip()
+            self._channel_provider_overrides = _to_provider_overrides(discord_cfg.get("channel_cli_overrides"))
+            self._guild_provider_overrides = _to_provider_overrides(discord_cfg.get("guild_cli_overrides"))
+            self._channel_scope_overrides = _to_scope_overrides(discord_cfg.get("channel_scope_overrides"))
+            self._guild_scope_overrides = _to_scope_overrides(discord_cfg.get("guild_scope_overrides"))
+
     def _provider_session_key(self, provider: str, session_id: int) -> str:
         normalized = normalize_cli_provider(provider)
         return f"{normalized}:{int(session_id)}"
+
+    def _clear_provider_ready_for_session(self, session_id: int | None) -> None:
+        if session_id is None:
+            return
+        for provider in ("copilot", "claude-code", "claude-code-ollama", "gemini", "ollama"):
+            self._provider_ready_session_keys.discard(self._provider_session_key(provider, int(session_id)))
 
     def build_cli_session_name(self, provider: str, channel_id: str, session_id: int) -> str:
         normalized = normalize_cli_provider(provider)
@@ -874,6 +980,32 @@ class EngramDiscordBot:
             if target_guild and target_guild in self._guild_provider_overrides:
                 return self._guild_provider_overrides[target_guild], "guild"
             return self._cli_provider, "default"
+
+    def _resolve_scope_key_for_target(self, channel_id: str, guild_id: str | None = None) -> tuple[str, str]:
+        target_channel = str(channel_id or "").strip()
+        target_guild = str(guild_id or "").strip()
+
+        with self._state_lock:
+            channel_template = self._channel_scope_overrides.get(target_channel, "")
+            guild_template = self._guild_scope_overrides.get(target_guild, "")
+            default_template = self._scope_key_template
+
+        if channel_template:
+            resolved = _render_scope_key_template(channel_template, target_channel, target_guild)
+            if resolved:
+                return resolved, "channel"
+
+        if guild_template:
+            resolved = _render_scope_key_template(guild_template, target_channel, target_guild)
+            if resolved:
+                return resolved, "guild"
+
+        if default_template:
+            resolved = _render_scope_key_template(default_template, target_channel, target_guild)
+            if resolved:
+                return resolved, "template"
+
+        return f"{DISCORD_SCOPE_PREFIX}{target_channel}", "default"
 
     def _should_send_wait_notice(self, channel_id: str, queued: int) -> bool:
         if not self._queue_notify_waiting:
@@ -975,6 +1107,7 @@ class EngramDiscordBot:
                     self,
                     task.token,
                     task.channel_id,
+                    task.guild_id,
                     task.message_id,
                     task.content,
                     task.provider,
@@ -988,13 +1121,15 @@ class EngramDiscordBot:
             finally:
                 self._queue_semaphore.release()
 
-    def _get_or_create_channel_state(self, channel_id: str) -> tuple[MemorySession, threading.Lock]:
-        scope_key = f"{DISCORD_SCOPE_PREFIX}{channel_id}"
+    def _get_or_create_channel_state(self, channel_id: str, guild_id: str | None = None) -> tuple[MemorySession, threading.Lock]:
+        scope_key, _ = self._resolve_scope_key_for_target(channel_id, guild_id=guild_id)
         with self._state_lock:
             session = self._memory_sessions.get(channel_id)
-            if session is None:
+            if session is None or session.scope_key != scope_key:
+                old_session_id = session.session_id if session is not None else None
                 session = memory_bus.start_session(scope_key=scope_key)
                 self._memory_sessions[channel_id] = session
+                self._clear_provider_ready_for_session(old_session_id)
 
             channel_lock = self._channel_locks.get(channel_id)
             if channel_lock is None:
@@ -1003,9 +1138,9 @@ class EngramDiscordBot:
 
         return session, channel_lock
 
-    def _reset_channel_session(self, channel_id: str) -> None:
+    def _reset_channel_session(self, channel_id: str, guild_id: str | None = None) -> None:
         """명시적 요청 시 채널 세션을 신규 세션으로 전환한다."""
-        scope_key = f"{DISCORD_SCOPE_PREFIX}{channel_id}"
+        scope_key, scope_source = self._resolve_scope_key_for_target(channel_id, guild_id=guild_id)
         with self._state_lock:
             old_session = self._memory_sessions.get(channel_id)
             old_session_id = old_session.session_id if old_session else None
@@ -1014,13 +1149,22 @@ class EngramDiscordBot:
                 self._channel_locks[channel_id] = threading.Lock()
             new_session_id = self._memory_sessions[channel_id].session_id
             self._channel_queues.pop(channel_id, None)
-            if old_session_id is not None:
-                for provider in ("copilot", "claude-code", "claude-code-ollama", "gemini", "ollama"):
-                    self._provider_ready_session_keys.discard(self._provider_session_key(provider, old_session_id))
-        log.info(f"[discord] 새 세션 전환: channel={channel_id} session_id={new_session_id}")
+            self._clear_provider_ready_for_session(old_session_id)
+        log.info(
+            "[discord] 새 세션 전환: channel=%s scope=%s(source=%s) session_id=%s",
+            channel_id,
+            scope_key,
+            scope_source,
+            new_session_id,
+        )
 
-    def _list_channel_sessions(self, channel_id: str, limit: int = DEFAULT_SESSION_LIST_LIMIT) -> list[dict]:
-        scope_key = f"{DISCORD_SCOPE_PREFIX}{channel_id}"
+    def _list_channel_sessions(
+        self,
+        channel_id: str,
+        guild_id: str | None = None,
+        limit: int = DEFAULT_SESSION_LIST_LIMIT,
+    ) -> list[dict]:
+        scope_key, _ = self._resolve_scope_key_for_target(channel_id, guild_id=guild_id)
         safe_limit = max(1, min(limit, MAX_SESSION_LIST_LIMIT))
         with get_connection() as conn:
             rows = conn.execute(
@@ -1060,8 +1204,14 @@ class EngramDiscordBot:
             item["preview"] = _to_session_preview(str(preview_source))
         return items
 
-    def _switch_channel_session(self, channel_id: str, session_id: int, provider: str | None = None) -> tuple[bool, str]:
-        scope_key = f"{DISCORD_SCOPE_PREFIX}{channel_id}"
+    def _switch_channel_session(
+        self,
+        channel_id: str,
+        session_id: int,
+        provider: str | None = None,
+        guild_id: str | None = None,
+    ) -> tuple[bool, str]:
+        scope_key, _ = self._resolve_scope_key_for_target(channel_id, guild_id=guild_id)
         selected_provider = normalize_cli_provider(provider or self.get_cli_provider())
         with get_connection() as conn:
             row = conn.execute(
@@ -1151,6 +1301,8 @@ class EngramDiscordBot:
             if not content:
                 return
 
+            self._refresh_runtime_cli_routing()
+
             route_provider, provider_source = self._resolve_provider_for_target(channel_id, guild_id)
             if provider_source != "default":
                 log.debug(
@@ -1166,7 +1318,7 @@ class EngramDiscordBot:
                 action = str(session_cmd.get("action", ""))
                 if action == "list":
                     limit = int(session_cmd.get("limit", DEFAULT_SESSION_LIST_LIMIT))
-                    items = self._list_channel_sessions(channel_id, limit=limit)
+                    items = self._list_channel_sessions(channel_id, guild_id=guild_id, limit=limit)
                     with self._state_lock:
                         current = self._memory_sessions.get(channel_id)
                     current_id = current.session_id if current else None
@@ -1198,13 +1350,14 @@ class EngramDiscordBot:
                         channel_id,
                         int(session_cmd.get("session_id", 0)),
                         provider=route_provider,
+                        guild_id=guild_id,
                     )
                     await message.add_reaction("✅" if ok else "⚠️")
                     await message.reply(msg)
                     return
 
                 if action == "new":
-                    self._reset_channel_session(channel_id)
+                    self._reset_channel_session(channel_id, guild_id=guild_id)
                     parsed = str(session_cmd.get("content", "")).strip()
                     if not parsed:
                         await message.add_reaction("✅")
@@ -1225,7 +1378,7 @@ class EngramDiscordBot:
             # 명시적 새 세션 요청: 즉시 채널 세션 롤오버
             reset_requested, parsed_content = _parse_session_reset_command(content, self._new_session_triggers)
             if reset_requested:
-                self._reset_channel_session(channel_id)
+                self._reset_channel_session(channel_id, guild_id=guild_id)
                 if not parsed_content:
                     await message.add_reaction("✅")
                     await message.reply("새 세션으로 전환했어요. 이어서 질문해줘.")
@@ -1245,6 +1398,7 @@ class EngramDiscordBot:
                 _PendingTask(
                     token=token,
                     channel_id=channel_id,
+                    guild_id=guild_id,
                     message_id=str(message.id),
                     content=safe_content,
                     provider=route_provider,

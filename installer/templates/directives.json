@@ -61,12 +61,5 @@
     "priority": 5,
     "trigger_type": "reflection",
     "content": "사용자 피드백·/reflect·세션종료 시 자기 성찰 수행. 정체성 변화 있으면 engram_update_narrative 호출. 상세: kg_read_note(\"reflection-trigger-guide\")"
-  },
-  {
-    "key": "multi-agent-orchestration",
-    "scope": "all",
-    "priority": 0,
-    "trigger_type": "always",
-    "content": "복잡 작업 시 Orchestrator 모드 진입. Task Spec은 _inbox/tasks/에 생성. 핸드오버는 Wiki를 SSOT로. 상세: kg_read_note(\"agent-collaboration-guide\")"
   }
 ]

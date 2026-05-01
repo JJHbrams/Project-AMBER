@@ -227,7 +227,6 @@ def initialize_db():
             conn.execute("ALTER TABLE directives ADD COLUMN trigger_type TEXT NOT NULL DEFAULT 'always'")
 
         # 마이그레이션: keywords / memory_keywords 정규화 테이블 생성
-        tables = [r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
         if "keywords" not in tables:
             conn.execute("""
                 CREATE TABLE keywords (
@@ -272,5 +271,3 @@ def initialize_db():
 
     conn.close()
     return str(_get_db_dir() / "engram.db")
-
-

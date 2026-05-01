@@ -332,6 +332,48 @@ def update_persona(observations: dict) -> Dict:
     return get_persona()
 
 
+def set_persona_baseline(fields: dict) -> Dict:
+    """설정 UI 등에서 지정한 persona 필드를 DB baseline으로 즉시 반영한다.
+
+    user persona YAML의 pinned 필드보다 우선하지는 않으며,
+    get_persona()의 우선순위 규칙(user > db > project > default)을 그대로 따른다.
+    """
+    if not isinstance(fields, dict) or not fields:
+        return get_persona()
+
+    if not is_persona_initialized():
+        seed_persona("project_yaml")
+
+    conn = get_connection()
+    row = conn.execute("SELECT persona FROM identity WHERE id=1").fetchone()
+    db_persona: Dict[str, Any] = {}
+    if row and row["persona"]:
+        try:
+            db_persona = json.loads(row["persona"]) or {}
+        except (json.JSONDecodeError, TypeError):
+            db_persona = {}
+
+    changed = False
+    for key, raw_val in fields.items():
+        if key not in DEFAULT_PERSONA:
+            continue
+        coerced = _coerce_persona_field(key, raw_val)
+        if coerced is None:
+            continue
+        if db_persona.get(key) != coerced:
+            db_persona[key] = coerced
+            changed = True
+
+    if changed:
+        with conn:
+            conn.execute(
+                "UPDATE identity SET persona=?, updated_at=datetime('now','localtime') WHERE id=1",
+                (json.dumps(db_persona, ensure_ascii=False),),
+            )
+    conn.close()
+    return get_persona()
+
+
 def is_persona_initialized() -> bool:
     """DB persona가 초기화되어 있는지 확인. {} 또는 null이면 미초기화."""
     conn = get_connection()

@@ -135,8 +135,7 @@ $TemplateTargets = @(
     @{ Src = "protocols\_protocol-wiki-reminder-guide.md";     Dest = "$DbDir\docs\protocols\wiki-reminder-guide.md" },
     @{ Src = "protocols\_protocol-activity-log-guide.md";      Dest = "$DbDir\docs\protocols\activity-log-guide.md" },
     @{ Src = "protocols\_protocol-narrative-update-guide.md";  Dest = "$DbDir\docs\protocols\narrative-update-guide.md" },
-    @{ Src = "protocols\_protocol-reflection-trigger-guide.md"; Dest = "$DbDir\docs\protocols\reflection-trigger-guide.md" },
-    @{ Src = "protocols\_protocol-agent-collaboration-guide.md"; Dest = "$DbDir\docs\protocols\agent-collaboration-guide.md" }
+    @{ Src = "protocols\_protocol-reflection-trigger-guide.md"; Dest = "$DbDir\docs\protocols\reflection-trigger-guide.md" }
 )
 
 # 충돌 파일 일괄 확인: 기본 정책은 유지(N), 명시적으로 y일 때만 덮어쓰기

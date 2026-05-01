@@ -24,6 +24,8 @@ from overlay.config import (
     load_cfg,
     normalize_cli_provider,
 )
+from core.identity import set_persona_baseline
+from core.tutorial import complete_tutorial_step, has_user_persona_override, reset_tutorial_state
 
 _PROVIDER_OPTIONS = [
     "copilot",
@@ -58,8 +60,7 @@ _PERSONA_DEFAULTS = {
 
 # ── Autostart (Startup 폴더 .lnk) ───────────────────────────────────────
 _STARTUP_DIR = (
-    Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming"))
-    / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup"
+    Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming")) / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup"
 )
 _STARTUP_LINK = _STARTUP_DIR / "engram-overlay.lnk"
 _OVERLAY_CMD = Path.home() / ".engram" / "engram-overlay.cmd"
@@ -83,18 +84,15 @@ def _set_autostart(enabled: bool) -> None:
     if enabled:
         target = _resolve_overlay_target()
         if target is None:
-            raise RuntimeError(
-                "engram-overlay.cmd 를 찾을 수 없습니다.\n"
-                ".engram/ 폴더를 확인하세요."
-            )
+            raise RuntimeError("engram-overlay.cmd 를 찾을 수 없습니다.\n" ".engram/ 폴더를 확인하세요.")
         _STARTUP_DIR.mkdir(parents=True, exist_ok=True)
         ps = (
-            f'$s = New-Object -ComObject WScript.Shell; '
-            f'$sc = $s.CreateShortcut(\'{ _STARTUP_LINK }\'); '
-            f'$sc.TargetPath = \'{ target }\'; '
-            f'$sc.WorkingDirectory = \'{ target.parent }\'; '
-            f'$sc.Description = \'Engram Overlay \u2014 Auto Start\'; '
-            f'$sc.Save()'
+            f"$s = New-Object -ComObject WScript.Shell; "
+            f"$sc = $s.CreateShortcut('{ _STARTUP_LINK }'); "
+            f"$sc.TargetPath = '{ target }'; "
+            f"$sc.WorkingDirectory = '{ target.parent }'; "
+            f"$sc.Description = 'Engram Overlay \u2014 Auto Start'; "
+            f"$sc.Save()"
         )
         subprocess.run(
             ["powershell", "-NoProfile", "-WindowStyle", "Hidden", "-Command", ps],
@@ -106,6 +104,7 @@ def _set_autostart(enabled: bool) -> None:
             _STARTUP_LINK.unlink()
         except FileNotFoundError:
             pass
+
 
 _PERSONA_USER_TEMPLATE = """# engram persona 사용자 오버라이드
 # 이 파일은 "사용자 고정값(pinned)" 오버라이드입니다.
@@ -360,7 +359,9 @@ class _SettingsWindow:
             text="힌트: persona.user.yaml에 작성한 값은 자동 진화보다 우선 적용됩니다.",
             foreground="gray",
         ).grid(row=5, column=0, columnspan=2, sticky="w", padx=8, pady=(8, 2))
-        ttk.Button(f, text="페르소나 파일 열기", command=self._open_persona_file).grid(row=6, column=0, columnspan=2, sticky="e", padx=8, pady=(0, 6))
+        ttk.Button(f, text="페르소나 파일 열기", command=self._open_persona_file).grid(
+            row=6, column=0, columnspan=2, sticky="e", padx=8, pady=(0, 6)
+        )
 
         f.columnconfigure(1, weight=1)
 
@@ -383,12 +384,16 @@ class _SettingsWindow:
         grip = tk.Frame(outer, height=6, cursor="sb_v_double_arrow", bg="#e0e0e0")
         grip.pack(fill="x", side="bottom")
         tk.Label(
-            grip, text="·  ·  ·", bg="#e0e0e0", foreground="#a8a8a8",
-            font=("TkDefaultFont", 7), anchor="e",
+            grip,
+            text="·  ·  ·",
+            bg="#e0e0e0",
+            foreground="#a8a8a8",
+            font=("TkDefaultFont", 7),
+            anchor="e",
         ).place(relx=1.0, rely=0.5, anchor="e", x=-4)
 
         grip._drag_y = 0  # type: ignore[attr-defined]
-        grip._txt = txt    # type: ignore[attr-defined]
+        grip._txt = txt  # type: ignore[attr-defined]
 
         def _press(e):
             grip._drag_y = e.y_root  # type: ignore[attr-defined]
@@ -539,9 +544,7 @@ class _SettingsWindow:
         f = self._tab_global
 
         # ── 자동 시작 ──
-        ttk.Label(f, text="시스템 설정", font=("", 9, "bold")).grid(
-            row=0, column=0, columnspan=2, sticky="w", padx=8, pady=(10, 2)
-        )
+        ttk.Label(f, text="시스템 설정", font=("", 9, "bold")).grid(row=0, column=0, columnspan=2, sticky="w", padx=8, pady=(10, 2))
         ttk.Checkbutton(
             f,
             text="재부팅 시 자동 실행",
@@ -553,14 +556,10 @@ class _SettingsWindow:
             foreground="gray",
         ).grid(row=2, column=0, columnspan=2, sticky="w", padx=28, pady=(0, 8))
 
-        ttk.Separator(f, orient="horizontal").grid(
-            row=3, column=0, columnspan=2, sticky="ew", padx=8, pady=4
-        )
+        ttk.Separator(f, orient="horizontal").grid(row=3, column=0, columnspan=2, sticky="ew", padx=8, pady=4)
 
         # ── 자동 컨텍스트 주입 ──
-        ttk.Label(f, text="세션 설정", font=("", 9, "bold")).grid(
-            row=4, column=0, columnspan=2, sticky="w", padx=8, pady=(4, 2)
-        )
+        ttk.Label(f, text="세션 설정", font=("", 9, "bold")).grid(row=4, column=0, columnspan=2, sticky="w", padx=8, pady=(4, 2))
         ttk.Checkbutton(
             f,
             text="CLI 공급자 시작 시 자동으로 engram 컨텍스트 주입",
@@ -571,17 +570,44 @@ class _SettingsWindow:
         warn_frame.grid(row=6, column=0, columnspan=2, sticky="ew", padx=16, pady=(4, 8))
         tk.Label(
             warn_frame,
-            text=(
-                "⚠  활성화하면 세션 시작마다 engram_get_context 가 자동 호출됩니다.\n"
-                "    초기 컨텍스트 토큰이 추가로 소모됩니다."
-            ),
+            text=("⚠  활성화하면 세션 시작마다 engram_get_context 가 자동 호출됩니다.\n" "    초기 컨텍스트 토큰이 추가로 소모됩니다."),
             bg="#fff8e1",
             anchor="w",
             justify="left",
             foreground="#7a5800",
         ).pack(fill="x", padx=8, pady=6)
 
+        ttk.Separator(f, orient="horizontal").grid(row=7, column=0, columnspan=2, sticky="ew", padx=8, pady=4)
+
+        ttk.Label(f, text="튜토리얼", font=("", 9, "bold")).grid(row=8, column=0, columnspan=2, sticky="w", padx=8, pady=(4, 2))
+        ttk.Label(
+            f,
+            text="튜토리얼 진행 플래그를 초기 상태로 되돌립니다. 기존 메모리/위키 데이터는 삭제되지 않습니다.",
+            foreground="gray",
+        ).grid(row=9, column=0, columnspan=2, sticky="w", padx=16, pady=(0, 4))
+        ttk.Button(
+            f,
+            text="튜토리얼 플래그 초기화",
+            command=self._reset_tutorial_flags,
+        ).grid(row=10, column=0, sticky="w", padx=16, pady=(0, 8))
+
         f.columnconfigure(1, weight=1)
+
+    def _reset_tutorial_flags(self):
+        ok = messagebox.askyesno(
+            "튜토리얼 초기화",
+            (
+                "튜토리얼 진행 플래그를 초기화할까요?\n\n"
+                "- 진행 단계/완료 단계가 초기 상태로 되돌아갑니다.\n"
+                "- 기존 메모리, 위키, 세션 데이터는 유지됩니다."
+            ),
+            parent=self.window,
+        )
+        if not ok:
+            return
+
+        reset_tutorial_state(reason="manual_from_settings")
+        self._show_toast("튜토리얼 플래그를 초기화했습니다. 다음 실행에서 처음 단계부터 진행됩니다.")
 
     def _load_current_values(self):
         cfg = self._cfg
@@ -776,6 +802,15 @@ class _SettingsWindow:
 
         rendered = self._render_persona_user_yaml(persona_values, numeric_values, pin_map)
         _USER_PERSONA_PATH.write_text(rendered, encoding="utf-8")
+        # pin 여부와 무관하게 현재 슬라이더/입력값을 DB baseline에도 반영해 즉시 체감 가능하게 한다.
+        baseline_updates = {**numeric_values}
+        for key in ("voice", "traits", "quirks", "values", "fewshot"):
+            if key in persona_values:
+                baseline_updates[key] = persona_values[key]
+        try:
+            set_persona_baseline(baseline_updates)
+        except Exception:
+            pass
         return pinned_count
 
     def _open_persona_file(self):
@@ -799,6 +834,11 @@ class _SettingsWindow:
     def _save(self):
         try:
             pinned_count = self._do_save()
+            try:
+                if has_user_persona_override():
+                    complete_tutorial_step("persona_setup", source="settings_save")
+            except Exception:
+                pass
             self._update_persona_banner()
             if self._on_saved:
                 try:

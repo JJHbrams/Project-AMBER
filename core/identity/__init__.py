@@ -9,6 +9,7 @@ from .service import (
     is_persona_initialized,
     render_persona,
     seed_persona,
+    set_persona_baseline,
     update_narrative,
     update_persona,
     update_themes_from_text,

@@ -43,9 +43,11 @@ memory:
 sync:
   # post-session KG sync 워치독 타임아웃 (초). 이 시간 초과 시 강제 취소.
   # 오케스트레이터만 trigger_sync=True로 호출해야 한다; subagent는 trigger_sync=False 전달.
-  watchdog_timeout_secs: 300
+  watchdog_timeout_secs: 240
   # 마지막 sync 완료 후 재실행 최소 간격 (초). 짧은 시간 내 중복 실행 방지.
-  cooldown_secs: 120
+  cooldown_secs: 300
+  # post-session memories 증분 동기화 배치 크기.
+  memories_batch_size: 300
 
 session:
   # CLI 공급자가 시작될 때 자동으로 engram 컨텍스트를 주입할지 여부
@@ -55,3 +57,23 @@ session:
 copilot:
   model: "claude-sonnet-4.6"
   allow_all_tools: true
+
+tools:
+  # MCP에 노출하지 않을 툴 목록. 함수 자체는 유지되므로 내부 호출에는 영향 없음.
+  # 사용자는 ~/.engram/user.config.yaml의 tools.disabled 로 오버라이드 가능.
+  disabled:
+    - engram_save_message
+    - engram_get_identity
+    - engram_get_persona
+    - engram_get_themes
+    - engram_update_persona
+    - engram_get_persona_status
+    - engram_apply_reflection
+    - engram_prepare_reflection
+    - engram_list_memories
+    - engram_get_activities
+    - engram_status
+    - kg_list_nodes
+    - kg_semantic_neighbors
+    - memories_sync
+    - engram_consult_engram
