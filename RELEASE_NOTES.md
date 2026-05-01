@@ -1,5 +1,28 @@
 # Release Notes
 
+## 2026-05-01 - Discord Routing and Queue Operations
+
+### Highlights
+- Added production-ready Discord routing for multi-guild and multi-channel deployments.
+- Added channel FIFO queueing with bounded parallel workers across channels.
+- Expanded operator docs for Discord setup, queue policy, and provider routing precedence.
+
+### What Changed
+- `discord_bot/bot.py` now supports explicit session commands, DM handling, and per-route provider resolution.
+- `config/overlay.yaml` and `overlay/config.py` now expose routing, allow/deny, override, and queue control options.
+- README Discord section was expanded with minimum and recommended config templates and operational behavior notes.
+
+### Impact
+- Requests remain ordered per channel under load while still processing multiple channels concurrently.
+- Operators can set provider behavior at channel and guild levels without changing global defaults.
+- Discord operations are easier to configure and troubleshoot with clearer policy and runtime guidance.
+
+### Files
+- discord_bot/bot.py
+- config/overlay.yaml
+- overlay/config.py
+- README.md
+
 ## 2026-04-30 - Tutorial Step 4 Continuity Hardening
 
 ### Highlights
