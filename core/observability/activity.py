@@ -4,7 +4,7 @@ engram의 기억(memories)과는 별개이며, engram가 반성 시 참조하는
 """
 
 from typing import List, Dict, Optional
-from .db import get_connection
+from core.storage.db import get_connection
 
 
 def log_activity(
@@ -65,3 +65,4 @@ def render_activity_for_reflection(since_session_id: Optional[int] = None, limit
             lines.append(f"  └ {a['detail'][:200]}")
 
     return "\n".join(lines)
+

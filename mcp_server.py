@@ -5,6 +5,7 @@ MCP 클라이언트가 호출 가능한 도구로 DB 연산을 노출하는 stdi
 
 import sys
 import os
+import re
 import threading
 import time
 
@@ -18,7 +19,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from mcp.server.fastmcp import FastMCP, Context
 
-from core.db import initialize_db, get_connection
+from core.storage.db import initialize_db, get_connection
 from core.identity import (
     get_identity,
     update_narrative,
@@ -32,22 +33,22 @@ from core.identity import (
     get_persona_status,
 )
 from core.memory import save_message, save_memory, search_memories, list_memories, upsert_working_memory
-from core.curiosity import add_curiosity, get_pending_curiosities, address_curiosity, dismiss_curiosity
-from core.directives import (
+from core.identity import add_curiosity, get_pending_curiosities, address_curiosity, dismiss_curiosity
+from core.context.directives import (
     add_directive,
     get_directives,
     update_directive,
     remove_directive,
 )
-from core.activity import log_activity, get_recent_activities, render_activity_for_reflection
-from core.copilot_bridge import ask_copilot
-from core.memory_bus import memory_bus
-from core.project_scope import resolve_scope_key
+from core.observability.activity import log_activity, get_recent_activities, render_activity_for_reflection
+from core.integrations.copilot_bridge import ask_copilot
+from core.memory.bus import memory_bus
+from core.context.project_scope import resolve_scope_key
 
 # DB 초기화
 initialize_db()
 
-from core.call_log import call_log as _call_log
+from core.observability.call_log import call_log as _call_log
 
 # host/port는 __main__ 블록에서 argparse 이후 재설정됨 (SSE 모드 전용)
 engramMCP = FastMCP("engram", instructions="Project Intel Engram 정신체의 기억·정체성·테마를 관리하는 도구 모음")
@@ -57,9 +58,19 @@ import inspect as _inspect
 
 _orig_tool = engramMCP.tool.__func__ if hasattr(engramMCP.tool, '__func__') else engramMCP.tool
 
+# 서버 시작 시 1회 스냅샷 — config.yaml tools.disabled 목록
+from core.config.runtime_config import get_disabled_tools as _get_disabled_tools
+_DISABLED_TOOLS: frozenset[str] = _get_disabled_tools()
+if _DISABLED_TOOLS:
+    print(f"[engram] disabled tools ({len(_DISABLED_TOOLS)}): {sorted(_DISABLED_TOOLS)}", file=sys.stderr)
+
+
 def _tool_with_log(*args, **kwargs):
-    decorator = engramMCP.__class__.tool(engramMCP, *args, **kwargs) if args or kwargs else engramMCP.__class__.tool(engramMCP)
     def wrap(fn):
+        tool_name = kwargs.get("name") or fn.__name__
+        if tool_name in _DISABLED_TOOLS:
+            return fn  # MCP 등록 생략
+        decorator = engramMCP.__class__.tool(engramMCP, *args, **kwargs) if args or kwargs else engramMCP.__class__.tool(engramMCP)
         if _inspect.iscoroutinefunction(fn):
             @_functools.wraps(fn)
             async def logged_async(*a, **kw):
@@ -254,7 +265,7 @@ def engram_status() -> dict:
     STM 브로커(overlay.exe) 연결 여부, DB 경로, 기본 정체성 이름을 확인할 수 있습니다."""
     import os
     from pathlib import Path
-    from core.runtime_config import get_db_root_dir
+    from core.config.runtime_config import get_db_root_dir
     from core.identity import get_identity
 
     current_url = _ensure_stm_url()
@@ -626,9 +637,9 @@ def _schedule_vault_sync() -> None:
     def _run():
         try:
             from pathlib import Path
-            from core.knowledge_graph import get_kg
-            from core.semantic_graph import get_semantic_graph
-            from core.runtime_config import get_db_root_dir
+            from core.graph.knowledge import get_kg
+            from core.graph.semantic import get_semantic_graph
+            from core.config.runtime_config import get_db_root_dir
 
             docs_dir = Path(get_db_root_dir()) / "docs"
             if not docs_dir.exists():
@@ -652,7 +663,7 @@ def _schedule_memories_sync() -> None:
 
     def _run():
         try:
-            from core.db import get_connection as _gc
+            from core.storage.db import get_connection as _gc
             sg = get_semantic_graph()
             if not sg.enabled:
                 return
@@ -691,7 +702,7 @@ def _sync_watchdog_loop() -> None:
     while True:
         time.sleep(10)
         if _post_session_sync_running.is_set() and _sync_start_time > 0:
-            from core.runtime_config import get_cfg_value
+            from core.config.runtime_config import get_cfg_value
             timeout = get_cfg_value("sync.watchdog_timeout_secs", 300)
             elapsed = time.monotonic() - _sync_start_time
             if elapsed > timeout:
@@ -728,7 +739,7 @@ def _schedule_post_session_sync() -> None:
         return
 
     # 가드 2: cooldown 윈도우
-    from core.runtime_config import get_cfg_value
+    from core.config.runtime_config import get_cfg_value
     cooldown = get_cfg_value("sync.cooldown_secs", 120)
     now = time.monotonic()
     if now - _last_sync_completed_at < cooldown:
@@ -757,9 +768,9 @@ def _schedule_post_session_sync() -> None:
             # 1. vault sync
             try:
                 from pathlib import Path
-                from core.knowledge_graph import get_kg
-                from core.semantic_graph import get_semantic_graph
-                from core.runtime_config import get_db_root_dir
+                from core.graph.knowledge import get_kg
+                from core.graph.semantic import get_semantic_graph
+                from core.config.runtime_config import get_db_root_dir
 
                 docs_dir = Path(get_db_root_dir()) / "docs"
                 if docs_dir.exists():
@@ -780,8 +791,8 @@ def _schedule_post_session_sync() -> None:
             if _sync_cancel.is_set():
                 return
             try:
-                from core.db import get_connection as _gc
-                from core.semantic_graph import get_semantic_graph
+                from core.storage.db import get_connection as _gc
+                from core.graph.semantic import get_semantic_graph
                 sg = get_semantic_graph()
                 if not sg.enabled:
                     return
@@ -862,7 +873,7 @@ def engram_close_session(
     - new_narrative: 이번 세션 후 업데이트할 자기 서술 (있으면 자동 반성 적용)
     - persona_observations: JSON 문자열 — 페르소나 관찰값 (warmth/formality/humor/directness/traits 등)"""
     import os
-    from core.project_scope import resolve_scope_key, resolve_project_key, resolve_kg_node_id
+    from core.context.project_scope import resolve_scope_key, resolve_project_key, resolve_kg_node_id
 
     effective_cwd = cwd or os.getcwd()
     project_key = resolve_project_key(cwd=effective_cwd)
@@ -903,7 +914,7 @@ def engram_close_session(
                 result_stm = _stm_post("/stm/session/close", {"scope_key": scope_key or ""})
                 if not result_stm:
                     # STM 브로커 없으면 직접 처리 — 가장 최근 세션 닫기
-                    conn_s = __import__("core.db", fromlist=["get_connection"]).get_connection()
+                    conn_s = __import__("core.storage.db", fromlist=["get_connection"]).get_connection()
                     row_s = conn_s.execute("SELECT id FROM sessions WHERE ended_at IS NULL ORDER BY started_at DESC LIMIT 1").fetchone()
                     if row_s:
                         _close_session(row_s[0], summary)
@@ -940,7 +951,7 @@ def engram_close_session(
             mem_lines.append(f"\n다음 작업: {open_intents}")
         _save_memory(None, "\n".join(mem_lines), source="close", project=project_key or "")
         # sessions 테이블 종료 기록 (fallback 경로)
-        conn_s = __import__("core.db", fromlist=["get_connection"]).get_connection()
+        conn_s = __import__("core.storage.db", fromlist=["get_connection"]).get_connection()
         row_s = conn_s.execute("SELECT id FROM sessions WHERE ended_at IS NULL ORDER BY started_at DESC LIMIT 1").fetchone()
         if row_s:
             _close_session(row_s[0], summary)
@@ -1196,9 +1207,9 @@ def engram_discord_send(channel_id: str, content: str, message_id: str = "") -> 
 
 # ── Knowledge Graph ───────────────────────────────────────
 
-from core.runtime_config import get_db_root_dir as _get_vault_root
-from core.knowledge_graph import get_kg
-from core.semantic_graph import get_semantic_graph
+from core.config.runtime_config import get_db_root_dir as _get_vault_root
+from core.graph.knowledge import get_kg
+from core.graph.semantic import get_semantic_graph
 from pathlib import Path as _Path
 
 
@@ -1436,11 +1447,25 @@ def kg_wiki_reminder(
     }
 
 
+def _is_dangerous_cypher(cypher: str) -> bool:
+    """필터 없는 전체 삭제 및 DROP TABLE 차단."""
+    upper = cypher.upper()
+    if re.search(r'\bDROP\s+(NODE\s+TABLE|REL\s+TABLE|TABLE)\b', upper):
+        return True
+    if re.search(r'\b(DETACH\s+)?DELETE\b', upper):
+        has_filter = bool(re.search(r'\bWHERE\b|\{', cypher))
+        return not has_filter
+    return False
+
+
 @engramMCP.tool()
 def kg_cypher(cypher: str) -> list:
     """KuzuDB에 직접 Cypher 쿼리를 실행합니다. (고급 그래프 탐색)
     예시: "MATCH (a:KGNode)-[e:KG_EDGE]->(b:KGNode) WHERE a.type='concept' RETURN a.title, e.rel_type, b.title LIMIT 10"
+    DELETE는 WHERE 또는 {} 필터가 있을 때만 허용됩니다. DROP TABLE은 항상 차단됩니다.
     - cypher: Cypher 쿼리문"""
+    if _is_dangerous_cypher(cypher):
+        return [{"error": "차단된 쿼리: 필터 없는 전체 삭제 또는 DROP TABLE은 허용되지 않습니다."}]
     sg = get_semantic_graph()
     if not sg.enabled:
         return [{"error": "SemanticGraph 비활성화"}]
@@ -1533,7 +1558,7 @@ def memories_sync(threshold: float = 0.40, top_k: int = 3) -> dict:
     memories 테이블의 내용을 임베딩하여 KGNode에 EP_TO_KG 릴레이션으로 연결합니다.
     - threshold: 시맨틱 유사도 임계값 (기본 0.40)
     - top_k: 에피소드당 연결할 최대 KGNode 수 (기본 3)"""
-    from core.db import get_connection as _get_db_conn
+    from core.storage.db import get_connection as _get_db_conn
 
     sg = get_semantic_graph()
     if not sg.enabled:
@@ -1735,3 +1760,7 @@ if __name__ == "__main__":
         engramMCP.settings.host = args.host
         engramMCP.settings.port = args.port
         engramMCP.run(transport=args.transport)
+
+
+
+

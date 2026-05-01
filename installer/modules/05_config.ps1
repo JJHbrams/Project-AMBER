@@ -66,11 +66,34 @@ print('updated')
     }
 }
 
-# 5. MCP config (Copilot CLI) — overlay 수명 공유 SSE
+# 5. MCP config (Copilot CLI) — overlay 수명 공유 SSE (기존 항목 보존, merge)
 Write-Step "MCP config (Copilot CLI)..."
 $mcpDir = Split-Path $McpConfigPath
 if (-not (Test-Path $mcpDir)) { New-Item -Path $mcpDir -ItemType Directory -Force | Out-Null }
-$mcpJson = @{ mcpServers = @{ engram = @{ type = "sse"; url = "http://127.0.0.1:$MCP_HTTP_PORT/sse" } } } | ConvertTo-Json -Depth 5
+$engramMcpEntry = [PSCustomObject]@{ type = "sse"; url = "http://127.0.0.1:$MCP_HTTP_PORT/sse" }
+if (Test-Path $McpConfigPath) {
+    try {
+        $existingMcp = Get-Content $McpConfigPath -Raw | ConvertFrom-Json
+        if (-not $existingMcp.mcpServers) {
+            $existingMcp | Add-Member -NotePropertyName mcpServers -NotePropertyValue ([PSCustomObject]@{}) -Force
+        }
+        # 구 이름(continuum) 정리
+        if ($existingMcp.mcpServers.PSObject.Properties["continuum"]) {
+            $existingMcp.mcpServers.PSObject.Properties.Remove("continuum")
+            Write-Ok "Removed legacy 'continuum' MCP entry"
+        }
+        if ($existingMcp.mcpServers.PSObject.Properties["engram"]) {
+            $existingMcp.mcpServers.PSObject.Properties.Remove("engram")
+        }
+        $existingMcp.mcpServers | Add-Member -NotePropertyName engram -NotePropertyValue $engramMcpEntry
+        $mcpJson = $existingMcp | ConvertTo-Json -Depth 6
+    } catch {
+        # 파싱 실패 시 새로 작성
+        $mcpJson = @{ mcpServers = @{ engram = $engramMcpEntry } } | ConvertTo-Json -Depth 5
+    }
+} else {
+    $mcpJson = @{ mcpServers = @{ engram = $engramMcpEntry } } | ConvertTo-Json -Depth 5
+}
 [System.IO.File]::WriteAllText($McpConfigPath, $mcpJson, [System.Text.UTF8Encoding]::new($false))
 Write-Ok $McpConfigPath
 

@@ -1,9 +1,10 @@
 from dataclasses import dataclass
 from typing import List, Optional, Union
 
-from .context_builder import build_system_prompt
-from .identity import update_themes_from_text
-from .memory import (
+from core.context.context_builder import build_system_prompt
+from core.context.project_scope import resolve_project_key, resolve_scope_key
+from core.identity import update_themes_from_text
+from .store import (
     DEFAULT_SCOPE_KEY,
     append_working_memory_hint,
     create_session,
@@ -11,7 +12,6 @@ from .memory import (
     save_memory,
     save_message,
 )
-from .project_scope import resolve_scope_key
 
 
 @dataclass(frozen=True)
@@ -85,7 +85,6 @@ class MemoryBus:
         is_session_init: bool = False,
     ) -> str:
         resolved_scope = self._resolve_scope_key(session, scope_key, project_key=project_key, cwd=cwd)
-        from core.project_scope import resolve_project_key
         resolved_project_key = project_key or resolve_project_key(cwd=cwd)
         return build_system_prompt(user_query, caller=caller, scope_key=resolved_scope, project_key=resolved_project_key or "", is_session_init=is_session_init)
 
@@ -126,3 +125,5 @@ class MemoryBus:
 
 
 memory_bus = MemoryBus()
+
+

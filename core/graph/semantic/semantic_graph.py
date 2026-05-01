@@ -13,9 +13,13 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from core.config.runtime_config import get_db_root_dir
 
 logger = logging.getLogger(__name__)
 
@@ -84,8 +88,6 @@ class SemanticGraph:
         embedding_model: str = "paraphrase-multilingual-MiniLM-L12-v2",
         read_only: bool = False,
     ) -> None:
-        import threading
-
         self._write_lock = threading.RLock()
         self._sync_lock = threading.Lock()  # sync_from_kg 동시 실행 방지
         self._read_only = read_only
@@ -112,8 +114,6 @@ class SemanticGraph:
 
         if db_path is None:
             try:
-                from core.runtime_config import get_db_root_dir
-
                 db_path = str(Path(get_db_root_dir()) / "semantic_graph")
             except Exception:
                 db_path = "semantic_graph"
@@ -122,9 +122,7 @@ class SemanticGraph:
 
         # overlay.exe 컨텍스트: KuzuDB는 MCP 서버가 독점 소유.
         # ENGRAM_RUNTIME_ROLE=overlay 가 설정된 경우 KuzuDB 열기를 스킵한다.
-        import os as _os
-
-        if _os.environ.get("ENGRAM_RUNTIME_ROLE") == "overlay":
+        if os.environ.get("ENGRAM_RUNTIME_ROLE") == "overlay":
             logger.info("SemanticGraph: overlay 컨텍스트 — KuzuDB 스킵 (MCP 서버 독점)")
             return
 
@@ -370,7 +368,7 @@ class SemanticGraph:
             return {"status": "skipped"}
 
         try:
-            from core.db import get_connection
+            from core.storage.db import get_connection
 
             conn = get_connection()
 
@@ -819,3 +817,4 @@ def get_semantic_graph() -> SemanticGraph:
     if _sg_instance is None:
         _sg_instance = SemanticGraph()
     return _sg_instance
+

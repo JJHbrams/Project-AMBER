@@ -5,11 +5,12 @@
 import re
 import threading
 import concurrent.futures
+from datetime import datetime, timezone
 from typing import List, Optional, Dict
 
-from .db import get_connection
-from .sanitizer import sanitize
-from .runtime_config import get_cfg_value, get_default_fallback_scope_key
+from core.storage.db import get_connection
+from core.common.sanitizer import sanitize
+from core.config.runtime_config import get_cfg_value, get_default_fallback_scope_key
 
 DEFAULT_SCOPE_KEY = get_default_fallback_scope_key()
 DEFAULT_PROJECT_KEY = "general"
@@ -110,8 +111,6 @@ def _format_memory(content: str, source: str, provider: str, project: str = "") 
     이미 포맷이 적용된 내용이면 그대로 반환."""
     if content.startswith("---\nsource:"):
         return content
-    from datetime import datetime, timezone
-
     date_str = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d")
     meta_parts = [f"source: {source}"]
     if provider:
@@ -166,8 +165,8 @@ def save_memory(
 def _async_upsert_episode(episode_id: str, content: str, keywords: str, session_id: str, provider: str = "", model: str = ""):
     """백그라운드 스레드에서 EpisodeNode를 KuzuDB에 upsert한다."""
     try:
-        from core.semantic_graph import get_semantic_graph
-        from datetime import datetime, timezone
+        # core.graph.semantic 패키지는 stm_promoter ↔ store 순환이 있어 지연 import 유지.
+        from core.graph.semantic import get_semantic_graph
 
         sg = get_semantic_graph()
         if sg.enabled:
@@ -193,8 +192,8 @@ def search_memories(query: str, limit: int = 5, max_age_days: int = 0) -> List[s
     # 1. Semantic search via EpisodeNode (primary)
     if query:
         try:
-            from core.semantic_graph import get_semantic_graph
-
+            # core.graph.semantic 패키지는 stm_promoter ↔ store 순환이 있어 지연 import 유지.
+            from core.graph.semantic import get_semantic_graph
             sg = get_semantic_graph()
             if sg.enabled:
                 hits = sg.episode_semantic_search(query, top_k=limit, threshold=0.25, max_age_days=max_age_days)
@@ -376,3 +375,5 @@ def _normalize_scope_key(scope_key: Optional[str]) -> str:
 def _clip(text: str, limit: int) -> str:
     cleaned = sanitize(text or "", max_length=limit)
     return cleaned
+
+

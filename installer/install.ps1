@@ -85,6 +85,12 @@ Write-Host ""
 . "$PSScriptRoot\modules\09_overlay.ps1"
 . "$PSScriptRoot\modules\10_shortcuts.ps1"
 
+# ── Auto-launch overlay ──────────────────────────────────────
+if (-not $Uninstall -and (Test-Path $DistExe)) {
+    Write-Host "  Launching engram-overlay..." -ForegroundColor DarkGray
+    Start-Process -FilePath $DistExe -WindowStyle Normal
+}
+
 # ── Done ───────────────────────────────────────────────────
 Write-Host ""
 Write-Host "  Install complete!" -ForegroundColor Green

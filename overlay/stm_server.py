@@ -30,7 +30,7 @@ _shutdown_callback: "Optional[callable]" = None
 
 def _get_port() -> int:
     try:
-        from core.runtime_config import get_cfg_value
+        from core.config.runtime_config import get_cfg_value
 
         return int(get_cfg_value("overlay.stm_server_port", DEFAULT_PORT))
     except Exception:
@@ -117,7 +117,7 @@ class _STMHandler(BaseHTTPRequestHandler):
                 pk = body.get("project_key") or None
                 parsed_keys = [pk] if pk else []
             try:
-                from core.memory_bus import memory_bus
+                from core.memory.bus import memory_bus
 
                 session = memory_bus.start_session(scope_key=scope_key, project_keys=parsed_keys or None)
                 self._send_json({"session_id": session.session_id, "scope_key": session.scope_key, "projects": parsed_keys or ["general"]})
@@ -150,7 +150,7 @@ class _STMHandler(BaseHTTPRequestHandler):
             try:
                 if scope_key:
                     import threading
-                    from core.stm_promoter import maybe_promote
+                    from core.graph.semantic import maybe_promote
 
                     t = threading.Thread(target=maybe_promote, kwargs={"scope_key": scope_key}, daemon=True)
                     t.start()
@@ -220,3 +220,6 @@ class STMServer:
     @property
     def port(self) -> int:
         return self._port
+
+
+

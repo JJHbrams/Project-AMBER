@@ -7,8 +7,8 @@ MCP 서버를 통해 호출 도구가 직접 반성의 주체가 됨.
 ~~독립 REPL(engram.py)에서는 ask_llm()을 통해 반성을 수행.~~ (레거시, 미사용)
 """
 
-from .db import get_connection
-from .identity import get_identity, update_narrative, decay_themes, get_themes
+from core.storage.db import get_connection
+from .service import get_identity, update_narrative, decay_themes, get_themes
 
 
 def prepare_reflection_context(session_id: int) -> dict:
@@ -62,3 +62,5 @@ def _save_session_summary(session_id: int, summary: str):
             (summary, session_id),
         )
     conn.close()
+
+

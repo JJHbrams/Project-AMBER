@@ -20,9 +20,9 @@ from pathlib import Path
 
 import discord
 
-from core.db import get_connection, initialize_db
-from core.memory_bus import memory_bus
-from core.runtime_config import (
+from core.storage.db import get_connection, initialize_db
+from core.memory.bus import memory_bus
+from core.config.runtime_config import (
     get_discord_scope_prefix,
     get_copilot_model,
     get_copilot_allow_all_tools,
@@ -345,3 +345,5 @@ def _enqueue(channel_id: str, message_id: str, content: str, reply: str):
             )
     except Exception:
         pass
+
+

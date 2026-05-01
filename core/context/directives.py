@@ -8,8 +8,8 @@ trigger_type: 주입 조건 ('always' | 'wiki' | 'code' | 'git' | 'reflection')
 """
 
 from typing import List, Dict, Optional
-from core.db import get_connection
-from core.sanitizer import sanitize
+from core.storage.db import get_connection
+from core.common.sanitizer import sanitize
 
 
 # ── 트리거 키워드 매핑 ────────────────────────────────────────────────────────
@@ -178,3 +178,4 @@ def render_directives_prompt(caller: str = "all", user_query: str = "") -> str:
         scope_tag = f" [{d['scope']}]" if d["scope"] != "all" else ""
         lines.append(f"• {d['content']}{scope_tag}")
     return "[지침]\n" + "\n".join(lines)
+

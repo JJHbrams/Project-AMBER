@@ -239,6 +239,14 @@ def get_copilot_allow_all_tools() -> bool:
     return bool(get_cfg_value("copilot.allow_all_tools", default))
 
 
+def get_disabled_tools() -> frozenset[str]:
+    """MCP에 등록하지 않을 툴 이름 집합 반환 (서버 시작 시 1회 스냅샷용)."""
+    raw = get_cfg_value("tools.disabled", [])
+    if not isinstance(raw, list):
+        return frozenset()
+    return frozenset(str(t).strip() for t in raw if str(t).strip())
+
+
 def get_watch_workspaces() -> list[str]:
     """user.config.yaml의 watch_workspaces 반환.
 

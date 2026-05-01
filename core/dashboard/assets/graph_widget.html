@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+__VIS_CSS__
+__GRAPH_CSS__
+</style>
+<script>__VIS_JS__</script>
+</head>
+<body>
+<div style="position:relative" id="wrap">
+  <div id="mynetwork"></div>
+  <div id="eg-pin"></div>
+  <details id="ctrl" open>
+    <summary>⚙ 실시간 제어</summary>
+    <div style="margin-top:6px">
+      <label><input type="checkbox" id="physOn" __PHYS_CHECKED__> Physics</label>
+      <div class="cl">반발력 <span class="cv" id="gv">__ABS_GRAV__</span></div>
+      <input type="range" id="gs" min="10" max="300" value="__ABS_GRAV__">
+      <div class="cl">엣지 길이 <span class="cv" id="slv">__SPRING_LENGTH__</span></div>
+      <input type="range" id="sl" min="50" max="400" value="__SPRING_LENGTH__">
+      <hr class="sep">
+      <div class="cl">노드 크기 <span class="cv" id="ssv">__SIZE_SCALE__x</span></div>
+      <input type="range" id="ss" min="5" max="30" value="__SS_INIT__">
+    </div>
+  </details>
+</div>
+<script>
+var _nodesArr = __NODES_JSON__;
+var _edgesArr = __EDGES_JSON__;
+var _GRAPH_HEIGHT = __HEIGHT__;
+var _baseSizes = {};
+_nodesArr.forEach(function(n){
+  _baseSizes[n.id] = n._baseSize || n.size || 12;
+  if(n._tooltip){ var d = document.createElement('div'); d.innerHTML = n._tooltip; n.title = d; }
+});
+var _container = document.getElementById('mynetwork');
+var _dsN = new vis.DataSet(_nodesArr);
+var _dsE = new vis.DataSet(_edgesArr);
+var network = new vis.Network(_container, {nodes:_dsN, edges:_dsE}, {
+  nodes:{borderWidth:1, borderWidthSelected:3, font:{size:12, face:"monospace", color:"#c9d1d9"}},
+  edges:{arrows:{to:{enabled:true, scaleFactor:0.4}}, smooth:{type:"continuous", roundness:0.2}},
+  physics:{
+    enabled:__PHYSICS_ENABLED__,
+    forceAtlas2Based:{gravitationalConstant:__GRAV_CONST__, centralGravity:__CENTRAL_GRAVITY__,
+      springLength:__SPRING_LENGTH__, springConstant:__SPRING_CONST__, damping:__DAMPING__},
+    solver:"forceAtlas2Based",
+    stabilization:{enabled:true, iterations:200, fit:true}
+  },
+  interaction:{hover:true, tooltipDelay:80, navigationButtons:true}
+});
+__GRAPH_JS_BODY__
+</script>
+</body>
+</html>

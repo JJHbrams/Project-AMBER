@@ -20,8 +20,9 @@ from typing import Optional
 
 import requests
 
-from .db import get_connection
-from .memory import save_memory
+from core.storage.db import get_connection
+from core.memory.store import save_memory
+from .semantic_graph import get_semantic_graph
 
 logger = logging.getLogger(__name__)
 
@@ -118,11 +119,9 @@ def _get_promotable_messages(scope_key: str, max_minutes: int = 240) -> list[dic
 def _compute_novelty(msgs: list[dict]) -> float:
     """대화 centroid와 기존 기억 유사도 기반 novelty (0=기존과 유사, 1=새로움)."""
     try:
-        from .semantic_graph import compute_embedding, get_semantic_graph
-
         text = " ".join(m["content"][:150] for m in msgs[-8:])
-        conv_vec = compute_embedding(text)
         sg = get_semantic_graph()
+        conv_vec = sg.compute_embedding(text)
         if sg.enabled:
             results = sg.episode_semantic_search(query_vec=conv_vec, top_k=3)
             if results:
@@ -235,3 +234,5 @@ def maybe_promote_async(scope_key: str = "overlay") -> threading.Thread:
     t = threading.Thread(target=maybe_promote, args=(scope_key,), daemon=True)
     t.start()
     return t
+
+

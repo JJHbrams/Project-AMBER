@@ -6,7 +6,8 @@ import re
 from pathlib import Path
 from typing import Optional
 
-from .runtime_config import get_cfg_value
+from core.config.runtime_config import get_cfg_value
+from core.storage.db import get_connection
 
 _PROJECT_MARKERS = (
     ".git",
@@ -85,8 +86,6 @@ def resolve_kg_node_id(project_key: str) -> str | None:
     1. config의 memory.scope.kg_node_map에서 직접 매핑
     2. kg_nodes 테이블에서 하이픈 제거 정규화 후 prefix 매칭
     """
-    from .runtime_config import get_cfg_value
-
     # 1) config 직접 매핑
     mapping = get_cfg_value("memory.scope.kg_node_map", {})
     if isinstance(mapping, dict) and project_key in mapping:
@@ -96,7 +95,6 @@ def resolve_kg_node_id(project_key: str) -> str | None:
         return None
 
     try:
-        from .db import get_connection
         conn = get_connection()
         rows = conn.execute(
             "SELECT id FROM kg_nodes WHERE type='project' ORDER BY updated_at DESC LIMIT 50"
@@ -125,3 +123,4 @@ def resolve_kg_node_id(project_key: str) -> str | None:
 def _slugify(value: str) -> str:
     collapsed = re.sub(r"[^a-zA-Z0-9]+", "-", (value or "").strip().lower()).strip("-")
     return collapsed or ""
+
