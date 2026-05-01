@@ -145,6 +145,28 @@ def _safe_load_yaml(path: Path) -> dict:
     return {}
 
 
+def _filter_runtime_state_overrides(state: dict, user: dict) -> dict:
+    """Keep explicit user CLI values authoritative over runtime state.
+
+    Runtime state is useful for ephemeral selections, but if a key is explicitly
+    present in `overlay.user.yaml`, we should not let `overlay.state.yaml`
+    override it.
+    """
+    if not isinstance(state, dict) or not state:
+        return {}
+
+    filtered = copy.deepcopy(state)
+    user_cli = user.get("cli") if isinstance(user, dict) else None
+    state_cli = filtered.get("cli") if isinstance(filtered, dict) else None
+    if isinstance(user_cli, dict) and isinstance(state_cli, dict):
+        for key in tuple(state_cli.keys()):
+            if key in user_cli:
+                state_cli.pop(key, None)
+        if not state_cli:
+            filtered.pop("cli", None)
+    return filtered
+
+
 def normalize_cli_provider(provider: str | None) -> str:
     value = str(provider or "").strip().lower()
     value = _CLI_PROVIDER_ALIASES.get(value, value)
@@ -259,6 +281,7 @@ def load_cfg() -> dict:
         cfg = _deep_merge(cfg, user)
 
     state = _safe_load_yaml(_STATE_PATH)
+    state = _filter_runtime_state_overrides(state, user)
     if state:
         cfg = _deep_merge(cfg, state)
     return cfg
