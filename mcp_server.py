@@ -621,7 +621,8 @@ def engram_get_context(
                 if next_session_prompt:
                     notices.append(f"[📘 TUTORIAL_NEXT_SESSION_PROMPT] {next_session_prompt}")
                 notices.append(
-                    "[📘 TUTORIAL_GUIDE_RULE] 4단계(마지막)는 안내만 제공하세요. " "'진행하시겠습니까?' 같은 확인 질문과 자동 도구 호출을 금지합니다."
+                    "[📘 TUTORIAL_GUIDE_RULE] 4단계(마지막)는 안내만 제공하세요. "
+                    "'진행하시겠습니까?' 같은 확인 질문과 자동 도구 호출을 금지합니다."
                 )
 
     if notices:
@@ -673,9 +674,7 @@ def engram_get_context_once(
             session_id = int(sess_result["session_id"])
         else:
             _parsed_keys = [project_key.strip()] if project_key.strip() else []
-            _sess = memory_bus.start_session(
-                scope_key=effective_scope, project_keys=_parsed_keys or None
-            )
+            _sess = memory_bus.start_session(scope_key=effective_scope, project_keys=_parsed_keys or None)
             session_id = _sess.session_id
         with _CONTEXT_ONCE_LOCK:
             _CONTEXT_ONCE_KEYS[cache_key] = session_id
@@ -684,6 +683,7 @@ def engram_get_context_once(
             _FINGERPRINT_TO_SESSION[session_fingerprint] = session_id
     except Exception as _e:
         import logging as _logging
+
         _logging.getLogger(__name__).warning("get_context_once STM 세션 생성 실패: %s", _e)
 
     ctx_text = engram_get_context(
@@ -1526,8 +1526,7 @@ def _sync_memories_incremental(cancel_event: threading.Event | None = None) -> t
                 break
 
             rows = conn.execute(
-                "SELECT id, session_id, content, keywords, created_at "
-                "FROM memories WHERE id > ? ORDER BY id LIMIT ?",
+                "SELECT id, session_id, content, keywords, created_at " "FROM memories WHERE id > ? ORDER BY id LIMIT ?",
                 (last_synced_id, batch_size),
             ).fetchall()
             if not rows:
@@ -1867,7 +1866,9 @@ def engram_close_session(
 
 
 @engramMCP.tool()
-def engram_save_message(session_id: int = 0, role: str = "user", content: str = "", request_id: str = "", scope_key: str = "", ctx: Context | None = None) -> dict:
+def engram_save_message(
+    session_id: int = 0, role: str = "user", content: str = "", request_id: str = "", scope_key: str = "", ctx: Context | None = None
+) -> dict:
     """대화 메시지를 저장합니다. role은 'user' 또는 'assistant'.
     session_id 없이 호출하면 현재 MCP 연결의 세션을 자동으로 찾아 저장합니다.
     request_id를 제공하면 중복 저장이 방지됩니다 (overlay 브로커 모드)."""
@@ -1880,6 +1881,7 @@ def engram_save_message(session_id: int = 0, role: str = "user", content: str = 
     # 2순위: scope_key로 DB 조회 (fallback)
     if not resolved_id and scope_key:
         from core.memory import resolve_session_id_by_scope
+
         resolved_id = resolve_session_id_by_scope(scope_key) or 0
     # 브로커 모드: overlay STM 서버에 위임
     result = _stm_post(

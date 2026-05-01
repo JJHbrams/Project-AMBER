@@ -38,6 +38,8 @@ log = logging.getLogger(__name__)
 _ENV_PATH = Path.home() / ".engram" / ".env"
 _LOG_PATH = Path.home() / ".engram" / "overlay.log"
 ENGRAM_CMD = Path.home() / ".engram" / "engram-copilot.cmd"
+ENGRAM_GEMINI_CMD = Path.home() / ".engram" / "engram-gemini.cmd"
+ENGRAM_CLAUDE_CMD = Path.home() / ".engram" / "engram-claude.cmd"
 CLAUDE_MCP_CONFIG = Path.home() / ".engram" / "claude-mcp.json"
 DISCORD_SCOPE_PREFIX = get_discord_scope_prefix()
 COPILOT_MODEL = get_copilot_model()
@@ -432,10 +434,11 @@ def _build_copilot_command(prompt: str, session_name: str, use_resume: bool) -> 
 
 
 def _build_claude_command(prompt: str, session_name: str, use_resume: bool, cli_cfg: dict) -> list[str]:
-    claude_command = str(cli_cfg.get("claude_command") or "claude").strip() or "claude"
+    use_shim = ENGRAM_CLAUDE_CMD.exists()
+    claude_command = str(ENGRAM_CLAUDE_CMD) if use_shim else (str(cli_cfg.get("claude_command") or "claude").strip() or "claude")
     claude_opts: list[str] = []
 
-    if CLAUDE_MCP_CONFIG.exists():
+    if not use_shim and CLAUDE_MCP_CONFIG.exists():
         claude_opts.extend(["--mcp-config", str(CLAUDE_MCP_CONFIG)])
 
     model_id = str(cli_cfg.get("claude_model") or cli_cfg.get("ollama_model") or "").strip()
@@ -448,6 +451,9 @@ def _build_claude_command(prompt: str, session_name: str, use_resume: bool, cli_
 
 
 def _build_gemini_command(prompt: str, cli_cfg: dict) -> list[str]:
+    if ENGRAM_GEMINI_CMD.exists():
+        return _build_exec_command(str(ENGRAM_GEMINI_CMD), ["-p", prompt])
+
     gemini_command = str(cli_cfg.get("gemini_command") or "gemini").strip() or "gemini"
     gemini_opts: list[str] = ["--allowed-mcp-server-names", "engram", "-p", prompt]
     return _build_exec_command(gemini_command, gemini_opts)

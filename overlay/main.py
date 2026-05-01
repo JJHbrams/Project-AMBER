@@ -534,9 +534,9 @@ class OverlayApp:
         """provider와 ollama_model을 원자적으로 업데이트한다.
         model=None 이면 현재 모델 유지, model='' 이면 클리어.
         """
-        normalized = set_cli_provider(provider)
+        normalized = set_cli_provider(provider, sync_user=True)
         if model is not None:
-            self._ollama_model = set_ollama_model(model)
+            self._ollama_model = set_ollama_model(model, sync_user=True)
         self._cli_provider = normalized
         self.chat.set_provider(normalized)
         try:

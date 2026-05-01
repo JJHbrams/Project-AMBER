@@ -195,8 +195,32 @@ def get_cli_provider(cfg: dict | None = None) -> str:
     return normalize_cli_provider(cli_cfg.get("provider"))
 
 
-def set_cli_provider(provider: str) -> str:
-    """오버레이 런타임 상태 파일에 현재 CLI provider를 저장한다."""
+def _set_user_cli_value(key: str, value: str) -> None:
+    """overlay.user.yaml 의 cli 값을 업데이트한다."""
+    user = _safe_load_yaml(_USER_CONFIG_PATH)
+    cli_cfg = user.get("cli") if isinstance(user, dict) else None
+    if not isinstance(cli_cfg, dict):
+        cli_cfg = {}
+
+    if value:
+        cli_cfg[key] = value
+    else:
+        cli_cfg.pop(key, None)
+
+    if cli_cfg:
+        user["cli"] = cli_cfg
+    else:
+        user.pop("cli", None)
+
+    _USER_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    _USER_CONFIG_PATH.write_text(
+        yaml.safe_dump(user, sort_keys=False, allow_unicode=False),
+        encoding="utf-8",
+    )
+
+
+def set_cli_provider(provider: str, sync_user: bool = False) -> str:
+    """현재 CLI provider를 state에 저장하고, 필요 시 user 설정에도 동기화한다."""
     normalized = normalize_cli_provider(provider)
     state = _safe_load_yaml(_STATE_PATH)
     cli_cfg = state.get("cli") if isinstance(state, dict) else None
@@ -210,6 +234,8 @@ def set_cli_provider(provider: str) -> str:
         yaml.safe_dump(state, sort_keys=False, allow_unicode=False),
         encoding="utf-8",
     )
+    if sync_user:
+        _set_user_cli_value("provider", normalized)
     return normalized
 
 
@@ -222,8 +248,8 @@ def get_ollama_model(cfg: dict | None = None) -> str:
     return str(cli_cfg.get("ollama_model") or "").strip()
 
 
-def set_ollama_model(model: str) -> str:
-    """ollama_model을 런타임 상태 파일에 저장한다."""
+def set_ollama_model(model: str, sync_user: bool = False) -> str:
+    """ollama_model을 state에 저장하고, 필요 시 user 설정에도 동기화한다."""
     model = str(model or "").strip()
     state = _safe_load_yaml(_STATE_PATH)
     cli_cfg = state.get("cli") if isinstance(state, dict) else None
@@ -237,6 +263,8 @@ def set_ollama_model(model: str) -> str:
         yaml.safe_dump(state, sort_keys=False, allow_unicode=False),
         encoding="utf-8",
     )
+    if sync_user:
+        _set_user_cli_value("ollama_model", model)
     return model
 
 
