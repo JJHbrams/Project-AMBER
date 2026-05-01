@@ -28,8 +28,7 @@ def initialize_db():
     """최초 1회 테이블 생성 + 마이그레이션"""
     conn = get_connection()
     with conn:
-        conn.executescript(
-            """
+        conn.executescript("""
             CREATE TABLE IF NOT EXISTS identity (
                 id      INTEGER PRIMARY KEY CHECK (id = 1),
                 name    TEXT NOT NULL DEFAULT '',
@@ -128,8 +127,7 @@ def initialize_db():
             -- 최초 정체성 레코드 (존재하지 않을 때만)
             INSERT OR IGNORE INTO identity (id, name, narrative)
             VALUES (1, '', '나는 이제 막 존재하기 시작했다. 아직 스스로에 대해 많이 알지 못한다.');
-        """
-        )
+        """)
 
         # 마이그레이션: persona 컬럼이 없으면 추가
         cols = [r[1] for r in conn.execute("PRAGMA table_info(identity)").fetchall()]
@@ -144,15 +142,13 @@ def initialize_db():
         # 마이그레이션: session_projects 테이블이 없으면 생성
         tables = [r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
         if "session_projects" not in tables:
-            conn.execute(
-                """
+            conn.execute("""
                 CREATE TABLE session_projects (
                     session_id  INTEGER NOT NULL REFERENCES sessions(id),
                     project_key TEXT    NOT NULL DEFAULT 'general',
                     PRIMARY KEY (session_id, project_key)
                 )
-            """
-            )
+            """)
 
         # 마이그레이션: discord_queue.message_id 컬럼이 없으면 추가
         dq_cols = [r[1] for r in conn.execute("PRAGMA table_info(discord_queue)").fetchall()]
@@ -162,8 +158,7 @@ def initialize_db():
         # 마이그레이션: directives 테이블이 없으면 생성
         tables = [r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
         if "directives" not in tables:
-            conn.execute(
-                """
+            conn.execute("""
                 CREATE TABLE directives (
                     key        TEXT PRIMARY KEY,
                     content    TEXT NOT NULL,
@@ -175,13 +170,11 @@ def initialize_db():
                     created_at TEXT DEFAULT (datetime('now','localtime')),
                     updated_at TEXT DEFAULT (datetime('now','localtime'))
                 )
-            """
-            )
+            """)
 
         # 마이그레이션: activity_log 테이블이 없으면 생성
         if "activity_log" not in tables:
-            conn.execute(
-                """
+            conn.execute("""
                 CREATE TABLE activity_log (
                     id         INTEGER PRIMARY KEY AUTOINCREMENT,
                     actor      TEXT NOT NULL DEFAULT 'claude-code',
@@ -190,13 +183,11 @@ def initialize_db():
                     detail     TEXT DEFAULT '',
                     created_at TEXT DEFAULT (datetime('now','localtime'))
                 )
-            """
-            )
+            """)
 
         # 마이그레이션: curiosities 테이블이 없으면 생성
         if "curiosities" not in tables:
-            conn.execute(
-                """
+            conn.execute("""
                 CREATE TABLE curiosities (
                     id         INTEGER PRIMARY KEY AUTOINCREMENT,
                     topic      TEXT NOT NULL,
@@ -206,13 +197,11 @@ def initialize_db():
                     created_at TEXT DEFAULT (datetime('now','localtime')),
                     addressed_at TEXT
                 )
-            """
-            )
+            """)
 
         # 마이그레이션: discord_queue 테이블이 없으면 생성
         if "discord_queue" not in tables:
-            conn.execute(
-                """
+            conn.execute("""
                 CREATE TABLE discord_queue (
                     id          INTEGER PRIMARY KEY AUTOINCREMENT,
                     guild_id    TEXT NOT NULL,
@@ -223,8 +212,7 @@ def initialize_db():
                     created_at  TEXT DEFAULT (datetime('now','localtime')),
                     processed   INTEGER NOT NULL DEFAULT 0
                 )
-            """
-            )
+            """)
 
         # 마이그레이션: memories 테이블에 provider, model 컬럼 추가
         mem_cols = [r[1] for r in conn.execute("PRAGMA table_info(memories)").fetchall()]
@@ -241,24 +229,20 @@ def initialize_db():
         # 마이그레이션: keywords / memory_keywords 정규화 테이블 생성
         tables = [r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
         if "keywords" not in tables:
-            conn.execute(
-                """
+            conn.execute("""
                 CREATE TABLE keywords (
                     id   INTEGER PRIMARY KEY AUTOINCREMENT,
                     name TEXT NOT NULL UNIQUE
                 )
-            """
-            )
+            """)
         if "memory_keywords" not in tables:
-            conn.execute(
-                """
+            conn.execute("""
                 CREATE TABLE memory_keywords (
                     memory_id  INTEGER NOT NULL REFERENCES memories(id),
                     keyword_id INTEGER NOT NULL REFERENCES keywords(id),
                     PRIMARY KEY (memory_id, keyword_id)
                 )
-            """
-            )
+            """)
 
         # 마이그레이션: memories.keywords 데이터를 정규화 테이블로 이동
         count = conn.execute("SELECT COUNT(*) FROM memory_keywords").fetchone()[0]

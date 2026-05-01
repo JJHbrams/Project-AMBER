@@ -11,7 +11,6 @@ from .db import get_connection
 from .sanitizer import sanitize
 from .runtime_config import get_cfg_value, get_default_fallback_scope_key
 
-
 DEFAULT_SCOPE_KEY = get_default_fallback_scope_key()
 DEFAULT_PROJECT_KEY = "general"
 
@@ -25,11 +24,13 @@ def _submit_embed_task(*args) -> None:
     """임베딩 task를 executor에 submit. 큐가 꽉 찼으면 drop."""
     if not _embed_semaphore.acquire(blocking=False):
         return
+
     def _wrapped():
         try:
             _async_upsert_episode(*args)
         finally:
             _embed_semaphore.release()
+
     _embed_executor.submit(_wrapped)
 
 
@@ -156,10 +157,7 @@ def save_memory(
                 row = conn.execute("SELECT id FROM keywords WHERE name = ?", (w,)).fetchone()
                 if row:
                     kw_id = row["id"]
-                    conn.execute(
-                        "INSERT OR IGNORE INTO memory_keywords (memory_id, keyword_id) VALUES (?, ?)",
-                        (episode_id, kw_id)
-                    )
+                    conn.execute("INSERT OR IGNORE INTO memory_keywords (memory_id, keyword_id) VALUES (?, ?)", (episode_id, kw_id))
     conn.close()
     # EpisodeNode 비동기 임베딩 (ThreadPoolExecutor, bounded queue)
     _submit_embed_task(str(episode_id), safe_content, keywords, str(session_id or ""), provider, model)
@@ -196,11 +194,10 @@ def search_memories(query: str, limit: int = 5, max_age_days: int = 0) -> List[s
     if query:
         try:
             from core.semantic_graph import get_semantic_graph
+
             sg = get_semantic_graph()
             if sg.enabled:
-                hits = sg.episode_semantic_search(
-                    query, top_k=limit, threshold=0.25, max_age_days=max_age_days
-                )
+                hits = sg.episode_semantic_search(query, top_k=limit, threshold=0.25, max_age_days=max_age_days)
                 if hits:
                     return [h["content"] for h in hits]
         except Exception:

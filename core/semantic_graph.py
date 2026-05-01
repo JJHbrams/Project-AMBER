@@ -85,6 +85,7 @@ class SemanticGraph:
         read_only: bool = False,
     ) -> None:
         import threading
+
         self._write_lock = threading.RLock()
         self._sync_lock = threading.Lock()  # sync_from_kg 동시 실행 방지
         self._read_only = read_only
@@ -559,9 +560,8 @@ class SemanticGraph:
             # 기존 EP_TO_KG 삭제 (rel_type='semantic' 또는 'keyword' 만 대상, 다른 타입 보존)
             try:
                 self.conn.execute(
-                    "MATCH (e:EpisodeNode {id: $eid})-[r:EP_TO_KG]->() "
-                    "WHERE r.rel_type IN ['semantic', 'keyword'] DELETE r",
-                    {"eid": episode_id}
+                    "MATCH (e:EpisodeNode {id: $eid})-[r:EP_TO_KG]->() " "WHERE r.rel_type IN ['semantic', 'keyword'] DELETE r",
+                    {"eid": episode_id},
                 )
             except Exception as exc:
                 logger.debug("EP_TO_KG 기존 edge 삭제 실패 (id=%s): %s", episode_id, exc)
@@ -572,7 +572,9 @@ class SemanticGraph:
                 for hit in sem_hits:
                     try:
                         self.conn.execute(
-                            "MERGE (e:EpisodeNode {id: $eid}) " "MERGE (k:KGNode {id: $kid}) " "MERGE (e)-[r:EP_TO_KG {rel_type: 'semantic'}]->(k)",
+                            "MERGE (e:EpisodeNode {id: $eid}) "
+                            "MERGE (k:KGNode {id: $kid}) "
+                            "MERGE (e)-[r:EP_TO_KG {rel_type: 'semantic'}]->(k)",
                             {"eid": episode_id, "kid": hit["id"]},
                         )
                         created += 1
@@ -583,12 +585,10 @@ class SemanticGraph:
             try:
                 # SQLite에서 현재 에피소드의 정규화된 키워드 목록 가져오기
                 from core.db import get_connection
+
                 sqlite_conn = get_connection()
                 ep_keywords_rows = sqlite_conn.execute(
-                    "SELECT k.name FROM keywords k "
-                    "JOIN memory_keywords mk ON k.id = mk.keyword_id "
-                    "WHERE mk.memory_id = ?",
-                    (episode_id,)
+                    "SELECT k.name FROM keywords k " "JOIN memory_keywords mk ON k.id = mk.keyword_id " "WHERE mk.memory_id = ?", (episode_id,)
                 ).fetchall()
                 ep_words = set(row["name"] for row in ep_keywords_rows)
                 sqlite_conn.close()
@@ -613,12 +613,7 @@ class SemanticGraph:
                                 "MERGE (k:KGNode {id: $kid}) "
                                 "MERGE (e)-[r:EP_TO_KG {rel_type: 'keyword'}]->(k) "
                                 "SET r.weight = $weight, r.keywords = $matched",
-                                {
-                                    "eid": episode_id,
-                                    "kid": kg_id,
-                                    "weight": len(intersection),
-                                    "matched": ", ".join(list(intersection))
-                                },
+                                {"eid": episode_id, "kid": kg_id, "weight": len(intersection), "matched": ", ".join(list(intersection))},
                             )
                             created += 1
             except Exception as exc:
@@ -689,10 +684,7 @@ class SemanticGraph:
 
             try:
                 # content 제거: id, created_at, embedding만 조회
-                res = self.conn.execute(
-                    "MATCH (e:EpisodeNode) WHERE e.embedding <> '' "
-                    "RETURN e.id, e.created_at, e.embedding"
-                )
+                res = self.conn.execute("MATCH (e:EpisodeNode) WHERE e.embedding <> '' " "RETURN e.id, e.created_at, e.embedding")
                 while res.has_next():
                     row = res.get_next()
                     try:
