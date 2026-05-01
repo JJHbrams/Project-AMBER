@@ -579,34 +579,50 @@ class SemanticGraph:
                     except Exception as exc:
                         logger.debug("EP_TO_KG semantic link 실패 (%s→%s): %s", episode_id, hit["id"], exc)
 
-            # 2. 키워드 연결
-            if episode_keywords.strip():
-                ep_words = set(w.lower() for w in episode_keywords.split() if len(w) > 1)
+            # 2. 키워드 연결 (정규화된 테이블 활용)
+            try:
+                # SQLite에서 현재 에피소드의 정규화된 키워드 목록 가져오기
+                from core.db import get_connection
+                sqlite_conn = get_connection()
+                ep_keywords_rows = sqlite_conn.execute(
+                    "SELECT k.name FROM keywords k "
+                    "JOIN memory_keywords mk ON k.id = mk.keyword_id "
+                    "WHERE mk.memory_id = ?",
+                    (episode_id,)
+                ).fetchall()
+                ep_words = set(row["name"] for row in ep_keywords_rows)
+                sqlite_conn.close()
+
                 if ep_words:
                     rows_to_scan = kg_keyword_cache
                     if rows_to_scan is None:
-                        try:
-                            res = self.conn.execute("MATCH (k:KGNode) WHERE k.tags <> '' RETURN k.id, k.tags, k.title")
-                            rows_to_scan = []
-                            while res.has_next():
-                                rows_to_scan.append(res.get_next())
-                        except Exception as exc:
-                            logger.debug("EP_TO_KG keyword scan 실패: %s", exc)
-                            rows_to_scan = []
+                        res = self.conn.execute("MATCH (k:KGNode) WHERE k.tags <> '' OR k.title <> '' RETURN k.id, k.tags, k.title")
+                        rows_to_scan = []
+                        while res.has_next():
+                            rows_to_scan.append(res.get_next())
                     for row in rows_to_scan:
                         kg_id, tags_raw, title = row[0], row[1] or "", row[2] or ""
-                        kg_words = set(w.lower() for w in (tags_raw + " " + title).split() if len(w) > 1)
-                        if len(ep_words & kg_words) >= kw_threshold:
-                            try:
-                                self.conn.execute(
-                                    "MERGE (e:EpisodeNode {id: $eid}) "
-                                    "MERGE (k:KGNode {id: $kid}) "
-                                    "MERGE (e)-[r:EP_TO_KG {rel_type: 'keyword'}]->(k)",
-                                    {"eid": episode_id, "kid": kg_id},
-                                )
-                                created += 1
-                            except Exception as exc:
-                                logger.debug("EP_TO_KG keyword link 실패: %s", exc)
+                        # KGNode의 태그와 제목에서 키워드 추출
+                        kg_words = set(w.lower() for w in (tags_raw + " " + title).replace(",", " ").split() if len(w) > 1)
+
+                        # 교집합 크기 계산
+                        intersection = ep_words & kg_words
+                        if len(intersection) >= kw_threshold:
+                            self.conn.execute(
+                                "MERGE (e:EpisodeNode {id: $eid}) "
+                                "MERGE (k:KGNode {id: $kid}) "
+                                "MERGE (e)-[r:EP_TO_KG {rel_type: 'keyword'}]->(k) "
+                                "SET r.weight = $weight, r.keywords = $matched",
+                                {
+                                    "eid": episode_id,
+                                    "kid": kg_id,
+                                    "weight": len(intersection),
+                                    "matched": ", ".join(list(intersection))
+                                },
+                            )
+                            created += 1
+            except Exception as exc:
+                logger.debug("EP_TO_KG keyword link (normalized) 실패: %s", exc)
 
             if created:
                 logger.debug("EP_TO_KG: episode=%s, %d 릴레이션 생성", episode_id, created)

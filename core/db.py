@@ -238,6 +238,44 @@ def initialize_db():
         if "trigger_type" not in dir_cols:
             conn.execute("ALTER TABLE directives ADD COLUMN trigger_type TEXT NOT NULL DEFAULT 'always'")
 
+        # 마이그레이션: keywords / memory_keywords 정규화 테이블 생성
+        tables = [r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
+        if "keywords" not in tables:
+            conn.execute(
+                """
+                CREATE TABLE keywords (
+                    id   INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL UNIQUE
+                )
+            """
+            )
+        if "memory_keywords" not in tables:
+            conn.execute(
+                """
+                CREATE TABLE memory_keywords (
+                    memory_id  INTEGER NOT NULL REFERENCES memories(id),
+                    keyword_id INTEGER NOT NULL REFERENCES keywords(id),
+                    PRIMARY KEY (memory_id, keyword_id)
+                )
+            """
+            )
+
+        # 마이그레이션: memories.keywords 데이터를 정규화 테이블로 이동
+        count = conn.execute("SELECT COUNT(*) FROM memory_keywords").fetchone()[0]
+        if count == 0:
+            rows = conn.execute("SELECT id, keywords FROM memories WHERE keywords IS NOT NULL AND keywords != ''").fetchall()
+            for row in rows:
+                m_id, kw_str = row["id"], row["keywords"]
+                words = set()
+                for part in kw_str.replace(",", " ").split():
+                    w = part.strip().lower()
+                    if len(w) > 1:
+                        words.add(w)
+                for w in words:
+                    conn.execute("INSERT OR IGNORE INTO keywords (name) VALUES (?)", (w,))
+                    kw_id = conn.execute("SELECT id FROM keywords WHERE name = ?", (w,)).fetchone()[0]
+                    conn.execute("INSERT OR IGNORE INTO memory_keywords (memory_id, keyword_id) VALUES (?, ?)", (m_id, kw_id))
+
         # 인덱스 보장 (마이그레이션 이후)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_scope_started ON sessions(scope_key, started_at)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_session_ts ON messages(session_id, timestamp)")

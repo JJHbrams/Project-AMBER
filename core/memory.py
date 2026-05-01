@@ -137,14 +137,32 @@ def save_memory(
         keywords = _extract_keywords(safe_content)
     conn = get_connection()
     with conn:
+        # 1. memories 테이블 저장 (기존 필드 유지)
         cursor = conn.execute(
             "INSERT INTO memories (session_id, content, keywords, provider, model) VALUES (?,?,?,?,?)",
             (session_id, safe_content, keywords, provider, model),
         )
-        episode_id = str(cursor.lastrowid)
+        episode_id = cursor.lastrowid
+
+        # 2. 정규화된 키워드 테이블 저장
+        if keywords.strip():
+            words = set()
+            for part in keywords.replace(",", " ").split():
+                w = part.strip().lower()
+                if len(w) > 1:
+                    words.add(w)
+            for w in words:
+                conn.execute("INSERT OR IGNORE INTO keywords (name) VALUES (?)", (w,))
+                row = conn.execute("SELECT id FROM keywords WHERE name = ?", (w,)).fetchone()
+                if row:
+                    kw_id = row["id"]
+                    conn.execute(
+                        "INSERT OR IGNORE INTO memory_keywords (memory_id, keyword_id) VALUES (?, ?)",
+                        (episode_id, kw_id)
+                    )
     conn.close()
     # EpisodeNode 비동기 임베딩 (ThreadPoolExecutor, bounded queue)
-    _submit_embed_task(episode_id, safe_content, keywords, str(session_id or ""), provider, model)
+    _submit_embed_task(str(episode_id), safe_content, keywords, str(session_id or ""), provider, model)
 
 
 def _async_upsert_episode(episode_id: str, content: str, keywords: str, session_id: str, provider: str = "", model: str = ""):
