@@ -25,7 +25,27 @@ from overlay.config import (
     normalize_cli_provider,
 )
 
-_SUPPORTED_PROVIDERS = ["copilot", "gemini", "claude-code", "ollama"]
+_PROVIDER_OPTIONS = [
+    "copilot",
+    "gemini",
+    "claude-code",
+    "claude-code(ollama)",
+    "ollama",
+]
+_PROVIDER_DISPLAY_TO_VALUE = {
+    "copilot": "copilot",
+    "gemini": "gemini",
+    "claude-code": "claude-code",
+    "claude-code(ollama)": "claude-code-ollama",
+    "ollama": "ollama",
+}
+_PROVIDER_VALUE_TO_DISPLAY = {
+    "copilot": "copilot",
+    "gemini": "gemini",
+    "claude-code": "claude-code",
+    "claude-code-ollama": "claude-code(ollama)",
+    "ollama": "ollama",
+}
 _USER_PERSONA_PATH = Path.home() / ".engram" / "persona.user.yaml"
 _PROJECT_PERSONA_PATH = Path(__file__).parent.parent / "config" / "persona.yaml"
 _PERSONA_NUMERIC_FIELDS = ("warmth", "formality", "humor", "directness")
@@ -312,7 +332,7 @@ class _SettingsWindow:
         # 공급자 선택
         ttk.Label(f, text="기본 공급자:").grid(row=0, column=0, sticky="w", **PAD)
         self._provider_var = tk.StringVar()
-        provider_combo = ttk.Combobox(f, textvariable=self._provider_var, values=_SUPPORTED_PROVIDERS, state="readonly", width=18)
+        provider_combo = ttk.Combobox(f, textvariable=self._provider_var, values=_PROVIDER_OPTIONS, state="readonly", width=18)
         provider_combo.grid(row=0, column=1, sticky="ew", **PAD)
 
         # Ollama 모델
@@ -580,8 +600,8 @@ class _SettingsWindow:
         self._workdir_var.set(str(workdir))
 
         # CLI 탭
-        provider = _nested_get(cfg, ["cli", "provider"], "copilot")
-        self._provider_var.set(normalize_cli_provider(provider))
+        provider = normalize_cli_provider(_nested_get(cfg, ["cli", "provider"], "copilot"))
+        self._provider_var.set(_PROVIDER_VALUE_TO_DISPLAY.get(provider, provider))
 
         ollama_model = get_ollama_model(cfg)
         self._ollama_model_var.set(ollama_model)
@@ -807,8 +827,9 @@ class _SettingsWindow:
 
         # ── CLI 탭 ──
         provider = self._provider_var.get().strip()
-        if provider:
-            _nested_set(user, ["cli", "provider"], normalize_cli_provider(provider))
+        provider_value = _PROVIDER_DISPLAY_TO_VALUE.get(provider, provider)
+        if provider_value:
+            _nested_set(user, ["cli", "provider"], normalize_cli_provider(provider_value))
 
         ollama_model = self._ollama_model_var.get().strip()
         _nested_set(user, ["cli", "ollama_model"], ollama_model or None)

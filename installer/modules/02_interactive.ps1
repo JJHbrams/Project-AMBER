@@ -57,24 +57,28 @@ $ProviderAvailability = @{
     "copilot" = ($null -ne $CopilotCmdDetected)
     "gemini" = ($null -ne $GeminiCmdDetected)
     "claude-code" = ($null -ne $ClaudeCliCmdDetected)
+    "claude-code-ollama" = (($null -ne $ClaudeCliCmdDetected) -and ($null -ne $OllamaCmdDetected))
     "ollama" = ($null -ne $OllamaCmdDetected)
 }
 $CliProviderDefault = Resolve-AvailableCliProvider $ExistingCliProvider $ProviderAvailability
 Write-Host ""
 Write-Host "  [설정] 기본 CLI 서비스 — 오버레이에서 기본으로 사용할 provider" -ForegroundColor White
-$_providerItems  = @("copilot", "gemini", "claude-code", "ollama")
+$_providerItems  = @("copilot", "gemini", "claude-code", "claude-code(ollama)", "ollama")
 $_providerBadges = @(
     $(if ($ProviderAvailability['copilot'])     { 'installed' } else { 'missing' }),
     $(if ($ProviderAvailability['gemini'])      { 'installed' } else { 'missing' }),
     $(if ($ProviderAvailability['claude-code']) { 'installed' } else { 'missing' }),
+    $(if ($ProviderAvailability['claude-code-ollama']) { 'installed' } else { 'missing' }),
     $(if ($ProviderAvailability['ollama'])      { 'installed' } else { 'missing' })
 )
-$_defaultIdx = [math]::Max(0, [array]::IndexOf($_providerItems, $CliProviderDefault))
-$SelectedCliProvider = Select-WithArrowKeys `
+$CliProviderDefaultDisplay = if ($CliProviderDefault -eq "claude-code-ollama") { "claude-code(ollama)" } else { $CliProviderDefault }
+$_defaultIdx = [math]::Max(0, [array]::IndexOf($_providerItems, $CliProviderDefaultDisplay))
+$SelectedCliProviderRaw = Select-WithArrowKeys `
     -Items $_providerItems `
     -Badges $_providerBadges `
     -DefaultIndex $_defaultIdx `
     -Prompt "기본 CLI provider"
+$SelectedCliProvider = Normalize-CliProvider $SelectedCliProviderRaw
 
 # ── Provider별 추가 설정 ───────────────────────────────────
 $SelectedOllamaModel = ""
@@ -102,6 +106,28 @@ if ($SelectedCliProvider -eq "claude-code" -and $OllamaCmdDetected) {
         } else {
             Write-Warn "설치된 ollama 모델이 없습니다. 'ollama pull <model>' 후 재실행하세요."
         }
+    }
+}
+
+if ($SelectedCliProvider -eq "claude-code-ollama") {
+    if ($OllamaCmdDetected) {
+        $modelInfos = Get-OllamaModelInfoList
+        if ($modelInfos.Count -gt 0) {
+            $modelNames  = @($modelInfos | ForEach-Object { $_.Name })
+            $modelBadges = @($modelInfos | ForEach-Object { Format-OllamaModelBadge $_ })
+            Write-Host ""
+            Write-Host "  [설정] Ollama 모델 (claude-code(ollama) 백엔드)" -ForegroundColor White
+            $_defaultModelIdx = [math]::Max(0, [array]::IndexOf($modelNames, $ExistingOllamaModel))
+            $SelectedOllamaModel = Select-WithArrowKeys `
+                -Items $modelNames `
+                -Badges $modelBadges `
+                -DefaultIndex $_defaultModelIdx `
+                -Prompt "모델 선택"
+        } else {
+            Write-Warn "설치된 ollama 모델이 없습니다. 'ollama pull <model>' 후 재실행하세요."
+        }
+    } else {
+        Write-Warn "Ollama가 설치되지 않아 claude-code(ollama)용 모델을 선택할 수 없습니다."
     }
 }
 

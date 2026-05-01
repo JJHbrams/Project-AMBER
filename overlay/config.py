@@ -50,11 +50,14 @@ def _deep_merge(base: dict, override: dict) -> dict:
 _USER_CONFIG_PATH = Path.home() / ".engram" / "overlay.user.yaml"
 _STATE_PATH = Path.home() / ".engram" / "overlay.state.yaml"
 _ENGRAM_USER_CONFIG_PATH = Path.home() / ".engram" / "user.config.yaml"
-_SUPPORTED_CLI_PROVIDERS = {"copilot", "gemini", "claude-code", "ollama"}
+_SUPPORTED_CLI_PROVIDERS = {"copilot", "gemini", "claude-code", "claude-code-ollama", "ollama"}
 _CLI_PROVIDER_ALIASES = {
     "claude": "claude-code",
     "claude_code": "claude-code",
     "claudecode": "claude-code",
+    "claude-code(ollama)": "claude-code-ollama",
+    "claude_code_ollama": "claude-code-ollama",
+    "claudecodeollama": "claude-code-ollama",
 }
 
 _USER_TEMPLATE = """\
@@ -89,9 +92,10 @@ _USER_TEMPLATE = """\
 #   height_ratio: 0.60
 
 # cli:
-#   provider: "copilot"   # copilot | gemini | claude-code | ollama
+#   provider: "copilot"   # copilot | gemini | claude-code | claude-code-ollama | ollama
 #   # gemini/claude-code는 ~/.engram 전용 shim을 우선 사용
 #   gemini_command: "gemini"
+#   # claude-code-ollama: 선택된 ollama_model을 Claude Code 백엔드 모델로 사용
 #   # claude-code + ollama_model: claude --model <ollama_model>
 #   # - model이 Claude alias/id가 아니면 ANTHROPIC_BASE_URL을
 #   #   ollama_base_url(default: http://localhost:11434)로 주입

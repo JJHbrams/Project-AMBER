@@ -150,6 +150,10 @@ function Normalize-CliProvider([string]$provider) {
         "claude-code" { return "claude-code" }
         "claude_code" { return "claude-code" }
         "claudecode" { return "claude-code" }
+        "claude-code-ollama" { return "claude-code-ollama" }
+        "claude_code_ollama" { return "claude-code-ollama" }
+        "claudecodeollama" { return "claude-code-ollama" }
+        "claude-code(ollama)" { return "claude-code-ollama" }
         "ollama" { return "ollama" }
         default { return "gemini" }
     }
@@ -160,7 +164,7 @@ function Resolve-AvailableCliProvider([string]$preferred, [hashtable]$availabili
     if ($availability.ContainsKey($normalized) -and [bool]$availability[$normalized]) {
         return $normalized
     }
-    foreach ($candidate in @("gemini", "claude-code", "ollama", "copilot")) {
+    foreach ($candidate in @("gemini", "claude-code", "claude-code-ollama", "ollama", "copilot")) {
         if ($availability.ContainsKey($candidate) -and [bool]$availability[$candidate]) {
             return $candidate
         }

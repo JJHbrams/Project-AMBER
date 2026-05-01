@@ -176,7 +176,7 @@ def _make_tray_icon(app: "OverlayApp"):
             pystray.MenuItem(
                 "claude (직접)",
                 lambda: app._set_provider_model("claude-code", ""),
-                checked=lambda _: app.get_cli_provider() == "claude-code" and not _is_ollama_routing_model(app._ollama_model),
+                checked=lambda _: app.get_cli_provider() == "claude-code",
                 radio=True,
             ),
             pystray.Menu.SEPARATOR,
@@ -192,8 +192,8 @@ def _make_tray_icon(app: "OverlayApp"):
                 items.append(
                     pystray.MenuItem(
                         f"ollama: {model}",
-                        lambda _, mod=model: app._set_provider_model("claude-code", mod),
-                        checked=lambda _, mod=model: app.get_cli_provider() == "claude-code" and app._ollama_model == mod,
+                        lambda _, mod=model: app._set_provider_model("claude-code-ollama", mod),
+                        checked=lambda _, mod=model: app.get_cli_provider() == "claude-code-ollama" and app._ollama_model == mod,
                         radio=True,
                     )
                 )
@@ -244,7 +244,7 @@ def _make_tray_icon(app: "OverlayApp"):
                 pystray.MenuItem(
                     "Claude Code",
                     pystray.Menu(_build_claude_items),
-                    checked=lambda _: app.get_cli_provider() == "claude-code",
+                    checked=lambda _: app.get_cli_provider() in {"claude-code", "claude-code-ollama"},
                 ),
                 pystray.MenuItem(
                     "Ollama",

@@ -1,5 +1,40 @@
 # Release Notes
 
+## 2026-05-01 - Claude Code (Ollama) Provider and Build Stability
+
+### Highlights
+
+- Added explicit `claude-code(ollama)` provider mode across overlay runtime, Discord routing, and installer setup.
+- Added a dedicated installer selection flow that binds Claude Code to a chosen Ollama model.
+- Hardened PyInstaller resource collection to avoid lock-file driven incremental build failures.
+
+### What Changed
+
+- `overlay/config.py`, `overlay/settings_window.py`, `overlay/main.py`, `overlay/character.py`, and `overlay/chat_window.py` now support `claude-code-ollama` as a canonical provider value.
+- `installer/common.ps1`, `installer/modules/02_interactive.ps1`, and `installer/modules/07_shims.ps1` now support `claude-code(ollama)` selection and dispatch.
+- `discord_bot/bot.py` now treats `claude-code-ollama` as resume-capable and routes execution with the selected Ollama model.
+- `engram-overlay.spec` now filters Office lock/temp artifacts in `resource/character` during `datas` collection.
+
+### Impact
+
+- Operators can choose Claude direct mode or Claude-through-Ollama mode without manual config editing.
+- Runtime/provider behavior is consistent between settings UI, tray menu, Discord bot, and installer.
+- Incremental packaging is more stable in environments where Office/Explorer temp files appear under character assets.
+
+### Files
+
+- overlay/config.py
+- overlay/settings_window.py
+- overlay/main.py
+- overlay/character.py
+- overlay/chat_window.py
+- installer/common.ps1
+- installer/modules/02_interactive.ps1
+- installer/modules/07_shims.ps1
+- discord_bot/bot.py
+- engram-overlay.spec
+- config/overlay.yaml
+
 ## 2026-05-01 - Discord Routing and Queue Operations
 
 ### Highlights

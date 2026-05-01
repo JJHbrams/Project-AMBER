@@ -333,8 +333,8 @@ class CharacterOverlay:
         self._provider_menu.add_separator()
 
         # ── Claude Code 서브메뉴 ────────────────────────────────────
-        if current_provider == "claude-code":
-            self._claude_model_var.set(current_model if self._is_ollama_routing(current_model) else "direct")
+        if current_provider in {"claude-code", "claude-code-ollama"}:
+            self._claude_model_var.set(current_model if current_provider == "claude-code-ollama" else "direct")
         else:
             self._claude_model_var.set("")
 
@@ -353,14 +353,14 @@ class CharacterOverlay:
                     onvalue=_m,
                     offvalue="",
                     variable=self._claude_model_var,
-                    command=lambda mod=_m: self._select_provider_model("claude-code", mod),
+                    command=lambda mod=_m: self._select_provider_model("claude-code-ollama", mod),
                 )
         else:
             self._claude_submenu.add_command(label="(Ollama 모델 없음)", state="disabled")
         self._claude_submenu.add_separator()
         self._claude_submenu.add_command(label="Ollama 새로고침", command=self._invoke_reload_ollama_models)
 
-        claude_label = f"{'✓' if current_provider == 'claude-code' else ' '} Claude Code"
+        claude_label = f"{'✓' if current_provider in {'claude-code', 'claude-code-ollama'} else ' '} Claude Code"
         self._provider_menu.add_cascade(label=claude_label, menu=self._claude_submenu)
         self._provider_menu.add_separator()
 

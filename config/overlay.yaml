@@ -60,6 +60,7 @@ cli:
   #   * model이 tools capability가 없으면
   #     claude_ollama_no_tools_fallback(ollama|none)에 따라 동작
   # - gemini: ~/.engram/engram-gemini.cmd 실행 (없으면 gemini_command)
+  # - claude-code-ollama: 선택된 ollama_model을 Claude Code 백엔드 모델로 강제 사용
   # - ollama: ollama_command run <ollama_model> 실행
   # workdir는 미지정 시 ~/.engram/user.config.yaml 의 workdir를 사용
   # workdir: "C:/Users/yourname/path/to/project"

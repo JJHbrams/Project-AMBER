@@ -379,26 +379,32 @@ def _resolve_provider_launch(cfg: dict, provider: str) -> tuple[str, list[str], 
     env_overrides: dict[str, str] = {}
     warnings: list[str] = []
 
-    if normalized == "claude-code":
+    if normalized in {"claude-code", "claude-code-ollama"}:
         claude_args: list[str] = []
         label = "claude"
-        if ollama_model:
+        selected_model = ollama_model
+        if normalized != "claude-code-ollama":
+            selected_model = str(cli_cfg.get("claude_model") or ollama_model).strip()
+        elif not selected_model:
+            selected_model = OLLAMA_DEFAULT_MODEL
+
+        if selected_model:
             # Claude alias/id가 아닌 모델명은 local Ollama 모델로 간주해 base URL을 주입한다.
-            if not _looks_like_claude_model(ollama_model):
+            if not _looks_like_claude_model(selected_model):
                 if not os.environ.get("ANTHROPIC_BASE_URL"):
                     ollama_base_url = str(cli_cfg.get("ollama_base_url") or OLLAMA_BASE_URL_DEFAULT).strip() or OLLAMA_BASE_URL_DEFAULT
                     env_overrides["ANTHROPIC_BASE_URL"] = ollama_base_url
 
                 ollama_command = str(cli_cfg.get("ollama_command") or "ollama").strip() or "ollama"
-                capabilities = _query_ollama_capabilities(ollama_command, ollama_model)
+                capabilities = _query_ollama_capabilities(ollama_command, selected_model)
                 fallback_mode = str(cli_cfg.get("claude_ollama_no_tools_fallback") or "ollama").strip().lower()
                 if capabilities and "tools" not in capabilities and fallback_mode == "ollama":
-                    warnings.append(f"Ollama model '{ollama_model}' has no tools capability; falling back to provider=ollama for this launch.")
-                    resolved_provider, launch_args, resolved_label, extra_env = _resolve_ollama_launch(cli_cfg, requested_model=ollama_model)
+                    warnings.append(f"Ollama model '{selected_model}' has no tools capability; falling back to provider=ollama for this launch.")
+                    resolved_provider, launch_args, resolved_label, extra_env = _resolve_ollama_launch(cli_cfg, requested_model=selected_model)
                     return resolved_provider, launch_args, resolved_label, extra_env, warnings
 
-            claude_args = ["--model", ollama_model]
-            label = f"claude --model {ollama_model}"
+            claude_args = ["--model", selected_model]
+            label = f"claude --model {selected_model}"
         if ENGRAM_CLAUDE_CMD.exists():
             return normalized, ["cmd", "/k", str(ENGRAM_CLAUDE_CMD), *claude_args], ENGRAM_CLAUDE_CMD.name, env_overrides, warnings
         return normalized, ["cmd", "/k", CLAUDE_CODE_CMD, *claude_args], label, env_overrides, warnings

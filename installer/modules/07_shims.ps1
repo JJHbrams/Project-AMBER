@@ -106,6 +106,8 @@ $dispatcherLines = @(
     "if /i `"!PROVIDER!`"==`"copilot`"     call `"%USERPROFILE%\.engram\engram-copilot.cmd`" %*",
     "if /i `"!PROVIDER!`"==`"gemini`"      call `"%USERPROFILE%\.engram\engram-gemini.cmd`" %*",
     "if /i `"!PROVIDER!`"==`"claude-code`" call `"%USERPROFILE%\.engram\engram-claude.cmd`" %*",
+    "if /i `"!PROVIDER!`"==`"claude-code-ollama`" call `"%USERPROFILE%\.engram\engram-claude.cmd`" %*",
+    "if /i `"!PROVIDER!`"==`"claude-code(ollama)`" call `"%USERPROFILE%\.engram\engram-claude.cmd`" %*",
     "if /i `"!PROVIDER!`"==`"ollama`"      call `"%USERPROFILE%\.engram\engram-goose.cmd`" %*"
 )
 [System.IO.File]::WriteAllLines($EngramDispatcherPath, $dispatcherLines, [System.Text.ASCIIEncoding]::new())

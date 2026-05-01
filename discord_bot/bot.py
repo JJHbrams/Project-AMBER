@@ -90,7 +90,7 @@ def _build_exec_command(executable: str, args: list[str]) -> list[str]:
 
 
 def _provider_supports_resume(provider: str) -> bool:
-    return provider in {"copilot", "claude-code"}
+    return provider in {"copilot", "claude-code", "claude-code-ollama"}
 
 
 def _normalize_model_id(model_id: str) -> str:
@@ -111,7 +111,7 @@ def _looks_like_claude_model(model_id: str) -> bool:
 
 def _provider_caller_name(provider: str) -> str:
     normalized = normalize_cli_provider(provider)
-    if normalized == "claude-code":
+    if normalized in {"claude-code", "claude-code-ollama"}:
         return "claude-code"
     if normalized == "gemini":
         return "gemini-cli"
@@ -437,8 +437,11 @@ def _build_provider_command(
     normalized = normalize_cli_provider(provider)
     if normalized == "copilot":
         return _build_copilot_command(prompt, session_name, use_resume=use_resume), use_resume
-    if normalized == "claude-code":
-        configured_model = str(cli_cfg.get("claude_model") or cli_cfg.get("ollama_model") or "").strip()
+    if normalized in {"claude-code", "claude-code-ollama"}:
+        if normalized == "claude-code-ollama":
+            configured_model = str(cli_cfg.get("ollama_model") or DEFAULT_OLLAMA_MODEL).strip() or DEFAULT_OLLAMA_MODEL
+        else:
+            configured_model = str(cli_cfg.get("claude_model") or cli_cfg.get("ollama_model") or "").strip()
         if configured_model and not _looks_like_claude_model(configured_model):
             return _build_ollama_command(prompt, cli_cfg=cli_cfg), False
         return _build_claude_command(prompt, session_name, use_resume=use_resume, cli_cfg=cli_cfg), use_resume
@@ -1012,7 +1015,7 @@ class EngramDiscordBot:
             new_session_id = self._memory_sessions[channel_id].session_id
             self._channel_queues.pop(channel_id, None)
             if old_session_id is not None:
-                for provider in ("copilot", "claude-code", "gemini", "ollama"):
+                for provider in ("copilot", "claude-code", "claude-code-ollama", "gemini", "ollama"):
                     self._provider_ready_session_keys.discard(self._provider_session_key(provider, old_session_id))
         log.info(f"[discord] 새 세션 전환: channel={channel_id} session_id={new_session_id}")
 
