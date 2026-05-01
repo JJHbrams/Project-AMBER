@@ -518,6 +518,9 @@ class OverlayApp:
         """설정 저장 후 overlay config를 다시 읽어 반영한다."""
         cfg = load_cfg()
         new_provider = get_cli_provider(cfg)
+        # 기존 터미널 세션은 시작 시점 컨텍스트를 유지하므로,
+        # 설정 저장 후에는 세션을 닫아 다음 채팅에서 최신 페르소나를 적용한다.
+        self.chat.kill()
         self._set_provider_model(new_provider, get_ollama_model(cfg))
 
     def get_cli_provider(self) -> str:
