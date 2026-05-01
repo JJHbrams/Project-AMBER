@@ -74,10 +74,53 @@ cli:
 discord:
   # Discord Bot 설정
   # bot_token은 환경변수 DISCORD_BOT_TOKEN 에서 읽음 (여기에 직접 입력하지 말 것)
-  guild_id: "" # 서버 ID (Discord 개발자 모드 → 서버 우클릭 → ID 복사)
-  channel_id: "" # 수신할 채널 ID
+  guild_id: "" # 단일 서버 ID (하위호환)
+  # 여러 서버 허용 시 guild_ids 사용 (guild_id와 합집합으로 적용)
+  guild_ids: []
+  channel_id: "" # 단일 수신 채널 ID (하위호환)
+  # 여러 채널 허용 시 channel_ids 사용 (channel_id와 합집합으로 적용)
+  channel_ids: []
   # 허용된 사용자 ID 목록 (빈 리스트면 전체 허용 — 권장하지 않음)
   allowed_user_ids: []
+  # 라우팅 단위 provider override
+  # - 기본은 cli.provider(또는 runtime state 마지막 값)
+  # - channel_cli_overrides, guild_cli_overrides가 있으면 해당 값 우선
+  # 예시:
+  # channel_cli_overrides:
+  #   "123456789012345678": "gemini"
+  # guild_cli_overrides:
+  #   "987654321098765432": "ollama"
+  channel_cli_overrides: {}
+  guild_cli_overrides: {}
+  # 차단할 대상 ID 목록 (allowlist보다 우선 적용)
+  deny_guild_ids: []
+  deny_channel_ids: []
+  deny_user_ids: []
+  # 입력 큐 정책
+  queue:
+    # 채널별 대기 큐 최대 길이
+    max_per_channel: 8
+    # 큐에서 대기 가능한 최대 시간(초)
+    ttl_seconds: 180
+    # 큐 포화 시 정책: drop_oldest | drop_newest
+    drop_policy: "drop_oldest"
+    # 채널 간 동시 처리 worker 수 제한
+    max_parallel_channels: 3
+    # 대기열 안내 메시지 전송 여부
+    notify_waiting: true
+    # 안내 메시지를 보내기 시작할 채널 내 대기 순번
+    wait_notice_min_position: 2
+    # 같은 채널에 대기열 안내를 다시 보내기까지 최소 간격(초)
+    wait_notice_cooldown_seconds: 20
+    # TTL 초과로 만료된 요청에 안내 메시지 전송 여부
+    notify_ttl_expired: true
+  # 명시적 새 세션 전환 명령.
+  # - 단일 토큰 트리거는 "/new 질문" 처럼 명령+질문 동시 입력 가능
+  # - 공백이 포함된 트리거는 완전 일치일 때만 동작
+  new_session_triggers:
+    - "/new"
+    - "/newsession"
+    - "/새세션"
 
 mcp:
   # overlay.exe가 소유하는 지속 MCP HTTP(SSE) 서버

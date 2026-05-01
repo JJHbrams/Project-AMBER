@@ -102,6 +102,30 @@ _USER_TEMPLATE = """\
 #   ollama_model: "gemma3:4b"
 #   ollama_base_url: "http://localhost:11434"
 #   claude_ollama_no_tools_fallback: "ollama"
+
+# discord:
+#   # 단일값 + 배열값은 합집합으로 적용
+#   guild_id: ""
+#   guild_ids: []
+#   channel_id: ""
+#   channel_ids: []
+#   allowed_user_ids: []
+#   channel_cli_overrides:
+#     "123456789012345678": "gemini"
+#   guild_cli_overrides:
+#     "987654321098765432": "ollama"
+#   deny_guild_ids: []
+#   deny_channel_ids: []
+#   deny_user_ids: []
+#   queue:
+#     max_per_channel: 8
+#     ttl_seconds: 180
+#     drop_policy: "drop_oldest"   # drop_oldest | drop_newest
+#     max_parallel_channels: 3
+#     notify_waiting: true
+#     wait_notice_min_position: 2
+#     wait_notice_cooldown_seconds: 20
+#     notify_ttl_expired: true
 """
 
 
