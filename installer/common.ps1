@@ -40,7 +40,7 @@ $EnvironmentYamlPath = Join-Path $ProjectRoot "environment.yml"
 $ProjectVenvDir = Join-Path $ProjectRoot ".venv"
 $CondaEnv = "intel_engram"
 $McpServerScript = Join-Path $ProjectRoot "mcp_server.py"
-$MCP_HTTP_PORT = 17385  # Copilot/Gemini CLI용 지속 MCP HTTP(SSE) 서버 포트
+$MCP_HTTP_PORT = 17385  # Copilot/Gemini/Claude CLI용 지속 MCP HTTP 서버 포트
 $HasNamedCondaEnv = $false
 
 # ── conda Python 동적 탐지 ──────────────────────────────────

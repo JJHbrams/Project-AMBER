@@ -1,5 +1,34 @@
 # Release Notes
 
+## 2026-05-03 - MCP Reconnect Stabilization and Transport Unification
+
+### Highlights
+
+- Migrated MCP client registration defaults from legacy SSE endpoints to `streamable-http`/`/mcp` for consistent reconnect behavior.
+- Added hybrid MCP server routing so HTTP-native clients and legacy SSE clients can coexist during rollout.
+- Added overlay-side MCP health monitoring and bounded auto-recovery to reduce dead-listener states after restarts.
+
+### What Changed
+
+- `config/config.yaml` now includes MCP runtime defaults for transport and health-check/recovery controls.
+- `installer/modules/05_config.ps1` now emits HTTP `/mcp` registrations for Copilot/Claude/Gemini/VS Code/project-local configs.
+- `mcp_server.py` now supports Windows HTTP event-loop policy setup and a hybrid streamable-http app that keeps `/sse` compatibility routes.
+- `overlay/main.py` now launches transport by config, validates `/health`, and can recover MCP plus dependent dashboard/kg_watcher processes.
+- `installer/common.ps1` documentation/comments were aligned with HTTP-first MCP usage.
+
+### Impact
+
+- Lower risk of split-brain MCP sessions when overlay and IDE tooling reconnect at different times.
+- Better operator recovery path after overlay restarts without requiring a full VS Code restart.
+
+### Files
+
+- config/config.yaml
+- installer/common.ps1
+- installer/modules/05_config.ps1
+- mcp_server.py
+- overlay/main.py
+
 ## 2026-05-03 - Directive Compliance Enforcement (Prompt-Side)
 
 ### Highlights

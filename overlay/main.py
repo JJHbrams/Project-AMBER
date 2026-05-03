@@ -3,11 +3,14 @@
 import ctypes
 import logging
 import os
+import socket
 import shutil
 import subprocess
 import sys
 import threading
 import tkinter as tk
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 import keyboard
@@ -283,6 +286,10 @@ class OverlayApp:
         hotkey = cfg["overlay"]["hotkey"]
         self._cli_provider = get_cli_provider(cfg)
         self._ollama_model = get_ollama_model(cfg)
+        self._quitting = False
+        self._quit_reason = "unknown"
+        self._mcp_recovery_lock = threading.Lock()
+        self._last_mcp_recovery_at = 0.0
         # Ollama 모델 목록 백그라운드 로드
         threading.Thread(target=_load_ollama_models, daemon=True).start()
 
@@ -317,6 +324,10 @@ class OverlayApp:
         # dashboard를 시작해야 cross-process lock 충돌이 없다.
         threading.Thread(target=self._deferred_startup, daemon=True).start()
 
+        # overlay 생존 중에는 MCP 리스너 상태를 감시하고,
+        # 깨진 리스너(프로세스 생존 + 신규 연결 불가) 상태를 자동 복구한다.
+        threading.Thread(target=self._mcp_health_monitor_loop, daemon=True, name="overlay-mcp-health").start()
+
         self._stm_server = STMServer(shutdown_callback=self._on_shutdown_request)
         self._stm_server.start()  # 포트 충돌 시 STMServer.start() 내부에서 조용히 실패
 
@@ -328,20 +339,176 @@ class OverlayApp:
         self._discord_bot = _try_start_discord_bot()
 
         self.root.protocol("WM_DELETE_WINDOW", self.quit)
-        self._quitting = False
+
+    @staticmethod
+    def _coerce_int(value, default: int) -> int:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+
+    @staticmethod
+    def _coerce_float(value, default: float) -> float:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+    def _get_mcp_health_settings(self) -> dict[str, float | int]:
+        cfg = load_cfg()
+        mcp_cfg = cfg.get("mcp") or {}
+        return {
+            "port": self._coerce_int(mcp_cfg.get("http_port", MCP_HTTP_PORT), MCP_HTTP_PORT),
+            "transport": str(mcp_cfg.get("transport", "streamable-http") or "streamable-http").strip().lower(),
+            "interval_secs": max(1.0, self._coerce_float(mcp_cfg.get("healthcheck_interval_secs", 5.0), 5.0)),
+            "fail_threshold": max(1, self._coerce_int(mcp_cfg.get("healthcheck_fail_threshold", 3), 3)),
+            "start_delay_secs": max(0.0, self._coerce_float(mcp_cfg.get("healthcheck_start_delay_secs", 15.0), 15.0)),
+            "restart_cooldown_secs": max(1.0, self._coerce_float(mcp_cfg.get("restart_cooldown_secs", 8.0), 8.0)),
+            "ready_timeout_secs": max(3.0, self._coerce_float(mcp_cfg.get("ready_timeout_secs", 20.0), 20.0)),
+        }
+
+    @staticmethod
+    def _normalize_mcp_transport(value: str) -> str:
+        transport = (value or "").strip().lower()
+        if transport in {"sse", "streamable-http"}:
+            return transport
+        return "streamable-http"
+
+    def _is_mcp_listener_ready(self, port: int, timeout: float = 1.0) -> bool:
+        try:
+            conn = socket.create_connection(("127.0.0.1", port), timeout=timeout)
+            conn.close()
+            return True
+        except OSError:
+            return False
+
+    def _is_mcp_http_healthy(self, port: int, timeout: float = 1.5) -> bool:
+        url = f"http://127.0.0.1:{port}/health"
+        req = urllib.request.Request(url, method="GET")
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return int(getattr(resp, "status", 0)) == 200
+        except (urllib.error.URLError, TimeoutError, OSError, ValueError):
+            return False
+
+    def _terminate_managed_process(self, attr_name: str, log_prefix: str, display_name: str, timeout: float = 5.0) -> bool:
+        proc = getattr(self, attr_name, None)
+        if not proc:
+            return False
+        if proc.poll() is not None:
+            setattr(self, attr_name, None)
+            return False
+
+        proc.terminate()
+        try:
+            proc.wait(timeout=timeout)
+        except Exception:
+            proc.kill()
+        setattr(self, attr_name, None)
+        log.info("[%s] %s 종료", log_prefix, display_name)
+        return True
+
+    def _restart_managed_dependents(self) -> None:
+        # mcp 재기동 후 종속 프로세스도 재연결을 보장하기 위해 재시작한다.
+        self._terminate_managed_process("_dashboard_proc", "dashboard", "dashboard")
+        self._terminate_managed_process("_kg_watcher_proc", "kg_watcher", "kg_watcher")
+        self._kg_watcher_proc = self._start_kg_watcher()
+        self._dashboard_proc = self._start_dashboard()
+
+    def _recover_mcp_listener(self, reason: str) -> None:
+        import time
+
+        if self._quitting:
+            return
+        if not self._mcp_recovery_lock.acquire(blocking=False):
+            return
+
+        try:
+            if self._quitting:
+                return
+            settings = self._get_mcp_health_settings()
+            cooldown = float(settings["restart_cooldown_secs"])
+            now = time.monotonic()
+            if now - self._last_mcp_recovery_at < cooldown:
+                return
+
+            self._last_mcp_recovery_at = now
+            port = int(settings["port"])
+            log.warning("[mcp_http] 헬스체크 복구 시작: reason=%s port=%d", reason, port)
+
+            self._terminate_managed_process("_mcp_http_proc", "mcp_http", "MCP HTTP 서버")
+            self._mcp_http_proc = self._start_mcp_http_server()
+
+            if self._quitting:
+                return
+            if self._wait_mcp_ready(timeout=float(settings["ready_timeout_secs"]), port=port):
+                self._restart_managed_dependents()
+                log.info("[mcp_http] 복구 완료: 리스너/종속 프로세스 재연결 보장")
+            else:
+                log.error("[mcp_http] 복구 실패: 포트 %d 리스너 준비 확인 실패", port)
+        finally:
+            self._mcp_recovery_lock.release()
+
+    def _mcp_health_monitor_loop(self) -> None:
+        import time
+
+        start_delay = float(self._get_mcp_health_settings()["start_delay_secs"])
+        if start_delay > 0:
+            time.sleep(start_delay)
+
+        failures = 0
+        while not self._quitting:
+            settings = self._get_mcp_health_settings()
+            port = int(settings["port"])
+            threshold = int(settings["fail_threshold"])
+            interval = float(settings["interval_secs"])
+
+            proc_dead = bool(self._mcp_http_proc and self._mcp_http_proc.poll() is not None)
+            listener_ok = self._is_mcp_listener_ready(port)
+            http_ok = self._is_mcp_http_healthy(port)
+            healthy = listener_ok and http_ok and not proc_dead
+
+            if healthy:
+                failures = 0
+            else:
+                failures += 1
+                log.warning(
+                    "[mcp_http] health fail %d/%d (proc_dead=%s, listener_ok=%s, http_ok=%s, port=%d)",
+                    failures,
+                    threshold,
+                    proc_dead,
+                    listener_ok,
+                    http_ok,
+                    port,
+                )
+                if failures >= threshold:
+                    if proc_dead:
+                        reason = "proc_dead"
+                    elif not listener_ok:
+                        reason = "listener_unavailable"
+                    else:
+                        reason = "http_unhealthy"
+                    self._recover_mcp_listener(reason=reason)
+                    failures = 0
+
+            sleep_left = interval
+            while sleep_left > 0 and not self._quitting:
+                step = min(0.5, sleep_left)
+                time.sleep(step)
+                sleep_left -= step
 
     def _start_mcp_http_server(self) -> "subprocess.Popen | None":
         """Copilot/Gemini CLI를 위한 지속 MCP HTTP(SSE) 서버를 overlay 수명에 맞춰 시작한다."""
         cfg = load_cfg()
-        port = int((cfg.get("mcp") or {}).get("http_port", MCP_HTTP_PORT))
+        mcp_cfg = cfg.get("mcp") or {}
+        port = int(mcp_cfg.get("http_port", MCP_HTTP_PORT))
+        transport = self._normalize_mcp_transport(str(mcp_cfg.get("transport", "streamable-http") or "streamable-http"))
         # 이미 포트가 열려있으면 외부 MCP 서버 재사용 (dev_backend 등)
-        try:
-            _tc = __import__("socket").create_connection(("127.0.0.1", port), timeout=1)
-            _tc.close()
-            log.info("[mcp_http] 포트 %d 이미 응답 중 — 외부 MCP 서버 재사용, 시작 스킵", port)
-            return None
-        except OSError:
-            pass  # 포트 비어있음 → 직접 시작
+        if self._is_mcp_listener_ready(port, timeout=1.0):
+            if self._is_mcp_http_healthy(port, timeout=1.5):
+                log.info("[mcp_http] 포트 %d 이미 응답 중 — 외부 MCP 서버 재사용, 시작 스킵", port)
+                return None
+            log.warning("[mcp_http] 포트 %d 리스너는 있으나 /health 실패 — 신규 MCP 서버 기동 시도", port)
         py = _find_mcp_python()
         script = _find_mcp_script()
         if not py or not script:
@@ -357,41 +524,39 @@ class OverlayApp:
             log_path = Path.home() / ".engram" / "mcp-http.log"
             log_fh = open(str(log_path), "a", encoding="utf-8")
             proc = subprocess.Popen(
-                [py, str(script), "--transport", "sse", "--port", str(port)],
+                [py, str(script), "--transport", transport, "--port", str(port)],
                 env=env,
                 cwd=str(script.parent),
                 stdout=log_fh,
                 stderr=log_fh,
                 creationflags=subprocess.CREATE_NO_WINDOW,
             )
-            log.info("[mcp_http] MCP HTTP 서버 시작 PID=%d port=%d", proc.pid, port)
+            log.info("[mcp_http] MCP HTTP 서버 시작 PID=%d port=%d transport=%s", proc.pid, port, transport)
             return proc
         except Exception as exc:
             log.warning("[mcp_http] MCP HTTP 서버 시작 실패: %s", exc)
             return None
 
-    def _wait_mcp_ready(self, timeout: float = 15.0) -> bool:
+    def _wait_mcp_ready(self, timeout: float = 15.0, port: int | None = None) -> bool:
         """MCP server가 /health 에 응답할 때까지 대기. 성공 시 True."""
         import time
-        import socket
 
-        cfg = load_cfg()
-        port = int((cfg.get("mcp") or {}).get("http_port", MCP_HTTP_PORT))
+        if port is None:
+            cfg = load_cfg()
+            port = int((cfg.get("mcp") or {}).get("http_port", MCP_HTTP_PORT))
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            try:
-                conn = socket.create_connection(("127.0.0.1", port), timeout=1)
-                conn.close()
+            if self._is_mcp_listener_ready(port, timeout=1.0) and self._is_mcp_http_healthy(port, timeout=1.5):
                 log.info("[mcp_http] MCP server ready (port=%d)", port)
                 return True
-            except OSError:
-                time.sleep(0.5)
+            time.sleep(0.5)
         log.warning("[mcp_http] MCP server not ready after %.1fs", timeout)
         return False
 
     def _deferred_startup(self) -> None:
         """MCP server 준비 완료 후 kg_watcher / dashboard를 순서대로 시작한다."""
-        self._wait_mcp_ready(timeout=15.0)
+        settings = self._get_mcp_health_settings()
+        self._wait_mcp_ready(timeout=float(settings["ready_timeout_secs"]), port=int(settings["port"]))
         self._kg_watcher_proc = self._start_kg_watcher()
         self._dashboard_proc = self._start_dashboard()
 
@@ -489,6 +654,7 @@ class OverlayApp:
 
     def restart(self):
         """overlay 프로세스를 재시작한다 (자신을 재실행)."""
+        self._quit_reason = "restart_request"
         log.info("[overlay] 재시작 요청")
         if getattr(sys, "frozen", False):
             cmd = [sys.executable]
@@ -554,6 +720,7 @@ class OverlayApp:
 
     def _on_shutdown_request(self):
         """/shutdown HTTP 요청으로 트리거되는 graceful shutdown."""
+        self._quit_reason = "stm_shutdown_request"
         log.info("[overlay] /shutdown 요청 수신 — graceful 종료 시작")
         self.request_quit()
 
@@ -561,6 +728,7 @@ class OverlayApp:
         if self._quitting:
             return
         self._quitting = True
+        log.info("[overlay] quit 진입: reason=%s", self._quit_reason)
 
         if self._discord_bot:
             self._discord_bot.stop()
@@ -576,29 +744,11 @@ class OverlayApp:
         except Exception as e:
             log.warning("STM promote failed at quit: %s", e)
         # MCP HTTP 서버 종료
-        if self._mcp_http_proc and self._mcp_http_proc.poll() is None:
-            self._mcp_http_proc.terminate()
-            try:
-                self._mcp_http_proc.wait(timeout=5)
-            except Exception:
-                self._mcp_http_proc.kill()
-            log.info("[mcp_http] MCP HTTP 서버 종료")
+        self._terminate_managed_process("_mcp_http_proc", "mcp_http", "MCP HTTP 서버")
         # dashboard 종료 (overlay가 직접 시작한 경우에만)
-        if getattr(self, "_dashboard_proc", None) and self._dashboard_proc.poll() is None:
-            self._dashboard_proc.terminate()
-            try:
-                self._dashboard_proc.wait(timeout=5)
-            except Exception:
-                self._dashboard_proc.kill()
-            log.info("[dashboard] dashboard 종료")
+        self._terminate_managed_process("_dashboard_proc", "dashboard", "dashboard")
         # kg_watcher 종료 (overlay가 직접 시작한 경우에만)
-        if getattr(self, "_kg_watcher_proc", None) and self._kg_watcher_proc.poll() is None:
-            self._kg_watcher_proc.terminate()
-            try:
-                self._kg_watcher_proc.wait(timeout=5)
-            except Exception:
-                self._kg_watcher_proc.kill()
-            log.info("[kg_watcher] kg_watcher 종료")
+        self._terminate_managed_process("_kg_watcher_proc", "kg_watcher", "kg_watcher")
         self._stm_server.stop()
         try:
             self.root.quit()

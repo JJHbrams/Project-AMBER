@@ -66,11 +66,11 @@ print('updated')
     }
 }
 
-# 5. MCP config (Copilot CLI) — overlay 수명 공유 SSE (기존 항목 보존, merge)
+# 5. MCP config (Copilot CLI) — overlay 수명 공유 HTTP (기존 항목 보존, merge)
 Write-Step "MCP config (Copilot CLI)..."
 $mcpDir = Split-Path $McpConfigPath
 if (-not (Test-Path $mcpDir)) { New-Item -Path $mcpDir -ItemType Directory -Force | Out-Null }
-$engramMcpEntry = [PSCustomObject]@{ type = "sse"; url = "http://127.0.0.1:$MCP_HTTP_PORT/sse" }
+$engramMcpEntry = [PSCustomObject]@{ type = "http"; url = "http://127.0.0.1:$MCP_HTTP_PORT/mcp" }
 if (Test-Path $McpConfigPath) {
     try {
         $existingMcp = Get-Content $McpConfigPath -Raw | ConvertFrom-Json
@@ -99,7 +99,7 @@ Write-Ok $McpConfigPath
 
 # 5b. MCP config (Claude Code)
 Write-Step "MCP config (Claude Code)..."
-$sseEntry = [PSCustomObject]@{ type = "sse"; url = "http://127.0.0.1:$MCP_HTTP_PORT/sse" }
+$httpEntry = [PSCustomObject]@{ type = "http"; url = "http://127.0.0.1:$MCP_HTTP_PORT/mcp" }
 if (Test-Path $ClaudeConfigPath) {
     $claudeConfig = Get-Content $ClaudeConfigPath -Raw | ConvertFrom-Json
     if (-not $claudeConfig.mcpServers) {
@@ -112,15 +112,15 @@ if (Test-Path $ClaudeConfigPath) {
             $claudeConfig.mcpServers.PSObject.Properties.Remove($serverProp.Name)
         }
     }
-    $claudeConfig.mcpServers | Add-Member -NotePropertyName engram -NotePropertyValue $sseEntry -Force
+    $claudeConfig.mcpServers | Add-Member -NotePropertyName engram -NotePropertyValue $httpEntry -Force
     $claudeJson = $claudeConfig | ConvertTo-Json -Depth 10
 } else {
-    $claudeJson = @{ mcpServers = @{ engram = $sseEntry } } | ConvertTo-Json -Depth 5
+    $claudeJson = @{ mcpServers = @{ engram = $httpEntry } } | ConvertTo-Json -Depth 5
 }
 [System.IO.File]::WriteAllText($ClaudeConfigPath, $claudeJson, [System.Text.UTF8Encoding]::new($false))
 Write-Ok $ClaudeConfigPath
 
-$claudeMcpJson = @{ mcpServers = @{ engram = @{ type = "sse"; url = "http://127.0.0.1:$MCP_HTTP_PORT/sse" } } } | ConvertTo-Json -Depth 5
+$claudeMcpJson = @{ mcpServers = @{ engram = @{ type = "http"; url = "http://127.0.0.1:$MCP_HTTP_PORT/mcp" } } } | ConvertTo-Json -Depth 5
 [System.IO.File]::WriteAllText($ClaudeMcpConfigPath, $claudeMcpJson, [System.Text.UTF8Encoding]::new($false))
 Write-Ok $ClaudeMcpConfigPath
 
@@ -130,7 +130,7 @@ from pathlib import Path
 
 config_path = Path(r'$($ClaudeConfigPath -replace '\\', '/')')
 work_dir = r'$WorkDir'
-sse_url = 'http://127.0.0.1:$MCP_HTTP_PORT/sse'
+mcp_url = 'http://127.0.0.1:$MCP_HTTP_PORT/mcp'
 
 data = {}
 if config_path.exists():
@@ -144,7 +144,7 @@ if config_path.exists():
 mcp_servers = data.get('mcpServers')
 if not isinstance(mcp_servers, dict):
     mcp_servers = {}
-mcp_servers['engram'] = {'type': 'sse', 'url': sse_url}
+mcp_servers['engram'] = {'type': 'http', 'url': mcp_url}
 data['mcpServers'] = mcp_servers
 
 projects = data.get('projects')
@@ -171,7 +171,7 @@ project_cfg['disabledMcpjsonServers'] = disabled
 project_mcp = project_cfg.get('mcpServers')
 if not isinstance(project_mcp, dict):
     project_mcp = {}
-project_mcp['engram'] = {'type': 'sse', 'url': sse_url}
+project_mcp['engram'] = {'type': 'http', 'url': mcp_url}
 project_cfg['mcpServers'] = project_mcp
 
 projects[work_dir] = project_cfg
@@ -187,23 +187,23 @@ if ($claudeHardeningResult -like "*ok*") {
     Write-Warn "Claude project MCP hardening failed: $claudeHardeningResult"
 }
 
-# 5bb. MCP config (Gemini CLI) — overlay 수명 공유 SSE
+# 5bb. MCP config (Gemini CLI) — overlay 수명 공유 HTTP
 Write-Step "MCP config (Gemini CLI)..."
 $geminiCmd = $GeminiCmdDetected
 if ($geminiCmd) {
     & gemini mcp remove --scope user engram *> $null
-    $geminiMcpOut = & gemini mcp add --scope user --transport sse engram "http://127.0.0.1:$MCP_HTTP_PORT/sse" 2>&1
+    $geminiMcpOut = & gemini mcp add --scope user --transport http engram "http://127.0.0.1:$MCP_HTTP_PORT/mcp" 2>&1
     if ($LASTEXITCODE -eq 0) {
-        Write-Ok "Gemini user MCP server registered: engram (SSE)"
+        Write-Ok "Gemini user MCP server registered: engram (HTTP)"
     } else {
-        Write-Warn "Gemini MCP SSE 등록 실패 — stdio 폴백 시도"
+        Write-Warn "Gemini MCP HTTP 등록 실패 — stdio 폴백 시도"
         & gemini mcp remove --scope user engram *> $null
         $geminiMcpOut2 = & gemini mcp add --scope user --transport stdio -e "ENGRAM_DB_DIR=$DbDir" engram $PythonExe $McpServerScript 2>&1
         if ($LASTEXITCODE -eq 0) {
             Write-Ok "Gemini MCP (stdio 폴백) 등록됨"
         } else {
             Write-Warn "Gemini MCP 등록 실패: $geminiMcpOut2"
-            Write-Warn "수동 등록: gemini mcp add --scope user --transport sse engram `"http://127.0.0.1:$MCP_HTTP_PORT/sse`""
+            Write-Warn "수동 등록: gemini mcp add --scope user --transport http engram `"http://127.0.0.1:$MCP_HTTP_PORT/mcp`""
         }
     }
 } else {
@@ -215,14 +215,14 @@ Write-Step "MCP config (VSCode Copilot Chat)..."
 $VscodeMcpDir = Join-Path $ProjectRoot ".vscode"
 $VscodeMcpPath = Join-Path $VscodeMcpDir "mcp.json"
 if (-not (Test-Path $VscodeMcpDir)) { New-Item -Path $VscodeMcpDir -ItemType Directory -Force | Out-Null }
-$vscodeMcpJson = @{ servers = @{ engram = @{ type = "sse"; url = "http://127.0.0.1:$MCP_HTTP_PORT/sse" } } } | ConvertTo-Json -Depth 5
+$vscodeMcpJson = @{ servers = @{ engram = @{ type = "http"; url = "http://127.0.0.1:$MCP_HTTP_PORT/mcp" } } } | ConvertTo-Json -Depth 5
 [System.IO.File]::WriteAllText($VscodeMcpPath, $vscodeMcpJson, [System.Text.UTF8Encoding]::new($false))
 Write-Ok $VscodeMcpPath
 
 # 5d. MCP config (VSCode Copilot Chat — global, 다른 프로젝트에서도 engram 사용)
 Write-Step "MCP config (VSCode Copilot Chat global)..."
 $VscodeGlobalMcpPath = Join-Path $env:APPDATA "Code\User\mcp.json"
-$engramServer = @{ type = "sse"; url = "http://127.0.0.1:$MCP_HTTP_PORT/sse" }
+$engramServer = @{ type = "http"; url = "http://127.0.0.1:$MCP_HTTP_PORT/mcp" }
 if (Test-Path $VscodeGlobalMcpPath) {
     try {
         $globalMcp = Get-Content $VscodeGlobalMcpPath -Raw | ConvertFrom-Json
@@ -254,8 +254,8 @@ $ProjectMcpPath = Join-Path $ProjectRoot ".mcp.json"
 $projectMcpJson = @{
     mcpServers = @{
         engram = @{
-            type = "sse"
-            url  = "http://127.0.0.1:$MCP_HTTP_PORT/sse"
+            type = "http"
+            url  = "http://127.0.0.1:$MCP_HTTP_PORT/mcp"
         }
     }
 } | ConvertTo-Json -Depth 5

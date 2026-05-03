@@ -49,6 +49,23 @@ sync:
   # post-session memories 증분 동기화 배치 크기.
   memories_batch_size: 300
 
+mcp:
+  # Overlay가 관리하는 MCP HTTP(SSE) 기본 포트.
+  http_port: 17385
+  # VS Code 재연결 안정성을 위해 기본 전송은 streamable-http 권장.
+  # 허용값: sse | streamable-http
+  transport: streamable-http
+  # Overlay 생존 중 리스너 헬스체크 주기(초).
+  healthcheck_interval_secs: 5
+  # 연속 실패 횟수 도달 시 MCP + 종속 리스너 재기동.
+  healthcheck_fail_threshold: 3
+  # Overlay 시작 직후 초기화 구간 유예(초).
+  healthcheck_start_delay_secs: 15
+  # 재기동 난사 방지 최소 간격(초).
+  restart_cooldown_secs: 8
+  # 재기동 후 리스너 준비 대기 시간(초).
+  ready_timeout_secs: 20
+
 session:
   # CLI 공급자가 시작될 때 자동으로 engram 컨텍스트를 주입할지 여부
   # 활성화 시 세션 시작마다 추가 컨텍스트 토큰이 소모됩니다

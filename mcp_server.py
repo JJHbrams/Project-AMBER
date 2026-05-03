@@ -7,8 +7,11 @@ import sys
 import os
 import re
 import json
+import asyncio
 import threading
 import time
+import uvicorn
+from starlette.responses import Response
 
 # Windows UTF-8 설정
 if sys.platform == "win32":
@@ -2653,6 +2656,33 @@ async def _http_sg_neighbors(request) -> "Response":
     return JSONResponse({"enabled": True, "results": results})
 
 
+def _build_hybrid_http_app():
+    """streamable-http(/mcp) + SSE(/sse,/messages/)를 동시에 노출한다.
+
+    기존 SSE 클라이언트(overlay shim/레거시 설정)와 신규 HTTP 클라이언트를
+    같은 서버 프로세스에서 함께 지원해 점진 이행 시 연결 단절을 줄인다.
+    """
+    app = engramMCP.streamable_http_app()
+    sse_app = engramMCP.sse_app()
+
+    message_path = engramMCP.settings.message_path
+    sse_path = engramMCP.settings.sse_path
+    allowed_paths = {sse_path, message_path, message_path.rstrip("/")}
+
+    existing = {(type(route).__name__, getattr(route, "path", "")) for route in app.router.routes}
+    for route in sse_app.router.routes:
+        path = getattr(route, "path", "")
+        if path not in allowed_paths:
+            continue
+        key = (type(route).__name__, path)
+        if key in existing:
+            continue
+        app.router.routes.append(route)
+        existing.add(key)
+
+    return app
+
+
 if __name__ == "__main__":
     # 서버 시작 시 임베딩 모델 선로딩을 하지 않는다.
     # SentenceTransformer는 시맨틱 기능이 실제 호출될 때 1회 로드된다.
@@ -2678,8 +2708,21 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
+    if sys.platform == "win32" and args.transport in {"sse", "streamable-http"}:
+        try:
+            asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+            print("[engram] Windows selector event loop policy enabled for HTTP transport", file=sys.stderr)
+        except Exception as exc:
+            print(f"[engram] event loop policy setup failed: {exc}", file=sys.stderr)
+
     if args.transport == "stdio":
         engramMCP.run(transport="stdio")
+    elif args.transport == "streamable-http":
+        # streamable-http를 기본으로 사용하되, 기존 SSE 클라이언트 호환을 유지한다.
+        engramMCP.settings.host = args.host
+        engramMCP.settings.port = args.port
+        app = _build_hybrid_http_app()
+        uvicorn.run(app, host=args.host, port=args.port, log_level=engramMCP.settings.log_level.lower())
     else:
         # FastMCP.run()은 host/port 인자 미지원 — 생성자로 재설정
         engramMCP.settings.host = args.host
