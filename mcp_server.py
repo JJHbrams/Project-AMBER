@@ -2454,7 +2454,7 @@ def kg_lint() -> str:
     """Wiki 품질 점검을 실행합니다.
     frontmatter 누락, _inbox 체류, 본문 부족, 고립 노드, summary 없는 노드, 제목 중복을 체크합니다.
     정기적으로 호출하여 wiki 건강 상태를 유지하세요."""
-    from scripts.kg_lint import run_lint, format_lint_report
+    from scripts.kg.kg_lint import run_lint, format_lint_report
 
     vault = _vault().parent  # docs/ 의 부모, 즉 intel_engram 루트
     results = run_lint(vault, verbose=False)
