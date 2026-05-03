@@ -112,6 +112,10 @@ $WikiDirs = @(
     "$DbDir\docs\protocols",
     "$DbDir\docs\references",
     "$DbDir\docs\research",
+    "$DbDir\docs\research\llm",
+    "$DbDir\docs\research\knowledge-systems",
+    "$DbDir\docs\research\agent",
+    "$DbDir\docs\research\cost",
     "$DbDir\docs\tools"
 )
 foreach ($d in $WikiDirs) {
@@ -123,7 +127,7 @@ foreach ($d in $WikiDirs) {
 $TemplateDate = Get-Date -Format "yyyy-MM-dd"
 $InstallerTemplatesDir = Join-Path $ProjectRoot "installer\templates"
 $WikiHome = "$DbDir\docs\moc\000-HOME.md"
-$WikiGuide = "$DbDir\docs\guides\Wiki 관리 지침.md"
+$WikiGuide = "$DbDir\docs\guides\wiki-guide.md"
 $TemplateTargets = @(
     @{ Src = "concept.md";  Dest = "$DbDir\docs\_templates\concept.md" },
     @{ Src = "project.md";  Dest = "$DbDir\docs\_templates\project.md" },

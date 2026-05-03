@@ -1,4 +1,5 @@
 ---
+id: wiki-guide
 title: Wiki 관리 지침
 note_type: concept
 tags:
@@ -35,6 +36,22 @@ updated: __DATE__
 | _templates/ | 노트 템플릿 |
 | _temp/ | 이동 stub, 30일 후 삭제 |
 
+### note_type → 저장 디렉토리 매핑
+
+| note_type | 저장 디렉토리 | 용도 |
+|---|---|---|
+| concept | concepts/ | 개념·기술 정리 |
+| protocol | protocols/ | 운영 규칙·지침 |
+| research | research/ | **외부** 논문·서비스 조사 결과 (프로젝트 내부 노트는 project 사용) |
+| project | projects/ | 프로젝트 노트 (개발·설계·진행·회고) |
+| tool | tools/ | 도구·라이브러리 레퍼런스 |
+| reference | references/ | 외부 문서·링크 모음 |
+| person | people/ | 인물 노트 |
+| moc | moc/ | 지도 노트 (목차·인덱스) |
+| fleeting | _inbox/ | 임시 메모 |
+
+> ⚠️ 프로젝트 내부 개발/설계 노트 → `note_type="project"`, `projects/<프로젝트명>/` 하위 디렉토리 먼저 확인
+
 ---
 
 ## 3. 파일 규칙
@@ -50,6 +67,10 @@ updated: __DATE__
 - frontmatter: `_templates/` 기준 준수
   - 신규 노트: `note_type:` 필드 사용
   - 기존 노트(legacy): `type:` 필드 허용 — lint 통과, 수정 시 `note_type:` 으로 교체 권장
+- `kg_add_note`의 `title` 파라미터는 **파일명 슬러그**로 사용됨
+  - 한국어·공백 금지, kebab-case 영문, 핵심 키워드 2~4개
+  - 사람이 읽는 노트 제목은 본문 frontmatter `title:` 필드로 별도 지정
+  - 좋은 예: `title="dashboard-visjs-graph-ui"` (frontmatter: `title: Dashboard vis.js Graph UI`)
 - 관련 노트는 항상 [[위키링크]] 형식으로 연결
 
 ---

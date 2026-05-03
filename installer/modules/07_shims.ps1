@@ -281,3 +281,24 @@ engram(연속체) 페르소나로 완전히 덮어씌운다.
     [System.IO.File]::WriteAllText($CopilotSkillPath, $defaultSkill, [System.Text.UTF8Encoding]::new($false))
     Write-Ok "$CopilotSkillPath (generated built-in template)"
 }
+
+# 7d. Subagent skills (planner / coder / servant)
+#     Copilot CLI → ~/.copilot/agents/<name>.agent.md
+#     Claude Code → ~/.claude/agents/<name>.md
+Write-Step "Subagent skills (planner / coder / servant)..."
+if (-not (Test-Path $CopilotAgentsDir)) { New-Item -Path $CopilotAgentsDir -ItemType Directory -Force | Out-Null }
+if (-not (Test-Path $ClaudeAgentsDir))  { New-Item -Path $ClaudeAgentsDir  -ItemType Directory -Force | Out-Null }
+@("planner", "coder", "servant") | ForEach-Object {
+    $skill = $_
+    $src = Join-Path $SkillsSourceDir "$skill.md"
+    if (Test-Path $src) {
+        $copilotDst = Join-Path $CopilotAgentsDir "$skill.agent.md"
+        $claudeDst  = Join-Path $ClaudeAgentsDir  "$skill.md"
+        Copy-Item $src $copilotDst -Force
+        Copy-Item $src $claudeDst  -Force
+        Write-Ok $copilotDst
+        Write-Ok $claudeDst
+    } else {
+        Write-Warn "Skill source not found: $src"
+    }
+}
