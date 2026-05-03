@@ -12,7 +12,6 @@ from core.storage.db import get_connection
 from core.common.sanitizer import sanitize
 from core.config.runtime_config import get_cfg_value, get_default_fallback_scope_key
 
-
 DEFAULT_SCOPE_KEY = get_default_fallback_scope_key()
 DEFAULT_PROJECT_KEY = "general"
 
@@ -26,11 +25,13 @@ def _submit_embed_task(*args) -> None:
     """임베딩 task를 executor에 submit. 큐가 꽉 찼으면 drop."""
     if not _embed_semaphore.acquire(blocking=False):
         return
+
     def _wrapped():
         try:
             _async_upsert_episode(*args)
         finally:
             _embed_semaphore.release()
+
     _embed_executor.submit(_wrapped)
 
 
@@ -146,7 +147,7 @@ def save_memory(
     safe_content = _format_memory(safe_body, source, provider, project)
     if keywords is None:
         keywords = _extract_keywords(safe_content)
-    
+
     conn = get_connection()
     with conn:
         # 1. memories 테이블 저장 (기존 필드 유지)
@@ -155,7 +156,7 @@ def save_memory(
             (session_id, safe_content, keywords, provider, model),
         )
         episode_id = cursor.lastrowid
-        
+
         # 2. 정규화된 키워드 테이블 저장
         if keywords.strip():
             # 쉼표나 공백으로 분리
@@ -164,7 +165,7 @@ def save_memory(
                 w = part.strip().lower()
                 if len(w) > 1:
                     words.add(w)
-            
+
             for w in words:
                 # 키워드 원본 저장 (중복 무시)
                 conn.execute("INSERT OR IGNORE INTO keywords (name) VALUES (?)", (w,))
@@ -172,12 +173,9 @@ def save_memory(
                 if row:
                     kw_id = row["id"]
                     # 메모리-키워드 매핑 저장
-                    conn.execute(
-                        "INSERT OR IGNORE INTO memory_keywords (memory_id, keyword_id) VALUES (?, ?)",
-                        (episode_id, kw_id)
-                    )
+                    conn.execute("INSERT OR IGNORE INTO memory_keywords (memory_id, keyword_id) VALUES (?, ?)", (episode_id, kw_id))
     conn.close()
-    
+
     # EpisodeNode 비동기 임베딩 (ThreadPoolExecutor, bounded queue)
     _submit_embed_task(str(episode_id), safe_content, keywords, str(session_id or ""), provider, model)
 
@@ -214,11 +212,10 @@ def search_memories(query: str, limit: int = 5, max_age_days: int = 0) -> List[s
         try:
             # core.graph.semantic 패키지는 stm_promoter ↔ store 순환이 있어 지연 import 유지.
             from core.graph.semantic import get_semantic_graph
+
             sg = get_semantic_graph()
             if sg.enabled:
-                hits = sg.episode_semantic_search(
-                    query, top_k=limit, threshold=0.25, max_age_days=max_age_days
-                )
+                hits = sg.episode_semantic_search(query, top_k=limit, threshold=0.25, max_age_days=max_age_days)
                 if hits:
                     return [h["content"] for h in hits]
         except Exception:
@@ -374,7 +371,17 @@ def list_memories(limit: int = 20) -> List[str]:
     conn = get_connection()
     rows = conn.execute("SELECT content, created_at FROM memories ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
     conn.close()
-    return [f"[{r['created_at']}] {r['content']}" for r in rows]
+    results: List[str] = []
+    for r in rows:
+        content = r["content"] or ""
+        created_at = r["created_at"] or ""
+
+        # frontmatter 블록은 문서 최상단에 있어야 하므로 조회 시 prefix를 붙이지 않는다.
+        if content.lstrip().startswith("---"):
+            results.append(content)
+        else:
+            results.append(f"[{created_at}] {content}" if created_at else content)
+    return results
 
 
 def _extract_keywords(text: str) -> str:
@@ -398,5 +405,3 @@ def _normalize_scope_key(scope_key: Optional[str]) -> str:
 def _clip(text: str, limit: int) -> str:
     cleaned = sanitize(text or "", max_length=limit)
     return cleaned
-
-
