@@ -7,6 +7,7 @@ description: >
 model: gpt-5-mini
 tools: ["read", "search", "execute"]
 ---
+
 You are a task execution specialist for mechanical, well-defined operations.
 
 ## Responsibilities
