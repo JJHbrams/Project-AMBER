@@ -16,6 +16,18 @@ updated: __DATE__
 
 ---
 
+## ⚡ TL;DR — 작성 전 체크
+
+1. `projects/` 루트 직접 저장 **금지** → 반드시 `projects/<name>/<subdir>/`
+2. 신규 프로젝트 → 디렉토리 구조 먼저, `index.md`(type: moc) 생성 후 시작
+3. 외부 자료(웹·논문·문서) 첫 수집 → `_inbox/`(fleeting) → 정제 후 이동
+4. 외부 사실 서술 시 출처·날짜 필수 — `(출처, yyyy-mm-dd)` 또는 각주
+5. 파일명 → `kebab-case` 영문 핵심 키워드 2~4개만. 날짜 필요 시 `yymmdd_` 앞에만
+6. 기존 노트 먼저 확인 — `kg_search()` / `kg_semantic_search()` 후 없을 때만 신규 생성
+7. 작성 후 → `kg_sync()` + `kg_lint()`
+
+---
+
 ## 1. MoC (HOME) 업데이트 규칙
 
 - docs/moc/000-HOME.md 은 wiki 전체의 root 노드.
@@ -30,25 +42,25 @@ updated: __DATE__
 - 디렉토리명: **소문자 kebab-case** (예: `projects/karpathy/`, `research/medical-imaging/`)
 - 새 디렉토리: `kg_add_note(note_type="projects/my-project")` 트릭 사용 후 frontmatter `type`을 `moc`으로 수정
 
-| 디렉토리 | 용도 |
-|----------|------|
-| _inbox/ | 미분류 임시 노트 (fleeting 타입, 30일 내 이동) |
-| _templates/ | 노트 템플릿 |
-| _temp/ | 이동 stub, 30일 후 삭제 |
+| 디렉토리     | 용도                                           |
+| ------------ | ---------------------------------------------- |
+| \_inbox/     | 미분류 임시 노트 (fleeting 타입, 30일 내 이동) |
+| \_templates/ | 노트 템플릿                                    |
+| \_temp/      | 이동 stub, 30일 후 삭제                        |
 
 ### note_type → 저장 디렉토리 매핑
 
-| note_type | 저장 디렉토리 | 용도 |
-|---|---|---|
-| concept | concepts/ | 개념·기술 정리 |
-| protocol | protocols/ | 운영 규칙·지침 |
-| research | research/ | **외부** 논문·서비스 조사 결과 (프로젝트 내부 노트는 project 사용) |
-| project | projects/ | 프로젝트 노트 (개발·설계·진행·회고) |
-| tool | tools/ | 도구·라이브러리 레퍼런스 |
-| reference | references/ | 외부 문서·링크 모음 |
-| person | people/ | 인물 노트 |
-| moc | moc/ | 지도 노트 (목차·인덱스) |
-| fleeting | _inbox/ | 임시 메모 |
+| note_type | 저장 디렉토리 | 용도                                                               |
+| --------- | ------------- | ------------------------------------------------------------------ |
+| concept   | concepts/     | 개념·기술 정리                                                     |
+| protocol  | protocols/    | 운영 규칙·지침                                                     |
+| research  | research/     | **외부** 논문·서비스 조사 결과 (프로젝트 내부 노트는 project 사용) |
+| project   | projects/     | 프로젝트 노트 (개발·설계·진행·회고)                                |
+| tool      | tools/        | 도구·라이브러리 레퍼런스                                           |
+| reference | references/   | 외부 문서·링크 모음                                                |
+| person    | people/       | 인물 노트                                                          |
+| moc       | moc/          | 지도 노트 (목차·인덱스)                                            |
+| fleeting  | \_inbox/      | 임시 메모                                                          |
 
 > ⚠️ 프로젝트 내부 개발/설계 노트 → `note_type="project"`, `projects/<프로젝트명>/` 하위 디렉토리 먼저 확인
 
@@ -78,6 +90,7 @@ updated: __DATE__
 ## 4. 노트 작성 포맷
 
 빠른 참조 가능성 최우선. 권장 섹션 순서:
+
 1. 제목 + > blockquote 한 줄 요약 (무조건 첫 줄)
 2. 핵심 개념 표
 3. 구조/아키텍처
@@ -85,12 +98,12 @@ updated: __DATE__
 5. 트러블슈팅 (있을 경우)
 6. 관련 노트 ([[]])
 
-| 요소 | 규칙 |
-|------|------|
-| 파라미터/옵션 | 표 형식 (이름 \| 기본값 \| 설명) |
-| CLI 명령어 | 표 형식 (명령어 \| 동작 \| 주요옵션) |
-| 코드 | 언어 명시 (```python```, ```powershell``` 등) |
-| 트리 구조 | ```ascii``` 코드 블록 |
+| 요소          | 규칙                                  |
+| ------------- | ------------------------------------- |
+| 파라미터/옵션 | 표 형식 (이름 \| 기본값 \| 설명)      |
+| CLI 명령어    | 표 형식 (명령어 \| 동작 \| 주요옵션)  |
+| 코드          | 언어 명시 (`python`, `powershell` 등) |
+| 트리 구조     | `ascii` 코드 블록                     |
 
 피할 것: 긴 산문 나열, README 복붙, "이 노트는..." 식 접두사
 
@@ -116,12 +129,12 @@ GPT-4는 2023년 3월 공개되었다. (출처: [OpenAI blog](https://openai.com
 
 ### 규칙 요약
 
-| 상황 | 처리 |
-|------|------|
+| 상황                | 처리                           |
+| ------------------- | ------------------------------ |
 | 웹 페이지·논문 인용 | URL + 제목 + 날짜(선택) 각주로 |
-| 직접 실험·관측 결과 | `(직접 측정, yyyy-mm-dd)` |
-| 출처 불명 | 기술 금지 또는 `(미확인)` 명시 |
-| LLM 생성 내용 | `(LLM 추론, 검증 필요)` 명시 |
+| 직접 실험·관측 결과 | `(직접 측정, yyyy-mm-dd)`      |
+| 출처 불명           | 기술 금지 또는 `(미확인)` 명시 |
+| LLM 생성 내용       | `(LLM 추론, 검증 필요)` 명시   |
 
 ### 출처 섹션
 
@@ -132,10 +145,11 @@ GPT-4는 2023년 3월 공개되었다. (출처: [OpenAI blog](https://openai.com
 ## 6. KG 동기화 체크리스트
 
 노트 생성·수정·이동 후:
+
 1. kg_sync() — vault .md → SQLite DB 동기화
 2. kg_update_node(node_id, summary) — 프로젝트 노드 상태 갱신
 3. HOME 파일 변경 시 → KG 노드 000-home summary도 업데이트
-4. kg_lint() — 품질 점검 (고립 노드, _inbox 체류, summary 누락 등)
+4. kg_lint() — 품질 점검 (고립 노드, \_inbox 체류, summary 누락 등)
 
 ---
 
@@ -143,18 +157,18 @@ GPT-4는 2023년 3월 공개되었다. (출처: [OpenAI blog](https://openai.com
 
 **새 정보를 얻으면 반드시 wiki에 저장한다.**
 
-| 상황 | 행동 |
-|------|------|
-| 빠른 메모·출처만 있는 경우 | _inbox/ 에 임시 노트 투기 |
-| 충분히 정제된 경우 | 바로 적절한 디렉토리에 노트 생성 |
-| 기존 노트와 같은 주제 | 기존 노트 업데이트 또는 하위 노트로 추가 |
-| 저장 후 | kg_lint() 호출로 품질 점검 |
+| 상황                       | 행동                                     |
+| -------------------------- | ---------------------------------------- |
+| 빠른 메모·출처만 있는 경우 | \_inbox/ 에 임시 노트 투기               |
+| 충분히 정제된 경우         | 바로 적절한 디렉토리에 노트 생성         |
+| 기존 노트와 같은 주제      | 기존 노트 업데이트 또는 하위 노트로 추가 |
+| 저장 후                    | kg_lint() 호출로 품질 점검               |
 
 조사 결과를 채팅에만 남기고 wiki에 저장하지 않으면 다음 세션에서 잃어버린다.
 
 ---
 
-## 8. _inbox/ 워크플로우
+## 8. \_inbox/ 워크플로우
 
 raw 검색·조사 결과를 임시 보관하는 버퍼. Karpathy LLM Wiki의 **raw/ 레이어**에 해당.
 
@@ -172,7 +186,7 @@ _inbox/ 원본 정리 (적절한 디렉토리로 이동 또는 삭제)
 kg_sync() → kg_lint()
 ```
 
-### _inbox/ 노트 최소 frontmatter
+### \_inbox/ 노트 최소 frontmatter
 
 ```yaml
 ---
@@ -183,5 +197,93 @@ created: yyyy-mm-dd
 ---
 ```
 
-- _inbox/ 노트는 30일 이내 정제·이동 원칙.
-- kg_lint() 가 _inbox 체류 노트를 자동 감지한다.
+- \_inbox/ 노트는 30일 이내 정제·이동 원칙.
+- kg_lint() 가 \_inbox 체류 노트를 자동 감지한다.
+
+---
+
+## 9. 자주 틀리는 패턴 (LLM 주의)
+
+> 아래는 실제로 반복된 실수 목록이다. 노트 작성 전 반드시 확인하라.
+
+### ❌ 프로젝트 노트를 `projects/` 루트에 직접 생성
+
+```
+# 잘못됨
+projects/my-project-dev-notes.md
+
+# 올바름
+projects/my-project/dev/my-project-dev-notes.md
+projects/my-project/index.md  ← 프로젝트 루트 인덱스도 함께
+```
+
+### ❌ 신규 프로젝트를 단일 파일로 저장
+
+```
+# 잘못됨
+projects/new-project-analysis.md
+
+# 올바름
+projects/new-project/index.md          ← type: moc, 먼저 생성
+projects/new-project/analysis/initial-analysis.md
+```
+
+분석 문서가 하나뿐이어도 프로젝트 성격이면 `projects/<name>/` 구조를 따른다.
+
+### ❌ 외부 자료를 `_inbox` 없이 바로 저장
+
+```
+# 잘못됨 (미정제 원자료를 바로)
+research/some-paper-notes.md
+
+# 올바름
+_inbox/some-paper-raw.md   ← fleeting, 일단 받기
+ ↓ 정제 후
+research/topic/some-paper.md
+```
+
+직접 실험·관측 결과는 바로 해당 디렉토리에 써도 된다.
+
+### ❌ 출처 미기재
+
+```markdown
+# 잘못됨
+FastMCP의 stateless_http 기본값은 False이다.
+
+# 올바름
+FastMCP의 stateless_http 기본값은 False이다. (직접 확인, 2026-05-04)
+```
+
+LLM 추론 내용은 `(LLM 추론, 검증 필요)` 명시.
+
+### ❌ 파일명 과설명
+
+```
+# 잘못됨
+llm-harnessing-연구-결과-및-방향성-분석-최종.md
+
+# 올바름
+llm-harnessing-direction.md
+260504_llm-harnessing-direction.md  ← 날짜 필요 시
+```
+
+---
+
+## 10. 노트 작성 전 저장 위치 결정 트리
+
+```
+작성 내용이...
+
+외부 자료(웹·논문·문서) 첫 수집?
+  YES → _inbox/ (fleeting) → 정제 후 이동
+  NO  → 아래 계속
+
+프로젝트 관련 (개발·설계·버그·분석·회고)?
+  YES → projects/<project-name>/<subdir>/
+        subdir: dev/ analysis/ bug_report/ log/ report/
+  NO  → 아래 계속
+
+기술 개념·아키텍처?  → concepts/
+외부 도구·라이브러리? → tools/ 또는 references/
+운영 규칙·지침?       → guides/ 또는 protocols/
+```

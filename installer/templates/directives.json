@@ -11,7 +11,7 @@
     "scope": "all",
     "priority": 10,
     "trigger_type": "wiki",
-    "content": "[Wiki 작성 트리거]\n의미 있는 기술 리서치, 프로젝트 설계 결정, 또는 새 도구 파악 완료 시 반드시 Wiki에 기록한다. (대화 중 또는 세션 종료 전)\n\n[작성 지침 참고]\n작성 전 반드시 kg_read_note(\"Wiki 관리 지침\")를 호출하여 최신 경로 규칙, 파일명, Frontmatter 포맷을 확인하고 준수한다. (__VAULT_DIR__\\docs\\guides\\Wiki 관리 지침.md)"
+    "content": "[Wiki 작성 트리거]\n의미 있는 기술 리서치, 프로젝트 설계 결정, 또는 새 도구 파악 완료 시 반드시 Wiki에 기록한다. (대화 중 또는 세션 종료 전)\n\n[작성 지침 참고]\n작성 전 반드시 kg_read_note(\"wiki-guide\")를 호출하여 최신 경로 규칙, 파일명, Frontmatter 포맷을 확인하고 준수한다. (__VAULT_DIR__\\docs\\guides\\wiki-guide.md)"
   },
   {
     "key": "python-import-convention",
@@ -25,7 +25,7 @@
     "scope": "all",
     "priority": 5,
     "trigger_type": "wiki",
-    "content": "Wiki 작성 시 kg_read_note(\"wiki-management-guide\") 참조. 구조·경로·Frontmatter 규칙 준수. 구조 변경 시 HOME 업데이트 필수."
+    "content": "Wiki 작성 시 kg_read_note(\"wiki-guide\") 참조. 구조·경로·Frontmatter 규칙 준수. 구조 변경 시 HOME 업데이트 필수."
   },
   {
     "key": "git-branch-policy",
