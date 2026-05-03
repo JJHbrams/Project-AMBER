@@ -59,6 +59,13 @@ _DEFAULT_CFG = {
     "session": {
         "auto_inject": False,
     },
+    "directives": {
+        "enforcement": {
+            "mode": "hybrid",
+            "pin_top_n": 3,
+            "max_items": 8,
+        },
+    },
     "copilot": {
         "model": "claude-sonnet-4.6",
         "allow_all_tools": True,
@@ -85,6 +92,12 @@ _USER_TEMPLATE = """# User runtime overrides for Engram.
 #
 # session:
 #   auto_inject: false  # CLI 시작 시 자동 컨텍스트 주입 (활성화 시 토큰 추가 소모)
+#
+# directives:
+#   enforcement:
+#     mode: "hybrid"    # triggered | hybrid | always
+#     pin_top_n: 3       # hybrid 모드에서 강제 주입할 상위 지침 수
+#     max_items: 8       # 주입 지침 상한 (0이면 무제한)
 #
 # copilot:
 #   model: "claude-sonnet-4.6"

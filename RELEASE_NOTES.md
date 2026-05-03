@@ -1,5 +1,30 @@
 # Release Notes
 
+## 2026-05-03 - Directive Compliance Enforcement (Prompt-Side)
+
+### Highlights
+
+- Added configurable directive enforcement modes to improve instruction compliance without building a full external orchestration pipeline.
+- Improved prompt composition so directive blocks are treated as top-priority rules instead of ctx reference data.
+
+### What Changed
+
+- `core/context/directives.py` now supports `triggered`, `hybrid`, and `always` enforcement modes.
+- `core/context/directives.py` now supports `pin_top_n` priority pinning and `max_items` injection caps to balance compliance and token usage.
+- `core/context/context_builder.py` now injects directive blocks outside ctx wrappers and explicitly marks directive precedence.
+- `core/config/runtime_config.py` now includes default directive enforcement settings and user override template comments.
+
+### Impact
+
+- Better directive adherence in normal chat/CLI flows with bounded token overhead.
+- Reduced risk that directives are interpreted as passive context data.
+
+### Files
+
+- core/context/directives.py
+- core/context/context_builder.py
+- core/config/runtime_config.py
+
 ## 2026-05-01 - Claude Code (Ollama) Provider and Build Stability
 
 ### Highlights

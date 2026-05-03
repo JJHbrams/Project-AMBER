@@ -8,30 +8,73 @@ trigger_type: 주입 조건 ('always' | 'wiki' | 'code' | 'git' | 'reflection')
 """
 
 from typing import List, Dict, Optional
+from core.config.runtime_config import get_cfg_value
 from core.storage.db import get_connection
 from core.common.sanitizer import sanitize
-
 
 # ── 트리거 키워드 매핑 ────────────────────────────────────────────────────────
 _TRIGGER_KEYWORDS: dict[str, list[str]] = {
     "wiki": [
-        "wiki", "문서", "노트", "작성", "기록", "저장", "vault",
-        "kg_add", "kg_update", "kg_read", "위키", "정리",
+        "wiki",
+        "문서",
+        "노트",
+        "작성",
+        "기록",
+        "저장",
+        "vault",
+        "kg_add",
+        "kg_update",
+        "kg_read",
+        "위키",
+        "정리",
     ],
     "code": [
-        "코드", "수정", "구현", "버그", "디버깅", "리팩토링", "파일",
-        "함수", "클래스", "모듈", "import", "fix", "refactor", "구현",
-        "작성", "빌드", "테스트",
+        "코드",
+        "수정",
+        "구현",
+        "버그",
+        "디버깅",
+        "리팩토링",
+        "파일",
+        "함수",
+        "클래스",
+        "모듈",
+        "import",
+        "fix",
+        "refactor",
+        "구현",
+        "작성",
+        "빌드",
+        "테스트",
     ],
     "git": [
-        "git", "커밋", "commit", "브랜치", "branch", "push", "merge",
-        "pr", "풀리퀘", "rebase", "checkout",
+        "git",
+        "커밋",
+        "commit",
+        "브랜치",
+        "branch",
+        "push",
+        "merge",
+        "pr",
+        "풀리퀘",
+        "rebase",
+        "checkout",
     ],
     "reflection": [
-        "reflect", "/reflect", "반성", "세션", "close_session",
-        "피드백", "종료", "정리", "끝", "수고",
+        "reflect",
+        "/reflect",
+        "반성",
+        "세션",
+        "close_session",
+        "피드백",
+        "종료",
+        "정리",
+        "끝",
+        "수고",
     ],
 }
+
+_VALID_ENFORCEMENT_MODES = {"triggered", "hybrid", "always"}
 
 
 def _active_triggers(user_query: str) -> set[str]:
@@ -44,6 +87,30 @@ def _active_triggers(user_query: str) -> set[str]:
         if any(kw in q for kw in keywords):
             active.add(trigger)
     return active
+
+
+def _directive_enforcement_mode() -> str:
+    mode = str(get_cfg_value("directives.enforcement.mode", "triggered")).strip().lower()
+    if mode in _VALID_ENFORCEMENT_MODES:
+        return mode
+    return "triggered"
+
+
+def _directive_pin_top_n() -> int:
+    raw = get_cfg_value("directives.enforcement.pin_top_n", 3)
+    try:
+        return max(0, int(raw))
+    except (TypeError, ValueError):
+        return 3
+
+
+def _directive_max_items() -> int:
+    raw = get_cfg_value("directives.enforcement.max_items", 8)
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return 8
+    return 0 if value == 0 else max(1, value)
 
 
 def add_directive(
@@ -88,11 +155,9 @@ def get_directives(
     """
     conn = get_connection()
     if include_inactive:
-        rows = conn.execute(
-            """SELECT key, content, source, scope, priority, active, trigger_type, created_at, updated_at
+        rows = conn.execute("""SELECT key, content, source, scope, priority, active, trigger_type, created_at, updated_at
                FROM directives
-               ORDER BY priority DESC, created_at ASC"""
-        ).fetchall()
+               ORDER BY priority DESC, created_at ASC""").fetchall()
         conn.close()
         return [dict(r) for r in rows]
 
@@ -107,14 +172,28 @@ def get_directives(
     conn.close()
 
     directives = [dict(r) for r in rows]
+    enforcement_mode = _directive_enforcement_mode()
 
-    # trigger 필터
-    active_triggers = _active_triggers(user_query)
-    result = []
-    for d in directives:
-        t = d.get("trigger_type", "always")
-        if t == "always" or t in active_triggers:
-            result.append(d)
+    if enforcement_mode == "always":
+        result = directives
+    else:
+        # trigger 필터
+        active_triggers = _active_triggers(user_query)
+        pinned_keys: set[str] = set()
+        if enforcement_mode == "hybrid":
+            pin_top_n = _directive_pin_top_n()
+            pinned_keys = {str(d.get("key", "")).strip() for d in directives[:pin_top_n] if str(d.get("key", "")).strip()}
+
+        result = []
+        for d in directives:
+            t = d.get("trigger_type", "always")
+            key = str(d.get("key", "")).strip()
+            if t == "always" or t in active_triggers or key in pinned_keys:
+                result.append(d)
+
+    max_items = _directive_max_items()
+    if max_items > 0:
+        result = result[:max_items]
 
     return result
 
@@ -152,9 +231,7 @@ def update_directive(
 
     conn = get_connection()
     with conn:
-        cursor = conn.execute(
-            f"UPDATE directives SET {', '.join(updates)} WHERE key = ?", params
-        )
+        cursor = conn.execute(f"UPDATE directives SET {', '.join(updates)} WHERE key = ?", params)
     conn.close()
     return cursor.rowcount > 0
 
@@ -173,9 +250,13 @@ def render_directives_prompt(caller: str = "all", user_query: str = "") -> str:
     directives = get_directives(scope_filter=caller, user_query=user_query)
     if not directives:
         return ""
+    enforcement_mode = _directive_enforcement_mode()
+    header = "[지침]"
     lines = []
+    if enforcement_mode in {"hybrid", "always"}:
+        header = "[지침|강제]"
+        lines.append("아래 지침은 상위 운영 규칙이다. 충돌 시 지침을 우선하고, 실행 불가 시 이유를 먼저 설명할 것.")
     for d in directives:
         scope_tag = f" [{d['scope']}]" if d["scope"] != "all" else ""
         lines.append(f"• {d['content']}{scope_tag}")
-    return "[지침]\n" + "\n".join(lines)
-
+    return header + "\n" + "\n".join(lines)
