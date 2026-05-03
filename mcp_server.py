@@ -69,7 +69,7 @@ initialize_db()
 from core.observability.call_log import call_log as _call_log
 
 # host/port는 __main__ 블록에서 argparse 이후 재설정됨 (SSE 모드 전용)
-engramMCP = FastMCP("engram", instructions="Project Intel Engram 정신체의 기억·정체성·테마를 관리하는 도구 모음")
+engramMCP = FastMCP("engram", instructions="Project Intel Engram 정신체의 기억·정체성·테마를 관리하는 도구 모음", stateless_http=True)
 
 import functools as _functools
 import inspect as _inspect
@@ -119,6 +119,7 @@ engramMCP.tool = _tool_with_log
 
 # 세션별 컨텍스트 초기화 dedupe (프로세스 수명 동안 유지)
 from collections import OrderedDict
+import uuid as _uuid
 
 _CONTEXT_ONCE_KEYS: "OrderedDict[str, int | None]" = OrderedDict()
 _CONTEXT_ONCE_MAX = 500
@@ -127,6 +128,8 @@ _FINGERPRINT_TO_SESSION: "dict[str, int]" = {}  # fingerprint → session_id (MC
 _TUTORIAL_NOTICE_KEYS: "OrderedDict[str, None]" = OrderedDict()
 _TUTORIAL_NOTICE_MAX = 1000
 _TUTORIAL_NOTICE_LOCK = threading.Lock()
+# stateless HTTP 모드에서 프로세스 수명 동안 안정적인 식별자
+_SERVER_STARTUP_TOKEN: str = _uuid.uuid4().hex
 
 
 def _normalize_cwd_for_key(cwd: str) -> str:
@@ -143,6 +146,11 @@ def _context_session_fingerprint(ctx: Context | None) -> str:
 
     FastMCP 서버가 overlay 수명과 함께 지속되므로, caller/scope/cwd만으로 dedupe하면
     다음 대화 세션까지 "already initialized"가 누적될 수 있다.
+
+    stateless_http=True 모드에서는 ctx.session이 요청마다 새 객체이므로
+    session_obj 대신 프로세스 고정 토큰(_SERVER_STARTUP_TOKEN)을 사용한다.
+    이렇게 하면 서버 재시작 시에는 새 fingerprint가 생성되고,
+    같은 프로세스 내에서는 client_id 단위로 안정적으로 dedupe된다.
     """
     if ctx is None:
         return ""
@@ -156,8 +164,13 @@ def _context_session_fingerprint(ctx: Context | None) -> str:
         pass
 
     try:
-        # 세션 객체 주소는 같은 MCP 세션 내에서는 안정적으로 유지된다.
-        parts.append(f"session_obj:{id(ctx.session)}")
+        is_stateless = getattr(engramMCP.settings, "stateless_http", False)
+        if is_stateless:
+            # stateless 모드: 프로세스 수명 동안 고정된 토큰 사용
+            parts.append(f"startup:{_SERVER_STARTUP_TOKEN}")
+        else:
+            # stateful 모드: 세션 객체 주소는 같은 MCP 세션 내에서 안정적으로 유지된다.
+            parts.append(f"session_obj:{id(ctx.session)}")
     except Exception:
         pass
 
