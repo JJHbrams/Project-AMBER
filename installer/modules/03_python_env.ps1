@@ -33,7 +33,7 @@ if ($condaCmd) {
             } else {
                 Write-Step "Conda env update (environment.yml)..."
                 Push-Location $ProjectRoot
-                $condaUpdateOutput = Invoke-LiveLog { conda env update -n $CondaEnv -f $EnvironmentYamlPath }
+                $condaUpdateOutput = Invoke-LiveProcessLog -FilePath "conda" -ArgumentList @("env", "update", "-n", $CondaEnv, "-f", $EnvironmentYamlPath) -Activity "Conda env update"
                 $condaUpdateExit = $LASTEXITCODE
                 Pop-Location
                 if ($condaUpdateExit -ne 0) {
@@ -50,7 +50,7 @@ if ($condaCmd) {
         if (Test-Path $EnvironmentYamlPath) {
             Write-Step "Conda env create (environment.yml)..."
             Push-Location $ProjectRoot
-            $condaCreateOutput = Invoke-LiveLog { conda env create -n $CondaEnv -f $EnvironmentYamlPath }
+            $condaCreateOutput = Invoke-LiveProcessLog -FilePath "conda" -ArgumentList @("env", "create", "-n", $CondaEnv, "-f", $EnvironmentYamlPath) -Activity "Conda env create"
             $condaCreateExit = $LASTEXITCODE
             Pop-Location
             if ($condaCreateExit -ne 0) {
@@ -61,7 +61,7 @@ if ($condaCmd) {
             Write-Ok "Created env '$CondaEnv' from environment.yml"
         } else {
             Write-Warn "environment.yml not found — creating '$CondaEnv' with python=3.11 + requirements.txt"
-            $condaCreateOutput = Invoke-LiveLog { conda create -n $CondaEnv python=3.11 -y }
+            $condaCreateOutput = Invoke-LiveProcessLog -FilePath "conda" -ArgumentList @("create", "-n", $CondaEnv, "python=3.11", "-y") -Activity "Conda env create"
             if ($LASTEXITCODE -ne 0) {
                 Write-Err "Failed: conda create -n $CondaEnv python=3.11 -y"
                 $condaCreateOutput | Select-Object -Last 30 | ForEach-Object { Write-Host "      $_" -ForegroundColor DarkYellow }
@@ -71,7 +71,7 @@ if ($condaCmd) {
                 Write-Err "requirements.txt not found: $RequirementsPath"
                 exit 1
             }
-            $condaReqOutput = Invoke-LiveLog { conda run -n $CondaEnv python -m pip install -r $RequirementsPath }
+            $condaReqOutput = Invoke-LiveProcessLog -FilePath "conda" -ArgumentList @("run", "-n", $CondaEnv, "python", "-m", "pip", "install", "-r", $RequirementsPath) -Activity "Conda pip install"
             if ($LASTEXITCODE -ne 0) {
                 Write-Err "Failed: conda run -n $CondaEnv python -m pip install -r requirements.txt"
                 $condaReqOutput | Select-Object -Last 30 | ForEach-Object { Write-Host "      $_" -ForegroundColor DarkYellow }
@@ -127,8 +127,8 @@ if ($condaCmd) {
     }
     $PythonExe = $venvPython
 
-    Invoke-LiveLog { & $PythonExe -m pip install --upgrade pip } | Out-Null
-    $venvInstallOutput = Invoke-LiveLog { & $PythonExe -m pip install -r $RequirementsPath }
+    Invoke-LiveProcessLog -FilePath $PythonExe -ArgumentList @("-m", "pip", "install", "--upgrade", "pip") -Activity "pip upgrade" | Out-Null
+    $venvInstallOutput = Invoke-LiveProcessLog -FilePath $PythonExe -ArgumentList @("-m", "pip", "install", "-r", $RequirementsPath) -Activity "pip install requirements"
     if ($LASTEXITCODE -ne 0) {
         Write-Err "Failed: $PythonExe -m pip install -r requirements.txt"
         $venvInstallOutput | Select-Object -Last 30 | ForEach-Object { Write-Host "      $_" -ForegroundColor DarkYellow }

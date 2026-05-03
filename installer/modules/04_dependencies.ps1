@@ -11,7 +11,7 @@ Write-Ok $McpServerScript
 Write-Step "Python dependencies..."
 $check = & $PythonExe -c "import mcp, yaml; print('ok')" 2>&1
 if ($check -ne "ok") {
-    Invoke-LiveLog { & $PythonExe -m pip install -r (Join-Path $ProjectRoot "requirements.txt") } | Out-Null
+    Invoke-LiveProcessLog -FilePath $PythonExe -ArgumentList @("-m", "pip", "install", "-r", (Join-Path $ProjectRoot "requirements.txt")) -Activity "pip install requirements" | Out-Null
     Write-Ok "Installed"
 } else { Write-Ok "OK" }
 

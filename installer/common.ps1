@@ -29,6 +29,9 @@ $LegacyShimPath = Join-Path $ShimDir ("con" + "tinuum.cmd")
 $CopilotSkillDir = Join-Path $env:USERPROFILE ".copilot\skills\engram"
 $CopilotSkillPath = Join-Path $CopilotSkillDir "SKILL.md"
 $LegacyCopilotSkillDir = Join-Path $env:USERPROFILE (".copilot\\skills\\" + ("con" + "tinuum"))
+$SkillsSourceDir = Join-Path $ProjectRoot "config\skills"
+$CopilotAgentsDir = Join-Path $env:USERPROFILE ".copilot\agents"
+$ClaudeAgentsDir = Join-Path $env:USERPROFILE ".claude\agents"
 $McpConfigPath = Join-Path $env:USERPROFILE ".copilot\mcp-config.json"
 $ClaudeConfigPath = Join-Path $env:USERPROFILE ".claude.json"
 $RuntimeConfigPath = Join-Path $ProjectRoot "config\config.yaml"
@@ -102,6 +105,139 @@ function Invoke-LiveLog([scriptblock]$ScriptBlock) {
     }
     if ($lines.Count -gt 0) { Write-Host "" }
     return ,$lines
+}
+
+function Join-NativeArgumentList([string[]]$ArgumentList) {
+    if (-not $ArgumentList -or $ArgumentList.Count -eq 0) {
+        return ""
+    }
+
+    $escaped = foreach ($arg in $ArgumentList) {
+        if ($null -eq $arg) {
+            '""'
+            continue
+        }
+
+        $text = [string]$arg
+        if ($text -eq "") {
+            '""'
+            continue
+        }
+
+        if ($text -notmatch '[\s"]') {
+            $text
+        } else {
+            '"' + ($text -replace '"', '\\"') + '"'
+        }
+    }
+
+    return ($escaped -join " ")
+}
+
+function Invoke-LiveProcessLog {
+    param(
+        [Parameter(Mandatory)][string]$FilePath,
+        [string[]]$ArgumentList = @(),
+        [string]$Activity = "running",
+        [int]$NoOutputHintSeconds = 12
+    )
+
+    $spinner = @('|', '/', '-', '\')
+    $spinIdx = 0
+    $lines = [System.Collections.Generic.List[string]]::new()
+
+    $tempBase = "engram-install-" + [System.Guid]::NewGuid().ToString("N")
+    $stdoutPath = Join-Path ([System.IO.Path]::GetTempPath()) ($tempBase + ".stdout.log")
+    $stderrPath = Join-Path ([System.IO.Path]::GetTempPath()) ($tempBase + ".stderr.log")
+
+    [System.IO.File]::WriteAllText($stdoutPath, "", [System.Text.UTF8Encoding]::new($false))
+    [System.IO.File]::WriteAllText($stderrPath, "", [System.Text.UTF8Encoding]::new($false))
+
+    $startedAt = Get-Date
+    $lastOutputAt = $startedAt
+    $lastPreview = "starting..."
+
+    $process = $null
+    $stdoutStream = $null
+    $stderrStream = $null
+    $stdoutReader = $null
+    $stderrReader = $null
+
+    try {
+        $argsText = Join-NativeArgumentList $ArgumentList
+        $process = Start-Process -FilePath $FilePath -ArgumentList $argsText -PassThru -NoNewWindow `
+            -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
+
+        $stdoutStream = [System.IO.File]::Open($stdoutPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+        $stderrStream = [System.IO.File]::Open($stderrPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+        $stdoutReader = New-Object System.IO.StreamReader($stdoutStream)
+        $stderrReader = New-Object System.IO.StreamReader($stderrStream)
+
+        while (-not $process.HasExited) {
+            foreach ($reader in @($stdoutReader, $stderrReader)) {
+                while (-not $reader.EndOfStream) {
+                    $raw = $reader.ReadLine()
+                    if ($null -eq $raw) {
+                        break
+                    }
+                    $line = $raw.Trim()
+                    if (-not $line) {
+                        continue
+                    }
+                    $lines.Add($line)
+                    $lastOutputAt = Get-Date
+                    $lastPreview = if ($line.Length -gt 72) { $line.Substring(0, 69) + "..." } else { $line }
+                }
+            }
+
+            $elapsedSec = [int]((Get-Date) - $startedAt).TotalSeconds
+            $silenceSec = [int]((Get-Date) - $lastOutputAt).TotalSeconds
+            $status = if ($silenceSec -ge $NoOutputHintSeconds) {
+                "no stdout ${silenceSec}s (still running)"
+            } else {
+                "elapsed ${elapsedSec}s"
+            }
+
+            $frame = $spinner[$spinIdx % $spinner.Length]
+            $spinIdx++
+
+            $disp = "$Activity | $status | $lastPreview"
+            if ($disp.Length -gt 104) {
+                $disp = $disp.Substring(0, 101) + "..."
+            }
+            Write-Host -NoNewline "`r    $frame $($disp.PadRight(107))"
+            Start-Sleep -Milliseconds 200
+        }
+
+        foreach ($reader in @($stdoutReader, $stderrReader)) {
+            while (-not $reader.EndOfStream) {
+                $raw = $reader.ReadLine()
+                if ($null -eq $raw) {
+                    break
+                }
+                $line = $raw.Trim()
+                if ($line) {
+                    $lines.Add($line)
+                    $lastPreview = if ($line.Length -gt 72) { $line.Substring(0, 69) + "..." } else { $line }
+                }
+            }
+        }
+
+        $process.WaitForExit()
+        $global:LASTEXITCODE = [int]$process.ExitCode
+        Write-Host ""
+        return ,$lines
+    }
+    finally {
+        foreach ($reader in @($stdoutReader, $stderrReader)) {
+            if ($reader) { $reader.Dispose() }
+        }
+        foreach ($stream in @($stdoutStream, $stderrStream)) {
+            if ($stream) { $stream.Dispose() }
+        }
+        Remove-Item -Path $stdoutPath -Force -ErrorAction SilentlyContinue
+        Remove-Item -Path $stderrPath -Force -ErrorAction SilentlyContinue
+    }
 }
 
 function Invoke-PythonScriptText {

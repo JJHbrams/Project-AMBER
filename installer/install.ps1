@@ -74,16 +74,25 @@ Write-Host "  ──────────────────────
 Write-Host "  Overlay build mode: $OverlayBuildMode" -ForegroundColor DarkGray
 Write-Host ""
 
-. "$PSScriptRoot\modules\01_preflight.ps1"
-. "$PSScriptRoot\modules\02_interactive.ps1"
-. "$PSScriptRoot\modules\03_python_env.ps1"
-. "$PSScriptRoot\modules\04_dependencies.ps1"
-. "$PSScriptRoot\modules\05_config.ps1"
-. "$PSScriptRoot\modules\06_db.ps1"
-. "$PSScriptRoot\modules\07_shims.ps1"
-. "$PSScriptRoot\modules\08_env.ps1"
-. "$PSScriptRoot\modules\09_overlay.ps1"
-. "$PSScriptRoot\modules\10_shortcuts.ps1"
+$installPhases = @(
+    @{ Name = "Preflight checks"; Path = "modules\01_preflight.ps1" },
+    @{ Name = "Interactive setup"; Path = "modules\02_interactive.ps1" },
+    @{ Name = "Python environment"; Path = "modules\03_python_env.ps1" },
+    @{ Name = "Dependencies"; Path = "modules\04_dependencies.ps1" },
+    @{ Name = "Configuration"; Path = "modules\05_config.ps1" },
+    @{ Name = "Database and identity"; Path = "modules\06_db.ps1" },
+    @{ Name = "CLI shims"; Path = "modules\07_shims.ps1" },
+    @{ Name = "Environment variables"; Path = "modules\08_env.ps1" },
+    @{ Name = "Overlay build"; Path = "modules\09_overlay.ps1" },
+    @{ Name = "Shortcuts"; Path = "modules\10_shortcuts.ps1" }
+)
+
+for ($i = 0; $i -lt $installPhases.Count; $i++) {
+    $phase = $installPhases[$i]
+    $idx = $i + 1
+    Write-Host ("  [{0}/{1}] {2}" -f $idx, $installPhases.Count, $phase.Name) -ForegroundColor DarkCyan
+    . (Join-Path $PSScriptRoot $phase.Path)
+}
 
 # ── Auto-launch overlay ──────────────────────────────────────
 if (-not $Uninstall -and (Test-Path $DistExe)) {
