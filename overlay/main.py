@@ -1,6 +1,7 @@
 """오버레이 진입점 — 트레이 아이콘 + 전역 단축키 (Alt+F12) + 캐릭터 창."""
 
 import ctypes
+import json
 import logging
 import os
 import socket
@@ -56,25 +57,14 @@ _ollama_cache_ready = False
 
 def _load_ollama_models() -> None:
     global _ollama_model_cache, _ollama_cache_ready
-    if not shutil.which("ollama"):
-        with _ollama_cache_lock:
-            _ollama_cache_ready = True
-        return
     try:
-        result = subprocess.run(
-            ["ollama", "list"],
-            capture_output=True,
-            text=True,
-            timeout=8,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-        )
-        models = []
-        for i, line in enumerate(result.stdout.splitlines()):
-            if i == 0:
-                continue
-            parts = line.strip().split()
-            if parts:
-                models.append(parts[0])
+        cfg = load_cfg()
+        cli_cfg = cfg.get("cli", {}) if isinstance(cfg, dict) else {}
+        base_url = str(cli_cfg.get("ollama_base_url") or "http://localhost:11434").rstrip("/")
+        req = urllib.request.Request(f"{base_url}/api/tags")
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            data = json.loads(resp.read())
+        models = [m["name"] for m in data.get("models", [])]
         with _ollama_cache_lock:
             _ollama_model_cache = models
             _ollama_cache_ready = True

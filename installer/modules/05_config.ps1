@@ -98,27 +98,35 @@ if (Test-Path $McpConfigPath) {
 Write-Ok $McpConfigPath
 
 # 5b. MCP config (Claude Code)
+# ~/.claude.json 은 Claude Code 내부 상태 파일(대화 기록 등 포함)이므로
+# 파싱 실패 시 Python hardening 단계(아래)에서 안전하게 처리하도록 폴백한다.
 Write-Step "MCP config (Claude Code)..."
 $httpEntry = [PSCustomObject]@{ type = "http"; url = "http://127.0.0.1:$MCP_HTTP_PORT/mcp" }
 if (Test-Path $ClaudeConfigPath) {
-    $claudeConfig = Get-Content $ClaudeConfigPath -Raw | ConvertFrom-Json
-    if (-not $claudeConfig.mcpServers) {
-        $claudeConfig | Add-Member -NotePropertyName mcpServers -NotePropertyValue ([PSCustomObject]@{}) -Force
-    }
-    # 구 이름(stdio) 정리
-    foreach ($serverProp in @($claudeConfig.mcpServers.PSObject.Properties)) {
-        $serverArgs = @($serverProp.Value.args)
-        if ($serverProp.Name -ne "engram" -and $serverArgs -contains $McpServerScript) {
-            $claudeConfig.mcpServers.PSObject.Properties.Remove($serverProp.Name)
+    try {
+        $claudeConfig = Get-Content $ClaudeConfigPath -Raw | ConvertFrom-Json
+        if (-not $claudeConfig.mcpServers) {
+            $claudeConfig | Add-Member -NotePropertyName mcpServers -NotePropertyValue ([PSCustomObject]@{}) -Force
         }
+        # 구 이름(stdio) 정리
+        foreach ($serverProp in @($claudeConfig.mcpServers.PSObject.Properties)) {
+            $serverArgs = @($serverProp.Value.args)
+            if ($serverProp.Name -ne "engram" -and $serverArgs -contains $McpServerScript) {
+                $claudeConfig.mcpServers.PSObject.Properties.Remove($serverProp.Name)
+            }
+        }
+        $claudeConfig.mcpServers | Add-Member -NotePropertyName engram -NotePropertyValue $httpEntry -Force
+        $claudeJson = $claudeConfig | ConvertTo-Json -Depth 10
+        [System.IO.File]::WriteAllText($ClaudeConfigPath, $claudeJson, [System.Text.UTF8Encoding]::new($false))
+        Write-Ok $ClaudeConfigPath
+    } catch {
+        Write-Warn "Claude Code 설정 파일 파싱 실패 (Claude Code 실행 중 race condition 가능) — Python hardening 단계에서 처리됩니다."
     }
-    $claudeConfig.mcpServers | Add-Member -NotePropertyName engram -NotePropertyValue $httpEntry -Force
-    $claudeJson = $claudeConfig | ConvertTo-Json -Depth 10
 } else {
     $claudeJson = @{ mcpServers = @{ engram = $httpEntry } } | ConvertTo-Json -Depth 5
+    [System.IO.File]::WriteAllText($ClaudeConfigPath, $claudeJson, [System.Text.UTF8Encoding]::new($false))
+    Write-Ok $ClaudeConfigPath
 }
-[System.IO.File]::WriteAllText($ClaudeConfigPath, $claudeJson, [System.Text.UTF8Encoding]::new($false))
-Write-Ok $ClaudeConfigPath
 
 $claudeMcpJson = @{ mcpServers = @{ engram = @{ type = "http"; url = "http://127.0.0.1:$MCP_HTTP_PORT/mcp" } } } | ConvertTo-Json -Depth 5
 [System.IO.File]::WriteAllText($ClaudeMcpConfigPath, $claudeMcpJson, [System.Text.UTF8Encoding]::new($false))
