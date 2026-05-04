@@ -47,6 +47,10 @@ if ($Uninstall) {
         Remove-Item $LegacyCopilotSkillDir -Recurse -Force
         Write-Ok "Removed legacy skill: $LegacyCopilotSkillDir"
     }
+    if (Test-Path $ClaudeCommandPath) {
+        Remove-Item $ClaudeCommandPath -Force
+        Write-Ok "Removed: $ClaudeCommandPath"
+    }
     [Environment]::SetEnvironmentVariable(("CON" + "TINUUM_DB_DIR"), $null, "User")
     $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
     if ($userPath -like "*$ShimDir*") {
