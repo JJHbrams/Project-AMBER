@@ -70,18 +70,31 @@ def _find_wt_settings() -> Path | None:
     return None
 
 
-def _calc_font_size(phys_mon_w: int, phys_mon_h: int, dpi_scale: float, cfg: dict) -> float:
+def _calc_font_size(phys_mon_w: int, phys_mon_h: int, dpi_scale: float, terminal_cfg: dict) -> float:
     """모니터 짧은 축(논리 px) 기준으로 폰트 크기 계산.
 
     WT font.size는 DPI 적용을 받으므로 물리 해상도만 쓰면 모니터 배율이
     중복 반영되거나 무시될 수 있다. 물리 px를 논리 px로 환산해 사용한다.
     """
-    tc = cfg["terminal"]
-    base = tc.get("base_font_size", 14)
-    ref_h = tc.get("ref_screen_height", 1080)
+    base = terminal_cfg.get("base_font_size", 14)
+    ref_h = terminal_cfg.get("ref_screen_height", 1080)
     scale = dpi_scale if dpi_scale > 0 else 1.0
     short = min(phys_mon_w, phys_mon_h) / scale
     return round(base * short / ref_h, 1)
+
+
+def terminal_font_size(probe_x: int, probe_y: int, terminal_cfg: dict) -> float:
+    """TUI 터미널(wt)이 실제로 쓰는 것과 동일한 DPI 보정 폰트 크기(pt).
+
+    말풍선 모드도 "TUI 모드 스케일을 그대로 쓴다"는 요구사항에 맞춰 이 값을 그대로
+    재사용한다 — 말풍선 쪽에서 win32api.GetMonitorInfo를 DPI 컨텍스트 전환 없이 호출해
+    "논리" 픽셀 기준으로 자체 계산했던 이전 방식은, 모니터 배율(150%, 200% 등)이 걸리면
+    Tk가 그린 결과물이 그대로 확대되어 표시되는 값이라 배율이 있는 환경에서 폰트가
+    실제보다 훨씬 커 보이는 문제가 있었다.
+    """
+    _, phys_work, dpi_scale = _get_monitor_info(probe_x, probe_y)
+    pl, pt, pr, pb = phys_work
+    return _calc_font_size(pr - pl, pb - pt, dpi_scale, terminal_cfg)
 
 
 def _ensure_engram_profile(font_size: float) -> bool:
@@ -487,7 +500,7 @@ class ChatTerminal:
 
         # 모니터 해상도 기반 폰트 크기 조절
         phys_mon_w, phys_mon_h = pr - pl, pb - pt
-        font_size = _calc_font_size(phys_mon_w, phys_mon_h, dpi_scale, cfg)
+        font_size = _calc_font_size(phys_mon_w, phys_mon_h, dpi_scale, tc)
         _ensure_engram_profile(font_size)
 
         import logging
@@ -540,7 +553,7 @@ class ChatTerminal:
         win_h = int(phys_mon_h * tc["height_ratio"])
 
         # 모니터별 DPI 스케일을 반영해 WT 프로필 폰트를 갱신한다.
-        font_size = _calc_font_size(phys_mon_w, phys_mon_h, dpi_scale, cfg)
+        font_size = _calc_font_size(phys_mon_w, phys_mon_h, dpi_scale, tc)
         _ensure_engram_profile(font_size)
 
         cw = max(1, round(tc["base_char_w"] * dpi_scale))

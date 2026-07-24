@@ -53,9 +53,32 @@ except Exception as e:
 
 $stModelOk = $false
 
-# [1/3] 로컬 캐시
-Write-Host "    [1/3] 로컬 캐시 확인..." -NoNewline -ForegroundColor Cyan
-$r1py = @"
+# [빠른 확인] Python(torch 임포트 포함)을 띄우지 않고 HuggingFace 캐시 폴더에 스냅샷
+# 파일이 실제로 있는지만 파일시스템으로 먼저 본다 — 이미 캐시돼 있으면 아래 [1/3]의
+# "python -c 'from sentence_transformers import ...'" 호출(수 초 소요)을 완전히 스킵한다.
+# 애매하면(폴더 구조가 다르거나 파일이 불완전하면) 안전하게 기존 [1/3]~[3/3]으로 넘어간다.
+$HfRepoDirName = "models--sentence-transformers--$EmbeddingModel"
+$HfSnapshotsDir = Join-Path $env:USERPROFILE ".cache\huggingface\hub\$HfRepoDirName\snapshots"
+$fastCacheHit = $false
+if (Test-Path $HfSnapshotsDir) {
+    foreach ($snap in Get-ChildItem $HfSnapshotsDir -Directory -ErrorAction SilentlyContinue) {
+        $hasConfig = Test-Path (Join-Path $snap.FullName "config.json")
+        $hasWeights = @(Get-ChildItem $snap.FullName -Filter "*.safetensors" -ErrorAction SilentlyContinue).Count -gt 0 `
+            -or @(Get-ChildItem $snap.FullName -Filter "pytorch_model.bin" -ErrorAction SilentlyContinue).Count -gt 0
+        if ($hasConfig -and $hasWeights) { $fastCacheHit = $true; break }
+    }
+}
+
+if ($fastCacheHit) {
+    Write-Host "    [빠른 확인] 캐시 파일 존재 확인됨 — python 임포트 생략" -ForegroundColor Green
+    Write-Ok "Sentence Transformer 모델 준비 완료 (캐시 파일 확인, 다운로드 스킵)"
+    $stModelOk = $true
+}
+
+# [1/3] 로컬 캐시 (빠른 확인이 애매했을 때만 — python으로 실제 로드 가능한지 검증)
+if (-not $stModelOk) {
+    Write-Host "    [1/3] 로컬 캐시 확인..." -NoNewline -ForegroundColor Cyan
+    $r1py = @"
 import sys, os
 os.environ['TOKENIZERS_PARALLELISM'] = 'false'
 try:
@@ -65,16 +88,17 @@ try:
 except Exception as e:
     sys.stdout.write(f'miss:{e}\n'); sys.stdout.flush()
 "@
-$prev = $ErrorActionPreference; $ErrorActionPreference = "Continue"
-$r1 = try { (& $PythonExe -c $r1py 2>&1 | ForEach-Object { "$_" } | Where-Object { $_ -match '^(ok|miss:)' } | Select-Object -Last 1) } catch { "miss:exception" } finally { $ErrorActionPreference = $prev }
-$r1 = ($r1 -as [string]).Trim()
-if ($r1 -like "ok*") {
-    Write-Host " OK (캐시됨)" -ForegroundColor Green
-    Write-Ok "Sentence Transformer 모델 준비 완료 (로컬 캐시)"
-    $stModelOk = $true
-} else {
-    Write-Host " 없음" -ForegroundColor DarkGray
-}
+    $prev = $ErrorActionPreference; $ErrorActionPreference = "Continue"
+    $r1 = try { (& $PythonExe -c $r1py 2>&1 | ForEach-Object { "$_" } | Where-Object { $_ -match '^(ok|miss:)' } | Select-Object -Last 1) } catch { "miss:exception" } finally { $ErrorActionPreference = $prev }
+    $r1 = ($r1 -as [string]).Trim()
+    if ($r1 -like "ok*") {
+        Write-Host " OK (캐시됨)" -ForegroundColor Green
+        Write-Ok "Sentence Transformer 모델 준비 완료 (로컬 캐시)"
+        $stModelOk = $true
+    } else {
+        Write-Host " 없음" -ForegroundColor DarkGray
+    }
+}  # [빠른 확인]이 애매해서 [1/3]까지 왔던 경우 종료
 
 # [2/3] HuggingFace 직접 다운로드
 if (-not $stModelOk) {
@@ -153,7 +177,8 @@ if (-not $stModelOk) {
     Write-Host "       복사 경로: %USERPROFILE%\.cache\huggingface\hub\" -ForegroundColor White
     Write-Host "       이 PC의 동일 경로에 붙여넣기 후 INSTALL.ps1 재실행" -ForegroundColor White
     Write-Host ""
-    $cont = Read-Host "  KG 시맨틱 기능 없이 설치를 계속하시겠습니까? (y=계속, Enter=중단)"
+    # 비대화형에서는 기본값(중단) — 임베딩 모델은 실제 의존성이므로 무인 설치도 여기서 멈추는 게 맞다.
+    $cont = Read-HostOrDefault "  KG 시맨틱 기능 없이 설치를 계속하시겠습니까? (y=계속, Enter=중단)" ""
     if ($cont -ne "y" -and $cont -ne "Y") {
         Write-Err "설치를 중단합니다. 위 방법으로 해결 후 INSTALL.ps1 을 재실행하세요."
         exit 1

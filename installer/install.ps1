@@ -3,7 +3,12 @@
     Engram Installer — 오케스트레이터
     Install: .\install.ps1
     Install (overlay build mode): .\install.ps1 -OverlayBuildMode auto|rebuild|clean|skip
+    Install (설정 TUI 다시 보기): .\install.ps1 -Reconfigure
     Remove:  .\install.ps1 -Uninstall
+
+    기존 설정(DB 경로/작업 디렉토리/CLI provider/Ollama 모델)이 이미 있으면
+    재설치 시 대화형 TUI(화살표 선택)를 건너뛰고 기존 값을 조용히 재사용한다.
+    -Reconfigure를 주면 기존 값이 있어도 항상 TUI를 다시 띄운다.
 
     모듈 구조:
       common.ps1              — 공유 경로 변수, 유틸리티 함수, Python/conda 탐지
@@ -22,7 +27,8 @@
 param(
     [switch]$Uninstall,
     [ValidateSet("auto", "rebuild", "clean", "skip")]
-    [string]$OverlayBuildMode = "auto"
+    [string]$OverlayBuildMode = "auto",
+    [switch]$Reconfigure
 )
 
 $ErrorActionPreference = "Stop"
@@ -116,6 +122,7 @@ Write-Host "    engram --overlay         Start with character overlay" -Foregrou
 Write-Host "    engram --overlay-stop    Stop running overlay" -ForegroundColor Gray
 Write-Host "    engram-overlay           Launch overlay (standalone, kg_watcher auto-managed)" -ForegroundColor Gray
 Write-Host "    .\install.ps1 -OverlayBuildMode auto|rebuild|clean|skip" -ForegroundColor Gray
+Write-Host "    .\install.ps1 -Reconfigure   설정(CLI provider 등) 다시 선택" -ForegroundColor Gray
 Write-Host ""
 Write-Host "  Default CLI provider: $DefaultCliProvider" -ForegroundColor Gray
 Write-Host "  Settings: $ShimDir\overlay.user.yaml" -ForegroundColor Gray

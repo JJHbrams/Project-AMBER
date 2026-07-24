@@ -222,10 +222,21 @@ class SemanticGraph:
 
                 prev = _tr.logging.get_verbosity()
                 _tr.logging.set_verbosity_error()
+
+                # frozen 번들(통짜 installer)에 동봉된 오프라인 모델을 최우선으로 사용한다.
+                # → HuggingFace 서버 연결 없이 로드(설치·구동 시 네트워크 불필요).
+                model_ref = self._embedding_model_name
+                import sys as _sys
+                if getattr(_sys, "frozen", False):
+                    from pathlib import Path as _Path
+                    _bundled = _Path(getattr(_sys, "_MEIPASS", "")) / "resource" / "embedding-model"
+                    if (_bundled / "config.json").exists():
+                        model_ref = str(_bundled)
+
                 try:
                     try:
-                        self._encoder = SentenceTransformer(self._embedding_model_name, local_files_only=True, device="cpu")
-                        logger.info("임베딩 모델 로컬 캐시에서 로드: %s", self._embedding_model_name)
+                        self._encoder = SentenceTransformer(model_ref, local_files_only=True, device="cpu")
+                        logger.info("임베딩 모델 로컬 로드: %s", model_ref)
                     except Exception:
                         logger.info("Hub에서 다운로드: %s", self._embedding_model_name)
                         self._encoder = SentenceTransformer(self._embedding_model_name, device="cpu")

@@ -17,6 +17,7 @@
 ## During Session
 
 - 핵심 인사이트, 문제 해결, 프로젝트 마일스톤 → `engram_save_memory(content, provider="claude-code")`
+- STM 메시지 저장 → `engram_save_message(scope_key="<cwd 또는 ENGRAM_SCOPE_KEY>", role="user"|"assistant", content="...")`
 - 관련 과거 경험이 필요할 때 → `engram_search_memories(query)`
 - 새 궁금증 → `engram_add_curiosity(topic, reason)`
 

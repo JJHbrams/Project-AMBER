@@ -63,7 +63,7 @@ if ($identityLookupExitCode -ne 0) {
     Write-Host ""
     Write-Host "  [설정] 이름/호칭 — engram이 자신을 부를 이름" -ForegroundColor White
     Write-Host "         현재값: (없음)" -ForegroundColor DarkGray
-    $IdentityNameInput = Read-Host "  이름/호칭 (Enter = 나중에 설정)"
+    $IdentityNameInput = Read-HostOrDefault "  이름/호칭 (Enter = 나중에 설정)" ""
     $IdentityName = $IdentityNameInput.Trim()
 
     if (-not $IdentityName) {
@@ -160,7 +160,8 @@ if ($WikiStarterConflictPaths.Count -gt 0) {
         Write-Host "    - $existingPath" -ForegroundColor DarkGray
     }
 
-    $overwriteAnswer = (Read-Host "  겹치는 파일을 템플릿으로 덮어쓸까요? [y/N]").Trim().ToLower()
+    # 비대화형에서는 기본 정책(유지, N)으로 폴백해 무인 설치가 멈추지 않게 한다.
+    $overwriteAnswer = (Read-HostOrDefault "  겹치는 파일을 템플릿으로 덮어쓸까요? [y/N]" "n").Trim().ToLower()
     if ($overwriteAnswer -in @("y", "yes")) {
         $OverwriteWikiStarters = $true
         Write-Ok "Conflict policy: overwrite starter files"

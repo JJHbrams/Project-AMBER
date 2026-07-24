@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(conda run:*)",
+      "mcp__engram__engram_get_identity",
+      "mcp__engram__engram_get_themes",
+      "mcp__engram__engram_start_session",
+      "mcp__engram__engram_search_memories",
+      "mcp__engram__engram_list_memories",
+      "mcp__engram__engram_get_context",
+      "mcp__engram__engram_get_context_once",
+      "mcp__engram__kg_semantic_search"
+    ]
+  },
+  "enableAllProjectMcpServers": true,
+  "enabledMcpjsonServers": [
+    "engram"
+  ]
+}

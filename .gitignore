@@ -1,49 +1,58 @@
 # Python
 __pycache__/
 *.py[cod]
-*.pyo
-*.pyd
-*.so
-*.egg
+*$py.class
 *.egg-info/
 dist/
 build/
-.eggs/
+*.egg
 
-# Virtual environments
-.venv/
-venv/
-env/
+# Inno Setup 통짜 installer 출력물 (대용량 setup.exe — 루트 생성)
+installer/Output/
+/EngramOverlay_*_x64-setup.exe
 
-# PyInstaller
-dist/
-*.spec.bak
-
-# User config (contains personal paths/tokens)
-config/overlay.user.yaml
-*.user.yaml
-.mcp.json
-.env
-*.env
-
-# DB & runtime data
-*.db
-*.db-wal
-*.db-shm
-semantic_graph/
-
-# Logs
-logs/
-*.log
-
-# OS
-.DS_Store
-Thumbs.db
+# 오프라인 임베딩 모델 export (빌드 산출물, ~458MB — build-installer.ps1 이 생성)
+resource/embedding-model/
 
 # IDE
 .vscode/
 .idea/
+*.swp
+*.swo
 
-# Temp
-_copy_amber.ps1
+ProjectIntelContunuum.code-workspace
+
+# Environment
+.env
+*.env.local
+
+# Database (stored externally at D:\intel_continuum\)
+*.db
+*.db-wal
+*.db-shm
+
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store
 NUL
+
+# Test artifacts
+_test_*.py
+
+# Logs
+overlay_debug.log
+logs/
+
+# User-specific configuration
+overlay.user.yaml
+
+# Binary files
+*.pptx
+
+# GUI artifacts
+gui/node_modules
+
+# build artifacts
+resource/overlay.png
+.mcp.json

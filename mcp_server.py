@@ -117,12 +117,18 @@ def _tool_with_log(*args, **kwargs):
 engramMCP.tool = _tool_with_log
 
 
-# 세션별 컨텍스트 초기화 dedupe (프로세스 수명 동안 유지)
+# 세션별 컨텍스트 초기화 dedupe (TTL 만료 전까지 유지)
 from collections import OrderedDict
 import uuid as _uuid
 
-_CONTEXT_ONCE_KEYS: "OrderedDict[str, int | None]" = OrderedDict()
+# stateless HTTP 모드에서는 ctx.client_id가 대부분 비어 있어 session_fingerprint가
+# _SERVER_STARTUP_TOKEN 하나로 뭉개진다. 이 경우 캐시를 프로세스 수명 동안 유지하면
+# 서버 프로세스가 살아있는 동안 열리는 모든 새 세션이 첫 세션의 캐시를 그대로 맞고
+# "already initialized" 짧은 문자열만 받아 페르소나/voice/traits를 못 받는다.
+# TTL로 만료시켜 idle 이후 재호출은 다시 전체 컨텍스트를 로드하도록 한다.
+_CONTEXT_ONCE_KEYS: "OrderedDict[str, tuple[int | None, float]]" = OrderedDict()
 _CONTEXT_ONCE_MAX = 500
+_CONTEXT_ONCE_TTL_SECONDS = 1800  # 30분: 같은 세션 내 재호출은 dedupe, idle 이후 새 세션은 재초기화
 _CONTEXT_ONCE_LOCK = threading.Lock()
 _FINGERPRINT_TO_SESSION: "dict[str, int]" = {}  # fingerprint → session_id (MCP 연결 단위 자동 resolve용)
 _TUTORIAL_NOTICE_KEYS: "OrderedDict[str, None]" = OrderedDict()
@@ -669,12 +675,17 @@ def engram_get_context_once(
         session_fingerprint=session_fingerprint,
     )
 
+    now = time.time()
     with _CONTEXT_ONCE_LOCK:
-        if cache_key in _CONTEXT_ONCE_KEYS:
-            cached_sid = _CONTEXT_ONCE_KEYS[cache_key]
-            sid_hint = f" session_id={cached_sid}." if cached_sid is not None else ""
-            return f"[engram] context already initialized for this request session key.{sid_hint}"
-        _CONTEXT_ONCE_KEYS[cache_key] = None  # placeholder — session_id로 곧 업데이트
+        cached = _CONTEXT_ONCE_KEYS.get(cache_key)
+        if cached is not None:
+            cached_sid, cached_ts = cached
+            if now - cached_ts <= _CONTEXT_ONCE_TTL_SECONDS:
+                sid_hint = f" session_id={cached_sid}." if cached_sid is not None else ""
+                return f"[engram] context already initialized for this request session key.{sid_hint}"
+            # TTL 만료 — 새 세션으로 간주하고 아래에서 재초기화
+            del _CONTEXT_ONCE_KEYS[cache_key]
+        _CONTEXT_ONCE_KEYS[cache_key] = (None, now)  # placeholder — session_id로 곧 업데이트
         if len(_CONTEXT_ONCE_KEYS) > _CONTEXT_ONCE_MAX:
             _CONTEXT_ONCE_KEYS.popitem(last=False)
 
@@ -693,7 +704,7 @@ def engram_get_context_once(
             _sess = memory_bus.start_session(scope_key=effective_scope, project_keys=_parsed_keys or None)
             session_id = _sess.session_id
         with _CONTEXT_ONCE_LOCK:
-            _CONTEXT_ONCE_KEYS[cache_key] = session_id
+            _CONTEXT_ONCE_KEYS[cache_key] = (session_id, now)
         # fingerprint → session_id 저장 (save_message 자동 resolve용)
         if session_id is not None and session_fingerprint:
             _FINGERPRINT_TO_SESSION[session_fingerprint] = session_id
@@ -1444,7 +1455,7 @@ def _schedule_vault_sync() -> None:
     def _run():
         try:
             from pathlib import Path
-            from core.graph.knowledge import get_kg
+            from core.graph.knowledge import get_kg, iter_wiki_md_files
             from core.graph.semantic import get_semantic_graph
             from core.config.runtime_config import get_db_root_dir
 
@@ -1452,10 +1463,10 @@ def _schedule_vault_sync() -> None:
             if not docs_dir.exists():
                 return
             kg = get_kg()
-            for f in docs_dir.rglob("*.md"):
-                if "_templates" not in f.parts:
-                    kg.sync_file(f, docs_dir)
+            for f in iter_wiki_md_files(docs_dir):
+                kg.sync_file(f, docs_dir)
             kg.resolve_links(docs_dir)
+            kg.prune_missing(docs_dir)
             get_semantic_graph().sync_from_kg()
         except Exception:
             pass
@@ -1649,21 +1660,21 @@ def _schedule_post_session_sync() -> None:
             # 1. vault sync
             try:
                 from pathlib import Path
-                from core.graph.knowledge import get_kg
+                from core.graph.knowledge import get_kg, iter_wiki_md_files
                 from core.graph.semantic import get_semantic_graph
                 from core.config.runtime_config import get_db_root_dir
 
                 docs_dir = Path(get_db_root_dir()) / "docs"
                 if docs_dir.exists():
                     kg = get_kg()
-                    for f in docs_dir.rglob("*.md"):
+                    for f in iter_wiki_md_files(docs_dir):
                         if _sync_cancel.is_set():
                             _logger.info("post_session_sync: 워치독 취소 신호 — vault sync 중단")
                             return
-                        if "_templates" not in f.parts:
-                            kg.sync_file(f, docs_dir)
+                        kg.sync_file(f, docs_dir)
                     if not _sync_cancel.is_set():
                         kg.resolve_links(docs_dir)
+                        kg.prune_missing(docs_dir)
                         get_semantic_graph().sync_from_kg()
             except Exception:
                 pass
@@ -1924,6 +1935,42 @@ def engram_save_message(
     return {"status": "message_saved"}
 
 
+@engramMCP.tool()
+def engram_peek_stm(
+    scope_key: str = "",
+    cwd: str = "",
+    limit: int = 20,
+    within_minutes: int = 120,
+    ctx: Context | None = None,
+) -> dict:
+    """현재 세션(또는 지정한 scope)의 최근 STM 원본 메시지를 read-only로 조회합니다.
+    승격되지 않은 raw user/assistant 턴을 그대로 보여주는 디버깅/관찰용 도구입니다.
+    검색 인덱스(search_memories 등)에는 걸리지 않습니다.
+    scope_key가 비어 있으면 MCP 연결 fingerprint → ENGRAM_SCOPE_KEY → cwd 기반 자동 파생 순으로 시도합니다.
+    limit: 최대 메시지 수 (기본 20, 최대 50). within_minutes: 조회 시간창 (기본 120분, 최대 7일)."""
+    resolved_scope = scope_key.strip()
+    if not resolved_scope:
+        fingerprint = _context_session_fingerprint(ctx)
+        session_id = _FINGERPRINT_TO_SESSION.get(fingerprint, 0) if fingerprint else 0
+        if session_id:
+            conn = get_connection()
+            row = conn.execute("SELECT scope_key FROM sessions WHERE id = ?", (session_id,)).fetchone()
+            conn.close()
+            if row and row["scope_key"]:
+                resolved_scope = row["scope_key"]
+    if not resolved_scope:
+        resolved_scope = resolve_scope_key(None, cwd=cwd or None)
+
+    result = _stm_get("/stm/messages", {"scope_key": resolved_scope, "limit": limit, "within_minutes": within_minutes})
+    if result is not None and "messages" in result:
+        return {"scope_key": resolved_scope, "source": "broker", "messages": result["messages"]}
+
+    from core.memory import get_recent_messages_by_scope
+
+    msgs = get_recent_messages_by_scope(resolved_scope, limit=limit, within_minutes=within_minutes)
+    return {"scope_key": resolved_scope, "source": "direct", "messages": msgs}
+
+
 # ── Reflection ────────────────────────────────────────────
 
 
@@ -2135,7 +2182,7 @@ def engram_discord_send(channel_id: str, content: str, message_id: str = "") -> 
 # ── Knowledge Graph ───────────────────────────────────────
 
 from core.config.runtime_config import get_db_root_dir as _get_vault_root
-from core.graph.knowledge import get_kg
+from core.graph.knowledge import get_kg, iter_wiki_md_files
 from core.graph.semantic import get_semantic_graph
 from pathlib import Path as _Path
 
@@ -2260,31 +2307,48 @@ def kg_list_nodes(note_type: str = "", tag: str = "", limit: int = 30) -> list:
     )
 
 
-@engramMCP.tool()
-def kg_sync(verbose: bool = False) -> dict:
-    """vault(D:\\intel_engram\\docs)의 마크다운 파일을 DB에 동기화합니다.
-    파일 변경 후 호출하면 그래프가 갱신됩니다.
-    시맨틱 그래프(KuzuDB)도 함께 동기화합니다."""
+def _kg_sync_impl(verbose: bool = False) -> dict:
+    """kg_sync의 실제 동기 구현. asyncio.to_thread로 감싸 이벤트 루프를 막지 않는다.
+
+    mtime 기반 증분 동기화: 변경 안 된 파일은 읽기/파싱/upsert를 건너뛴다.
+    vault 전체가 안 바뀐 일반적인 호출은 파일 stat만 하고 즉시 끝난다 —
+    overlay health monitor(5초 간격 x 3회 실패=재시작)를 절대 트리거하지 않기 위함
+    (260619/260706 WinError 10054 재발 이슈 참고).
+    """
     vault = _vault()
     docs_dir = vault / "docs"
     if not docs_dir.exists():
         return {"error": f"docs 디렉토리 없음: {docs_dir}"}
 
     kg = get_kg()
+    existing_mtimes = kg.get_path_mtimes(docs_dir)
+
     synced = 0
     skipped = 0
-    for f in docs_dir.rglob("*.md"):
-        if "_templates" in f.parts:
+    unchanged = 0
+    changed_paths: set[str] = set()
+    for f in iter_wiki_md_files(docs_dir):
+        rel_path = str(f.relative_to(docs_dir))
+        try:
+            mtime = f.stat().st_mtime
+        except OSError:
             continue
-        nid = kg.sync_file(f, docs_dir)
+
+        if existing_mtimes.get(rel_path, 0.0) >= mtime:
+            unchanged += 1
+            continue
+
+        nid = kg.sync_file(f, docs_dir, source_mtime=mtime)
         if nid:
             synced += 1
+            changed_paths.add(rel_path)
         else:
             skipped += 1
 
-    kg.resolve_links(docs_dir)
+    kg.resolve_links(docs_dir, restrict_to_paths=changed_paths)
+    pruned = kg.prune_missing(docs_dir)
 
-    # 시맨틱 레이어도 동기화
+    # 시맨틱 레이어도 동기화 (자체적으로 content_hash 기반 증분 재임베딩)
     sg = get_semantic_graph()
     semantic_result = sg.sync_from_kg()
 
@@ -2292,9 +2356,19 @@ def kg_sync(verbose: bool = False) -> dict:
         "status": "ok",
         "synced": synced,
         "skipped": skipped,
+        "unchanged": unchanged,
+        "pruned": pruned,
         "vault": str(vault),
         "semantic": semantic_result,
     }
+
+
+@engramMCP.tool()
+async def kg_sync(verbose: bool = False) -> dict:
+    """vault(D:\\intel_engram\\docs)의 마크다운 파일을 DB에 동기화합니다.
+    파일 변경 후 호출하면 그래프가 갱신됩니다.
+    시맨틱 그래프(KuzuDB)도 함께 동기화합니다."""
+    return await asyncio.to_thread(_kg_sync_impl, verbose)
 
 
 @engramMCP.tool()
@@ -2472,7 +2546,7 @@ def kg_lint() -> str:
     정기적으로 호출하여 wiki 건강 상태를 유지하세요."""
     from scripts.kg.kg_lint import run_lint, format_lint_report
 
-    vault = _vault().parent  # docs/ 의 부모, 즉 intel_engram 루트
+    vault = _vault()  # intel_engram 루트 (run_lint 내부에서 vault/docs 로 resolve)
     results = run_lint(vault, verbose=False)
     return format_lint_report(results)
 
@@ -2531,7 +2605,10 @@ def memories_sync(threshold: float = 0.40, top_k: int = 3) -> dict:
 async def _http_kg_sync(request) -> "Response":
     from starlette.responses import JSONResponse
 
-    result = kg_sync()
+    # kg_sync 는 async(내부에서 _kg_sync_impl 을 asyncio.to_thread 로 오프로딩)이므로
+    # 직접 await 한다. to_thread(kg_sync) 로 감싸면 코루틴이 그대로 반환돼
+    # "coroutine is not JSON serializable" 로 실패한다(스레드 오프로딩은 내부에 이미 있음).
+    result = await kg_sync()
     return JSONResponse(result)
 
 
@@ -2539,7 +2616,7 @@ async def _http_kg_sync(request) -> "Response":
 async def _http_memories_sync(request) -> "Response":
     from starlette.responses import JSONResponse
 
-    result = memories_sync()
+    result = await asyncio.to_thread(memories_sync)
     return JSONResponse(result)
 
 
@@ -2645,7 +2722,7 @@ async def _http_sg_search(request) -> "Response":
     sg = get_semantic_graph()
     if not sg.enabled:
         return JSONResponse({"enabled": False, "results": []})
-    results = sg.semantic_search(q, top_k=top_k, threshold=threshold)
+    results = await asyncio.to_thread(sg.semantic_search, q, top_k=top_k, threshold=threshold)
     return JSONResponse({"enabled": True, "results": results})
 
 
@@ -2665,7 +2742,7 @@ async def _http_sg_neighbors(request) -> "Response":
     sg = get_semantic_graph()
     if not sg.enabled:
         return JSONResponse({"enabled": False, "results": []})
-    results = sg.semantic_neighbors(node_id, top_k=top_k)
+    results = await asyncio.to_thread(sg.semantic_neighbors, node_id, top_k=top_k)
     return JSONResponse({"enabled": True, "results": results})
 
 
@@ -2696,7 +2773,7 @@ def _build_hybrid_http_app():
     return app
 
 
-if __name__ == "__main__":
+def main(argv=None):
     # 서버 시작 시 임베딩 모델 선로딩을 하지 않는다.
     # SentenceTransformer는 시맨틱 기능이 실제 호출될 때 1회 로드된다.
     import argparse
@@ -2719,12 +2796,12 @@ if __name__ == "__main__":
         default="127.0.0.1",
         help="HTTP 호스트 (sse/streamable-http 전용, 기본: 127.0.0.1)",
     )
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     if sys.platform == "win32" and args.transport in {"sse", "streamable-http"}:
         try:
-            asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-            print("[engram] Windows selector event loop policy enabled for HTTP transport", file=sys.stderr)
+            asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+            print("[engram] Windows proactor event loop policy enabled for HTTP transport", file=sys.stderr)
         except Exception as exc:
             print(f"[engram] event loop policy setup failed: {exc}", file=sys.stderr)
 
@@ -2741,3 +2818,7 @@ if __name__ == "__main__":
         engramMCP.settings.host = args.host
         engramMCP.settings.port = args.port
         engramMCP.run(transport=args.transport)
+
+
+if __name__ == "__main__":
+    main()

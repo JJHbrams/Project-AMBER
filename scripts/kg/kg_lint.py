@@ -23,13 +23,17 @@ _ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(_ROOT))
 
 from core.storage.db import initialize_db
-from core.graph.knowledge import get_kg
+from core.graph.knowledge import get_kg, IGNORE_DIR_NAMES
 from core.config.runtime_config import get_db_root_dir
 
 REQUIRED_FM_FIELDS = {"title", "note_type", "tags"}
 # 기존 파일은 "type:" 키를 사용 — 두 가지 모두 허용
 _NOTE_TYPE_ALIASES = {"note_type", "type"}
 MIN_BODY_CHARS = 200
+
+
+def _is_ignored(md: Path) -> bool:
+    return bool(IGNORE_DIR_NAMES & set(md.parts))
 
 
 # ── 유틸 ─────────────────────────────────────────────────────────────────────
@@ -70,7 +74,7 @@ def _body_length(text: str) -> int:
 def check_frontmatter(vault: Path) -> list[dict]:
     issues = []
     for md in vault.rglob("*.md"):
-        if "_templates" in md.parts:
+        if _is_ignored(md):
             continue
         fm = _parse_frontmatter(md.read_text(encoding="utf-8", errors="ignore"))
         fm_keys = set(fm.keys())
@@ -110,7 +114,7 @@ def check_inbox(vault: Path) -> list[dict]:
 def check_empty_notes(vault: Path) -> list[dict]:
     issues = []
     for md in vault.rglob("*.md"):
-        if "_templates" in md.parts:
+        if _is_ignored(md):
             continue
         text = md.read_text(encoding="utf-8", errors="ignore")
         if _body_length(text) < MIN_BODY_CHARS:
@@ -188,6 +192,23 @@ def check_duplicate_titles() -> list[dict]:
     return issues
 
 
+def check_project_root_files(vault: Path) -> list[dict]:
+    """projects/ 루트에 직접 저장된 .md — 반드시 projects/<name>/ 하위여야 함."""
+    projects_dir = vault / "projects"
+    if not projects_dir.exists():
+        return []
+    issues = []
+    for md in projects_dir.glob("*.md"):
+        issues.append(
+            {
+                "file": str(md.relative_to(vault)),
+                "issue": "projects 루트 직접 저장",
+                "detail": f"projects/{md.stem}/index.md 형태로 이동 필요 (지침 위반)",
+            }
+        )
+    return issues
+
+
 # ── 메인 ─────────────────────────────────────────────────────────────────────
 
 
@@ -206,6 +227,7 @@ def run_lint(vault: Path, fix_summary: bool = False, verbose: bool = False) -> d
         ("isolated_nodes", lambda: check_isolated_nodes(docs)),
         ("missing_summary", lambda: check_missing_summary(fix=fix_summary)),
         ("duplicate_titles", lambda: check_duplicate_titles()),
+        ("project_root_files", lambda: check_project_root_files(docs)),
     ]
 
     total = 0
@@ -221,6 +243,7 @@ def run_lint(vault: Path, fix_summary: bool = False, verbose: bool = False) -> d
                 "isolated_nodes": "고립 노드",
                 "missing_summary": "summary 없음",
                 "duplicate_titles": "제목 중복",
+                "project_root_files": "projects 루트 직접 저장",
             }[name]
             status = "✅" if not issues else "⚠️ "
             print(f"{status} {label}: {len(issues)}건")
@@ -247,6 +270,7 @@ def format_lint_report(results: dict) -> str:
         "isolated_nodes": "고립 노드 (링크 없음)",
         "missing_summary": "summary 없는 노드",
         "duplicate_titles": "제목 중복 노드",
+        "project_root_files": "projects 루트 직접 저장",
     }
     for key, issues in results.items():
         if not issues:

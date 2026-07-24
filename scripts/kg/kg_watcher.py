@@ -46,6 +46,19 @@ _WATCHER_LOCK_PATH = Path.home() / ".engram" / "kg_watcher.lock"
 def _is_process_alive(pid: int) -> bool:
     if pid <= 0:
         return False
+    # Windows: os.kill(pid, 0) 은 존재확인이 아니라 TerminateProcess 를 시도하며(위험),
+    # 죽은 PID 엔 SystemError(OSError 아님)를 던져 크래시한다. OpenProcess(SYNCHRONIZE)로
+    # 존재만 조회한다(main.py 워치독과 동일 패턴).
+    if sys.platform == "win32":
+        import ctypes
+
+        SYNCHRONIZE = 0x00100000
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.OpenProcess(SYNCHRONIZE, False, int(pid))
+        if not handle:
+            return False
+        kernel32.CloseHandle(handle)
+        return True
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -139,21 +152,20 @@ def _try_semantic_sync_via_mcp() -> bool:
 def _do_sync(vault_path: Path) -> None:
     """Vault 전체 싱크 — SQLite + KuzuDB (MCP 서버 경유 우선)"""
     try:
-        from core.graph.knowledge import get_kg
+        from core.graph.knowledge import get_kg, iter_wiki_md_files
 
         docs_dir = vault_path / "docs"
         kg = get_kg()
         synced = skipped = 0
-        for f in docs_dir.rglob("*.md"):
-            if "_templates" in f.parts:
-                continue
+        for f in iter_wiki_md_files(docs_dir):
             nid = kg.sync_file(f, docs_dir)
             if nid:
                 synced += 1
             else:
                 skipped += 1
         kg.resolve_links(docs_dir)
-        logger.info("SQLite KG 싱크 완료 — %d개 동기화, %d개 건너뜀", synced, skipped)
+        pruned = kg.prune_missing(docs_dir)
+        logger.info("SQLite KG 싱크 완료 — %d개 동기화, %d개 건너뜀, %d개 고아 정리", synced, skipped, len(pruned))
 
         # 시맨틱 싱크: MCP 서버가 살아있으면 위임, 아니면 직접 처리
         if not _try_semantic_sync_via_mcp():
@@ -362,11 +374,11 @@ def _make_project_handler(
 # ── 메인 ─────────────────────────────────────────────────
 
 
-def main() -> None:
+def main(argv=None) -> None:
     parser = argparse.ArgumentParser(description="LLM Wiki 워처 — vault 싱크 + workspace git repo 개념 파일 자동 동기화")
     parser.add_argument("--vault", default=None)
     parser.add_argument("--debounce", type=float, default=3.0)
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     if not _acquire_singleton_lock(_WATCHER_LOCK_PATH):
         return

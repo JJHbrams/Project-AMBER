@@ -18,6 +18,7 @@ keyboard>=0.13.5                # 전역 단축키
 pyyaml>=6.0                     # 설정 파일 파싱
 pywin32>=306                    # 멀티모니터 좌표 처리
 discord.py>=2.3.0               # Discord 봇 연동
+claude-code-sdk>=0.0.25         # persona reflection — resume 가능한 Claude 세션 호출
 
 # 선택적 (로컬 임베딩 검색 확장 시):
 sentence-transformers>=2.2.0

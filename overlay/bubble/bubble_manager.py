@@ -1,0 +1,624 @@
+"""여러 풍선(대화/생각/도구)을 조율한다 — session.py의 BubbleEvent(dict)를 받아 렌더링.
+
+슬롯 정책:
+- 대화(speech): 캐릭터 반대쪽 위(오버레이가 우측하단이면 좌측 상단)에 뜨는 독립 슬롯.
+  사용자가 보낸 말과 어시스턴트의 답이 같은 슬롯을 쓰지만, 새 턴이 시작되면 즉시
+  교체된다 — "다음 턴이 오거나 사용자가 클릭할 때까지" 화면에 유지된다(자동 타이머로
+  사라지지 않음).
+- 생각(thought) + 도구(tool_use/tool_result): 대화 풍선과 완전히 독립적으로 캐릭터
+  머리 바로 위에 뜨는 슬롯. 도구 사용 안내는 별도 풍선 스택이 아니라 이 생각 풍선
+  안에 상태 줄로 얹는다(예: "⏳ Read", 완료되면 "✓ Read"). "지금 무슨 생각/작업
+  중인지"가 목적이라 turn_end(응답 생성 완료)가 오면 바로 치운다 — 개별 도구 줄의
+  tool_dwell_ms 만료를 기다릴 필요도 없이 한 번에 정리된다.
+
+on_event(ev) 하나만 호출하면 되는 게 이 클래스의 유일한 공개 계약 — session.py는
+tkinter를 몰라도 되고, 이 클래스는 SDK 이벤트 스키마만 알면 된다. 호출부(main.py)가
+session.py의 on_event 콜백을 root.after(0, lambda: manager.handle_event(ev))로 감싸서
+연결해야 한다(이 클래스 자체는 스레드 세이프하지 않음 — tkinter 메인스레드에서만 호출).
+"""
+
+import tkinter as tk
+from typing import Callable
+
+from overlay.bubble import geometry, shapes
+from overlay.bubble.bubble_window import BubbleWindow
+from overlay.chat_window import terminal_font_size
+
+FONT_FAMILY = "Noto Sans KR Medium"
+
+_DEFAULTS = {
+    "side_gap": 10,
+    "anchor_y_ratio": 0.30,
+    "width_to_char_ratio": 2.6,
+    "min_width": 160,
+    "tool_dwell_ms": 1800,
+    "tool_stack_max": 3,
+    "font_family": FONT_FAMILY,
+    "font_size": 0,  # 0 = 자동(TUI 스케일). 양수면 그 크기(px)로 고정.
+    # 풍선별 자동 페이드아웃 — 각 타입마다 on/off + 유지 시간(ms). 유지 시간 뒤 페이드로
+    # 사라지고, 마우스를 올려두면(hover) 그동안은 안 사라진다(BubbleWindow가 처리).
+    "echo_fade": True,       # 입력 에코: 기본 켬(지금처럼 일정 시간 후 사라짐)
+    "echo_dwell_ms": 8000,
+    "speech_fade": True,     # 응답: 기본 켬(입력처럼 일정 시간 후 사라짐) — turn_end부터 카운트
+    "speech_dwell_ms": 20000,
+    "thought_fade": True,    # 생각: 기본 켬(turn_end에 바로 정리 — 지금처럼)
+    "thought_dwell_ms": 0,   # turn_end 후 이 시간(ms) 뒤 페이드(0 = 즉시)
+}
+
+_TOOL_INDICATORS = {"running": "⏳", "ok": "✓", "error": "✗"}
+_MIN_RESIZE_WIDTH = 140
+
+
+class BubbleManager:
+    def __init__(
+        self,
+        root: tk.Tk,
+        get_char_rect: Callable[[], tuple[int, int, int, int]],
+        cfg_bubble: dict,
+        terminal_cfg: dict | None = None,
+    ):
+        self._root = root
+        self._get_char_rect = get_char_rect
+        self._terminal_cfg = terminal_cfg or {}
+        self._set_cfg(cfg_bubble)
+
+        self._speech = BubbleWindow(root)
+        self._speech.set_on_click(self._on_speech_click)
+        self._speech.set_on_resize(self._on_speech_resize)
+        self._speech.set_on_move_end(self._on_speech_move_end)
+        self._speech.set_on_dismissed(self._on_speech_faded)
+        self._speech_text = ""
+        self._speech_dismissed = False
+        self._speech_width_override: "int | None" = None
+        self._speech_rect: "tuple[int, int, int, int] | None" = None  # (x, y, w, h) — InputBar가 이 아래로 쌓는 데 씀
+        # 사용자가 통짜로 드래그해서 옮긴 뒤의 위치 — "꼬리가 붙어있는 하단 코너"를
+        # (char_x/y 대비 char_w/h 비율로) 저장한다. top-left를 고정점으로 쓰면
+        # 리사이즈할 때 항상 좌상단이 고정되고 우하단으로만 커져서 캐릭터와 무관하게
+        # 따로 노는 것처럼 보인다 — 꼬리(캐릭터를 향하는 쪽) 쪽 하단 코너를 고정점으로
+        # 써야 "캐릭터에서 뻗어나온 상태를 유지하며 크기만 바뀌는" 느낌이 난다.
+        self._speech_manual_pos: "tuple[float, float] | None" = None
+        self._speech_tail_side = "left"  # manual_pos가 어느 쪽 하단 코너를 가리키는지
+        # 마지막으로 받은 텍스트 블록의 id(events.py의 "block-{index}") — 같은 턴 안에서도
+        # 도구 호출 전/후처럼 블록이 바뀌면 이전 내용을 이어붙이지 않고 새로 시작한다.
+        # (지난 응답은 히스토리에서 볼 수 있으니 화면엔 최신 블록만 남겨도 된다.)
+        self._speech_block_id: "str | None" = None
+
+        self._thought = BubbleWindow(root)
+        self._thought.set_on_click(self._on_thought_click)
+        self._thought.set_on_resize(self._on_thought_resize)
+        self._thought.set_on_move_end(self._on_thought_move_end)
+        self._thought_text = ""
+        self._thought_dismissed = False
+        self._thought_rect: "tuple[int, int, int, int] | None" = None  # (x, y, w, h) — 말풍선이 이 위를 비켜가는 데 씀
+        self._thought_width_override: "int | None" = None
+        # 생각풍선은 꼬리가 항상 "down"(하단 중앙)이므로 anchor는 항상 하단-중앙 코너.
+        self._thought_manual_pos: "tuple[float, float] | None" = None
+        self._thought_block_id: "str | None" = None  # speech와 동일한 이유
+
+        # 에코(사용자 메시지) 슬롯 — 입력창을 제출한 자리에 사용자가 방금 보낸 말을
+        # 그대로 남긴다(응답 말풍선과 완전히 별개). 일정 시간(echo_dwell_ms) 유지 후
+        # 사라지고, 다음 입력이 들어오면 즉시 교체된다.
+        self._echo = BubbleWindow(root)
+        self._echo.set_on_click(self._on_echo_click)
+        self._echo_text = ""
+        self._echo_rect: "tuple[int, int, int, int, str] | None" = None  # (x, y, w, h, tail_side)
+
+        # 도구 상태 줄 — id 순서를 유지하는 리스트 + 내용을 담는 dict.
+        self._tool_order: list[str] = []
+        self._tool_info: dict[str, dict] = {}
+
+        self._approval_windows: list[BubbleWindow] = []
+
+    def _set_cfg(self, cfg_bubble: dict) -> None:
+        self._cfg = {**_DEFAULTS, **(cfg_bubble or {})}
+        self._theme = {**shapes.DEFAULT_THEME, **(self._cfg.get("theme") or {})}
+
+    # ── 공개 API ──────────────────────────────────────────────────────
+
+    def update_cfg(self, cfg_bubble: dict) -> None:
+        """설정 창에서 저장한 뒤(main.py._reload_config) 색상 테마 등을 즉시 반영한다 —
+        안 그러면 프로세스를 재시작해야만 바뀐 설정이 보인다. 지금 떠 있는 풍선이
+        있으면 새 테마로 다시 그린다."""
+        self._set_cfg(cfg_bubble)
+        self._render_thought()  # 내부에서 _render_speech()까지 호출
+
+    def show_user_message(self, text: str) -> None:
+        """사용자가 새 입력을 보냈다 = 새 턴 시작. 이전 턴의 생각/도구 상태만 정리하고,
+        **사용자의 입력을 응답 말풍선에 에코하지 않는다**.
+
+        예전엔 여기서 입력 텍스트를 응답 말풍선에 그대로 띄웠다가(에코) 어시스턴트
+        응답이 오면 교체했는데 — "내가 친 게 응답 자리에 먼저 뜨니 마치 내 입력이
+        응답으로 출력되는 것"처럼 보여서 불편하다는 피드백을 받았다. 이제 입력 풍선과
+        응답 풍선은 완전히 별개로 동작한다: 입력은 입력대로 닫히고, 응답은 어시스턴트
+        첫 조각이 도착할 때 그때 렌더된다. 이전 응답은 그 첫 조각이 올 때까지 그대로
+        떠 있다가 block-id가 바뀌며 교체된다(빈 화면 깜빡임 방지).
+
+        text 인자는 API 호환을 위해 남겨두지만 여기서는 쓰지 않는다 — 실제 전송은
+        main._on_bubble_submit이 세션으로 직접 보낸다."""
+        self._speech.cancel_dismiss()  # 이전 응답의 페이드 예약이 남아 있으면 취소(새 턴 시작)
+        self._speech_dismissed = False
+        self._thought_dismissed = False
+        self._speech_block_id = None  # 다음 speech 델타가 이전 응답을 밀어내고 새로 시작
+        self._thought_text = ""
+        self._thought_block_id = None
+        self._tool_order.clear()
+        self._tool_info.clear()
+        self._render_thought()  # 생각풍선 상태만 갱신(응답 텍스트는 건드리지 않음)
+
+    def show_echo(self, text: str, input_rect: "tuple[int, int, int, int, str] | None") -> None:
+        """사용자가 방금 보낸 메시지를, 입력창이 있던 그 자리(input_rect)에 그대로 남긴다.
+
+        응답 말풍선과 완전히 별개인 "에코" 슬롯 — Claude 앱에서 내가 보낸 말풍선이
+        남는 것처럼, 내 입력이 입력창 자리에 잠깐 머문다. echo_dwell_ms 뒤 페이드로
+        사라지고, 다음 입력이 들어오면(다시 show_echo 호출) 타이머를 리셋하며 즉시
+        교체된다. input_rect은 InputBar가 닫히기 직전의 (x, y, w, h, tail_side)."""
+        if not text or input_rect is None:
+            return
+        self._echo_text = text
+        self._echo_rect = input_rect
+        self._render_echo()
+        # echo_fade가 꺼져 있으면 다음 입력이 올 때까지 유지(자동 페이드 안 함).
+        if self._cfg.get("echo_fade", True):
+            self._echo.schedule_dismiss(int(self._cfg.get("echo_dwell_ms", 8000)))
+        else:
+            self._echo.cancel_dismiss()
+
+    def _on_echo_click(self) -> None:
+        self._echo_text = ""
+        self._echo.hide()
+
+    def _render_echo(self) -> None:
+        if not self._echo_text or self._echo_rect is None:
+            self._echo.hide()
+            return
+        x, y, w0, h0, _tail_side = self._echo_rect
+        char_x, char_y, char_w, char_h = self._get_char_rect()
+        canvas = self._echo.ensure()
+        # 입력창과 같은 폭/색을 써서 "방금 그 입력창이 굳어 남은" 느낌 — 응답(speech)
+        # 색과 구분되게 input 팔레트를 쓴다.
+        fixed_w = max(w0 - shapes.TAIL_REACH * 2, 60)
+        font = (self._font_family(), self._font_size())
+        angle_rad = geometry.angle_to_point(x + w0 / 2, y + h0 / 2, char_x + char_w / 2, char_y + char_h / 2)
+        w, h = shapes.draw_speech_bubble(
+            canvas, self._echo_text, fixed_w, angle_rad=angle_rad, font=font, fixed_body_w=fixed_w,
+            fg=self._theme["speech_fg"], bg=self._theme["input_bg"], outline=self._theme["input_outline"],
+        )
+        # 입력창 바닥을 기준으로 위로 자라게 앵커(입력창은 화면 하단에 있었으므로).
+        mon_rect = geometry.get_monitor_work_rect(char_x, char_y)
+        nx, ny = geometry.clamp_rect(int(x), int(y + h0 - h), w, h, mon_rect)
+        self._echo.place(nx, ny, w, h)
+
+    def refresh_positions(self) -> None:
+        """새 콘텐츠 없이 지금 떠 있는 풍선들만 캐릭터의 현재 위치 기준으로 다시 배치한다.
+
+        말풍선/생각풍선은 콘텐츠 이벤트가 와야만 다시 그려지므로, 이전 응답이 계속
+        떠 있는 상태에서 캐릭터(오버레이)를 다른 곳으로 옮기면 그 풍선들은 캐릭터를
+        안 따라가고 옛 위치에 남는다. 캐릭터를 클릭(제자리 클릭, 드래그 아님)해서
+        입력창을 열 때마다 호출해서 캐릭터를 따라가게 한다 — 자동 배치든 사용자가
+        드래그해서 옮긴 위치든(캐릭터 기준 오프셋이라) 그대로 다시 적용된다."""
+        self._render_thought()  # 내부에서 _render_speech()까지 호출
+
+    def handle_event(self, ev: dict) -> None:
+        kind = ev.get("kind")
+        if kind in ("speech", "thought"):
+            self._handle_text_event(ev)
+        elif kind == "tool_use":
+            self._handle_tool_use(ev)
+        elif kind == "tool_result":
+            self._handle_tool_result(ev)
+        elif kind == "turn_end":
+            self._dismiss_thought()  # 생각풍선은 "생성 중 무슨 생각/작업 중인지"가 목적 — 응답이 끝나면 치운다
+            self._schedule_speech_fade()  # 응답도 일정 시간 뒤 자동 페이드(설정에 따라)
+        elif kind == "error":
+            self._handle_error(ev)
+
+    def _schedule_speech_fade(self) -> None:
+        """turn_end 후 응답 말풍선을 speech_dwell_ms 뒤 페이드아웃 예약(speech_fade on일 때).
+        마우스를 올려두면 그동안은 유지된다(BubbleWindow hover 처리). 페이드가 끝나면
+        _on_speech_faded가 상태를 정리해 재등장을 막는다."""
+        if self._speech_dismissed or not self._speech_text:
+            return
+        if self._cfg.get("speech_fade", True):
+            self._speech.schedule_dismiss(int(self._cfg.get("speech_dwell_ms", 20000)))
+
+    def _on_speech_faded(self) -> None:
+        """응답 말풍선이 페이드로 완전히 사라진 순간 — 상태를 비워서, 이후 캐릭터 클릭
+        (refresh_positions) 등으로 다시 그려질 때 사라진 응답이 되살아나지 않게 한다."""
+        self._speech_dismissed = True
+        self._speech_text = ""
+        self._speech_rect = None
+
+    def show_approval_request(self, request) -> None:
+        """confirm_risky/confirm_always 수준에서 도구 승인이 필요할 때(approval.py의
+        ApprovalRequest) 허용/거부 버튼이 있는 풍선을 띄운다. auto 수준에서는 세션이
+        이 콜백 자체를 안 부르므로 여기까지 오지 않는다.
+        """
+        win = BubbleWindow(self._root)
+        canvas = win.ensure()
+        char_x, char_y, char_w, char_h = self._get_char_rect()
+        max_width = self._default_width(char_x, char_y, char_w)
+        label = f"{request.tool_name} 실행을 허용할까요?"
+        font = (self._font_family(), max(9, self._font_size() - 1))
+        body_w, body_h = shapes.draw_tool_bubble(
+            canvas, label, "ask", max_width, font=font,
+            fg=self._theme["tool_fg"], bg=self._theme["tool_bg"], outline=self._theme["tool_outline"],
+        )
+
+        btn_h = 26
+        total_h = body_h + btn_h + 6
+        canvas.config(height=total_h)
+
+        col_w = max(40, (body_w - 24) // 2)
+        allow_btn = tk.Button(canvas, text="허용", command=lambda: self._resolve_approval(win, request, True))
+        deny_btn = tk.Button(canvas, text="거부", command=lambda: self._resolve_approval(win, request, False))
+        allow_btn.place(x=8, y=body_h + 4, width=col_w, height=btn_h - 4)
+        deny_btn.place(x=8 + col_w + 8, y=body_h + 4, width=col_w, height=btn_h - 4)
+
+        x, y, _tail_side, _ = geometry.place_speech_bubble(char_x, char_y, char_w, char_h, body_w, total_h, self._cfg)
+        win.place(x, y, body_w, total_h)
+        win.schedule_dismiss(65_000)  # approval.py 기본 타임아웃(60s)보다 살짜 여유
+        self._approval_windows.append(win)
+
+    def _resolve_approval(self, win: BubbleWindow, request, allow: bool) -> None:
+        if allow:
+            request.allow()
+        else:
+            request.deny()
+        win.destroy()
+        if win in self._approval_windows:
+            self._approval_windows.remove(win)
+
+    def clear_all(self) -> None:
+        self._speech.hide()
+        self._speech_text = ""
+        self._speech_dismissed = False
+        self._speech_rect = None
+        self._speech_manual_pos = None
+        self._speech_tail_side = "left"
+        self._speech_block_id = None
+        self._thought.hide()
+        self._thought_text = ""
+        self._thought_dismissed = False
+        self._thought_rect = None
+        self._thought_manual_pos = None
+        self._thought_block_id = None
+        self._echo.hide()
+        self._echo_text = ""
+        self._echo_rect = None
+        self._tool_order.clear()
+        self._tool_info.clear()
+        for win in self._approval_windows:
+            win.destroy()
+        self._approval_windows.clear()
+
+    # ── 대화(speech) 슬롯 ────────────────────────────────────────────
+
+    def _on_speech_click(self) -> None:
+        self._speech_dismissed = True
+        self._speech.hide()
+        self._speech_rect = None  # 숨겼으니 InputBar가 이 자리를 "떠 있는 응답"으로 보고 피할 필요 없음
+
+    def _handle_error(self, ev: dict) -> None:
+        # 오류는 중요하므로 사용자가 방금 대화 풍선을 닫았어도 강제로 다시 띄운다.
+        self._speech_dismissed = False
+        self._speech_text = f"[오류] {ev.get('text') or ''}"
+        self._render_speech()
+
+    def _on_speech_resize(self, new_w: int) -> None:
+        char_x, char_y = self._get_char_rect()[:2]
+        self._speech_width_override = self._clamp_width(new_w, char_x, char_y)
+        self._render_speech()
+
+    def _on_speech_move_end(self, _dx: int, _dy: int) -> None:
+        """본문을 통짜로 드래그해서 옮긴 뒤 — "꼬리가 붙은 하단 코너"를 캐릭터 기준
+        비율 오프셋으로 저장해서 다음 렌더(새 턴, 리사이즈 등)에서도 그 코너가
+        "캐릭터에서 뻗어나온 자리"로 고정 유지된다(리사이즈는 반대쪽만 움직임).
+
+        절대 픽셀이 아니라 char_w/char_h에 대한 비율로 저장하는 이유: 캐릭터가 다른
+        해상도/DPI 모니터로 옮겨지면 character.py가 이미지 크기(char_w/char_h)를 그
+        모니터에 맞게 다시 계산한다 — 이때 픽셀 오프셋을 그대로 쓰면 캐릭터가 커진
+        모니터에서는 상대적으로 너무 가깝게, 작아진 모니터에서는 너무 멀게 보인다.
+
+        dx/dy(누적 델타)를 더하는 대신 창의 실제 최종 위치를 직접 읽는다 — 드래그
+        도중 스트리밍 텍스트가 도착하면 _render_speech()가 위치를 "드래그 중 중간
+        위치"로 갱신해두는데, 그 위에 델타를 또 더하면 이동량이 중복 반영된다.
+
+        꼬리 방향은 드래그가 끝난 최종 위치 기준으로 새로 계산한다 — 캐릭터 반대편으로
+        옮기면 꼬리도 반대쪽으로 바뀌어야 계속 캐릭터를 향한다."""
+        win = self._speech.win
+        if win is None or self._speech_rect is None:
+            return
+        new_x, new_y = win.winfo_x(), win.winfo_y()
+        _, _, w, h = self._speech_rect
+        char_x, char_y, char_w, char_h = self._get_char_rect()
+        tail_side = geometry.tail_side_toward_char(new_x, w, char_x, char_w)
+        self._speech_tail_side = tail_side
+        anchor_x = new_x if tail_side == "left" else new_x + w
+        anchor_y = new_y + h
+        self._speech_manual_pos = ((anchor_x - char_x) / char_w, (anchor_y - char_y) / char_h)
+        self._speech.set_grip_corner("top-left" if tail_side == "right" else "top-right")
+        self._render_speech()  # 꼬리가 바뀌었을 수 있으니 다시 그려서 반영 + rect 갱신
+
+    def get_speech_rect(self) -> "tuple[int, int, int, int] | None":
+        """지금 화면에 떠 있는 대화풍선의 (x, y, w, h) — 없으면 None.
+        InputBar가 이 아래에 입력창을 쌓을 때 쓴다(같은 자리에 겹쳐서 응답을 가리던 문제 방지)."""
+        return self._speech_rect
+
+    def _render_speech(self) -> None:
+        if self._speech_dismissed or not self._speech_text:
+            self._speech.hide()
+            self._speech_rect = None
+            return
+        char_x, char_y, char_w, char_h = self._get_char_rect()
+        max_width = self._speech_width_override or self._default_width(char_x, char_y, char_w)
+        fixed_w = self._speech_width_override
+        font = (self._font_family(), self._font_size())
+        canvas = self._speech.ensure()
+        speech_colors = dict(
+            fg=self._theme["speech_fg"], bg=self._theme["speech_bg"], outline=self._theme["speech_outline"],
+        )
+        # 각도는 아직 모르니 임시값(0)으로 그려서 크기만 잰다(폭/높이는 각도와 무관).
+        w, h = shapes.draw_speech_bubble(canvas, self._speech_text, max_width, font=font, fixed_body_w=fixed_w, **speech_colors)
+
+        if self._speech.is_moving():
+            # 사용자가 지금 이 풍선을 드래그/리사이즈하는 중 — 스트리밍 중 도착한 텍스트가
+            # 위치를 자동 계산값으로 덮어써서 드래그와 충돌하면(창이 마우스 아래에서
+            # 튕겨나감) release 시점에 델타 계산이 틀어져 저장되는 위치 자체가 잘못된다.
+            # 콘텐츠 크기만 맞추고 위치는 절대 건드리지 않는다.
+            win = self._speech.win
+            if win is not None:
+                cur_x, cur_y = win.winfo_x(), win.winfo_y()
+                tail_side = geometry.tail_side_toward_char(cur_x, w, char_x, char_w)
+                grip_corner = "top-left" if tail_side == "right" else "top-right"
+                angle_rad = geometry.angle_to_point(
+                    cur_x + w / 2, cur_y + h / 2, char_x + char_w / 2, char_y + char_h / 2
+                )
+                w, h = shapes.draw_speech_bubble(
+                    canvas, self._speech_text, max_width, angle_rad=angle_rad, font=font,
+                    fixed_body_w=fixed_w, grip_corner=grip_corner, **speech_colors,
+                )
+                win.geometry(f"{w}x{h}")
+                self._speech_rect = (cur_x, cur_y, w, h)
+            return
+
+        mon_rect = geometry.get_monitor_work_rect(char_x, char_y)
+        if self._speech_manual_pos is not None:
+            # 드래그로 옮긴 뒤에는 꼬리 방향을 이 렌더에서 다시 판단하지 않고, 마지막
+            # 드래그가 끝났을 때 정한 방향(_speech_tail_side)을 그대로 쓴다 — 텍스트
+            # 길이 변화 등으로 중심선을 살짝 넘나들 때마다 꼬리가 깜빡이며 바뀌는 걸 막고,
+            # "꼬리가 붙은 하단 코너"를 고정점으로 리사이즈가 자연스럽게 되게 한다.
+            tail_side = self._speech_tail_side
+            mx, my = self._speech_manual_pos
+            anchor_x = char_x + mx * char_w
+            anchor_y = char_y + my * char_h
+            x = anchor_x if tail_side == "left" else anchor_x - w
+            y = anchor_y - h
+            x, y = geometry.clamp_rect(int(x), int(y), w, h, mon_rect)
+        else:
+            x, y, _unused_tail, mon_rect = geometry.place_speech_bubble(char_x, char_y, char_w, char_h, w, h, self._cfg)
+            x, y = self._avoid_thought_overlap(x, y, w, h, mon_rect)
+            # 자동 배치일 때는 최종 위치 기준으로 매번 다시 판단 — 자유롭게 캐릭터를 따라간다.
+            tail_side = geometry.tail_side_toward_char(x, w, char_x, char_w)
+            self._speech_tail_side = tail_side  # 나중에 드래그를 시작할 때 이 값을 물려받음
+
+        grip_corner = "top-left" if tail_side == "right" else "top-right"
+        self._speech.set_grip_corner(grip_corner)
+        # 꼬리는 항상 몸통 중심→캐릭터 중심 방향의 실제 각도를 향한다(좌우 이진이 아니라
+        # 대각선도 정확히 표현) — grip_corner/리사이즈 앵커만 tail_side(이진)를 그대로 쓴다.
+        angle_rad = geometry.angle_to_point(x + w / 2, y + h / 2, char_x + char_w / 2, char_y + char_h / 2)
+        w, h = shapes.draw_speech_bubble(
+            canvas, self._speech_text, max_width, angle_rad=angle_rad, font=font,
+            fixed_body_w=fixed_w, grip_corner=grip_corner, **speech_colors,
+        )
+
+        self._speech.place(x, y, w, h)
+        self._speech_rect = (x, y, w, h)
+
+    def _avoid_thought_overlap(
+        self, x: int, y: int, w: int, h: int, mon_rect: tuple[int, int, int, int]
+    ) -> tuple[int, int]:
+        """생각풍선은 항상 캐릭터 머리 위에 고정이므로, 말풍선이 그 영역을 침범하면
+        말풍선 쪽을 더 위로 밀어낸다(생각풍선을 옮기면 "머리 위" 원칙이 깨짐)."""
+        if self._thought_rect is None:
+            return x, y
+        t_x, t_y, t_w, t_h = self._thought_rect
+        gap = 8
+        # 새 배치(말풍선=캐릭터 옆, 생각풍선=머리 위)에서는 둘이 대개 안 겹친다. 살짝
+        # 스치는 정도로 말풍선을 위로 확 밀어올리면 "읽던 응답이 갑자기 위로 점프"해서
+        # 오히려 거슬린다(사용자 피드백) — 가로/세로 둘 다 실질적으로 크게 겹칠 때만
+        # 비켜준다(겹침 면적이 각 풍선 폭/높이의 상당 부분일 때).
+        overlap_x = min(x + w, t_x + t_w) - max(x, t_x)
+        overlap_y = (y + h) - (t_y - gap)
+        substantial = overlap_x > min(w, t_w) * 0.5 and overlap_y > min(h, t_h) * 0.4
+        if substantial:
+            y = t_y - gap - h
+            _, y = geometry.clamp_rect(x, y, w, h, mon_rect)
+        return x, y
+
+    # ── 생각(thought) + 도구 슬롯 ─────────────────────────────────────
+
+    def _dismiss_thought(self) -> None:
+        """응답 생성이 끝나면(turn_end) 생각풍선을 정리한다 — "지금 무슨 생각/작업 중인지"가
+        목적이라 생성이 끝나면 볼 이유가 없다. thought_fade가 꺼져 있으면 다음 턴/클릭
+        때까지 유지하고, 켜져 있으면 thought_dwell_ms(기본 0=즉시) 뒤 페이드아웃한다."""
+        if not self._cfg.get("thought_fade", True):
+            return  # 유지 — 다음 show_user_message나 클릭에서 정리됨
+        self._thought_dismissed = True
+        self._thought_block_id = None
+        self._tool_order.clear()
+        self._tool_info.clear()
+        self._thought_rect = None  # 말풍선이 이 자리를 더는 비켜갈 필요 없음
+        # 즉시 hide 대신 페이드아웃 — dwell(기본 0) 뒤 부드럽게 사라진다.
+        self._thought.schedule_dismiss(int(self._cfg.get("thought_dwell_ms", 0)))
+        # 말풍선은 여기서 다시 그리지 않는다(생성 중 위치 튐 방지) — 자기 내용이 바뀔
+        # 때만 그 시점의 생각풍선 자리를 보고 스스로 피한다.
+
+    def _on_thought_click(self) -> None:
+        self._thought_dismissed = True
+        self._thought.hide()
+        self._thought_rect = None
+        self._render_speech()  # 생각풍선이 닫혔으니 말풍선을 다시 원래 자리로
+
+    def _on_thought_resize(self, new_w: int) -> None:
+        char_x, char_y = self._get_char_rect()[:2]
+        self._thought_width_override = self._clamp_width(new_w, char_x, char_y)
+        self._render_thought()
+
+    def _on_thought_move_end(self, _dx: int, _dy: int) -> None:
+        # 꼬리(down)가 붙은 하단-중앙 코너를 고정점으로 저장 — speech와 동일한 이유로
+        # 리사이즈가 그 코너를 고정하고 반대쪽(위쪽)만 움직이게 한다.
+        win = self._thought.win
+        if win is None or self._thought_rect is None:
+            return
+        new_x, new_y = win.winfo_x(), win.winfo_y()
+        _, _, w, h = self._thought_rect
+        char_x, char_y, char_w, char_h = self._get_char_rect()
+        anchor_x = new_x + w / 2
+        anchor_y = new_y + h
+        self._thought_manual_pos = ((anchor_x - char_x) / char_w, (anchor_y - char_y) / char_h)
+        self._render_thought()
+
+    def _handle_text_event(self, ev: dict) -> None:
+        kind = ev.get("kind")
+        text = ev.get("text") or ""
+        block_id = ev.get("id")
+        is_delta = bool(ev.get("delta"))
+
+        if kind == "speech":
+            self._speech.cancel_dismiss()  # 새 응답 조각이 오는 중 — 이전 페이드 예약 취소
+            self._speech_dismissed = False
+            if is_delta and block_id is not None and block_id != self._speech_block_id:
+                # 블록이 바뀌면(새 턴의 첫 조각, 또는 같은 턴 안에서 도구 호출 전/후로
+                # 나뉜 응답) 이전 블록 내용을 이어붙이지 않고 새로 시작한다 — 새 턴이면
+                # 이 시점에 이전 턴의 응답이 밀려나고 새 응답이 그 자리를 차지한다(에코 없이
+                # 곧바로 어시스턴트 응답으로 교체). 지난 응답은 히스토리로 볼 수 있다.
+                self._speech_text = ""
+            if block_id is not None:
+                self._speech_block_id = block_id
+            self._speech_text = self._speech_text + text if is_delta else text
+            self._render_speech()
+        else:  # "thought"
+            if is_delta and block_id is not None and block_id != self._thought_block_id:
+                self._thought_text = ""
+            if block_id is not None:
+                self._thought_block_id = block_id
+            self._thought_text = self._thought_text + text if is_delta else text
+            self._render_thought()
+
+    def _handle_tool_use(self, ev: dict) -> None:
+        tool_id = ev.get("id")
+        self._tool_info[tool_id] = {"name": ev.get("tool_name") or "tool", "status": "running"}
+        if tool_id not in self._tool_order:
+            self._tool_order.append(tool_id)
+        while len(self._tool_order) > int(self._cfg["tool_stack_max"]):
+            oldest = self._tool_order.pop(0)
+            self._tool_info.pop(oldest, None)
+        self._render_thought()
+
+    def _handle_tool_result(self, ev: dict) -> None:
+        tool_id = ev.get("id")
+        if tool_id not in self._tool_info:
+            return
+        self._tool_info[tool_id]["status"] = "error" if ev.get("is_error") else "ok"
+        self._render_thought()
+        self._root.after(int(self._cfg["tool_dwell_ms"]), lambda tid=tool_id: self._expire_tool_line(tid))
+
+    def _expire_tool_line(self, tool_id: str) -> None:
+        if tool_id in self._tool_info:
+            self._tool_info.pop(tool_id, None)
+        if tool_id in self._tool_order:
+            self._tool_order.remove(tool_id)
+        self._render_thought()
+
+    def _format_tool_line(self, tool_id: str) -> str:
+        info = self._tool_info[tool_id]
+        indicator = _TOOL_INDICATORS.get(info["status"], "⏳")
+        return f"{indicator} {info['name']}"
+
+    def _tool_lines_text(self) -> str:
+        return "\n".join(self._format_tool_line(tid) for tid in self._tool_order)
+
+    def _render_thought(self) -> None:
+        tool_lines = self._tool_lines_text()
+        if self._thought_dismissed or not (self._thought_text or tool_lines):
+            self._thought.hide()
+            self._thought_rect = None
+            self._render_speech()  # 생각풍선이 사라졌으니 말풍선이 비켜갈 이유도 없어짐
+            return
+        char_x, char_y, char_w, char_h = self._get_char_rect()
+        max_width = self._thought_width_override or self._default_width(char_x, char_y, char_w)
+        font = (self._font_family(), max(9, self._font_size() - 1))
+        canvas = self._thought.ensure()
+        thought_colors = dict(
+            fg=self._theme["thought_fg"], bg=self._theme["thought_bg"], outline=self._theme["thought_outline"],
+            tool_fg=self._theme["thought_tool_fg"],
+        )
+        # 각도는 아직 모르니 임시값(기본=위쪽)으로 그려서 크기만 잰다(폭/높이는 각도와 무관).
+        w, h = shapes.draw_thought_bubble(
+            canvas, self._thought_text, max_width, font=font,
+            fixed_body_w=self._thought_width_override, tool_lines=tool_lines, **thought_colors,
+        )
+
+        if self._thought.is_moving():
+            # speech와 동일한 이유 — 드래그 중에는 위치를 건드리지 않고 크기만 맞춘다.
+            win = self._thought.win
+            if win is not None:
+                cur_x, cur_y = win.winfo_x(), win.winfo_y()
+                angle_rad = geometry.angle_to_point(
+                    cur_x + w / 2, cur_y + h / 2, char_x + char_w / 2, char_y + char_h / 2
+                )
+                w, h = shapes.draw_thought_bubble(
+                    canvas, self._thought_text, max_width, angle_rad=angle_rad, font=font,
+                    fixed_body_w=self._thought_width_override, tool_lines=tool_lines, **thought_colors,
+                )
+                win.geometry(f"{w}x{h}")
+                self._thought_rect = (cur_x, cur_y, w, h)
+            self._render_speech()
+            return
+
+        if self._thought_manual_pos is not None:
+            # 하단-중앙 코너를 고정점으로 — 리사이즈해도 그 점을 중심으로 좌우/위로만
+            # 커진다(항상 그 지점에서 뻗어나온 것처럼 보임). 꼬리의 실제 각도는 아래에서
+            # 매번 캐릭터 중심 방향으로 다시 계산하므로, 이 고정점은 순수 리사이즈
+            # 앵커일 뿐 시각적 꼬리 방향과는 분리되어 있다.
+            mx, my = self._thought_manual_pos
+            mon_rect = geometry.get_monitor_work_rect(char_x, char_y)
+            anchor_x = char_x + mx * char_w
+            anchor_y = char_y + my * char_h
+            x, y = geometry.clamp_rect(int(anchor_x - w / 2), int(anchor_y - h), w, h, mon_rect)
+        else:
+            x, y, _ = geometry.place_thought_bubble(char_x, char_y, char_w, char_h, w, h, self._cfg)
+
+        # 꼬리는 항상 몸통 중심→캐릭터 중심 방향의 실제 각도를 향한다(대각선 포함).
+        angle_rad = geometry.angle_to_point(x + w / 2, y + h / 2, char_x + char_w / 2, char_y + char_h / 2)
+        w, h = shapes.draw_thought_bubble(
+            canvas, self._thought_text, max_width, angle_rad=angle_rad, font=font,
+            fixed_body_w=self._thought_width_override, tool_lines=tool_lines, **thought_colors,
+        )
+        self._thought.place(x, y, w, h)
+        self._thought_rect = (x, y, w, h)
+        # 말풍선은 여기서 다시 그리지 않는다(_dismiss_thought의 설명과 동일한 이유) —
+        # 생각풍선이 스트리밍 중 계속 자라날 때마다 말풍선이 매번 그 자리를 피해
+        # 위로 밀려 올라가면 응답 생성 내내 말풍선이 계속 움직이는 것처럼 보인다.
+        # 말풍선은 자기 콘텐츠 이벤트가 올 때만 그 순간의 생각풍선 자리를 보고 스스로
+        # 피한다(_handle_text_event → _render_speech).
+
+    # ── 공용 ──────────────────────────────────────────────────────────
+
+    def _default_width(self, char_x: int, char_y: int, char_w: int) -> int:
+        return geometry.default_bubble_width(char_x, char_y, char_w, self._cfg)
+
+    def _clamp_width(self, width: int, char_x: int, char_y: int) -> int:
+        mon = geometry.get_monitor_work_rect(char_x, char_y)
+        max_w = int((mon[2] - mon[0]) * 0.9)
+        return max(_MIN_RESIZE_WIDTH, min(width, max_w))
+
+    def _font_family(self) -> str:
+        return self._cfg.get("font_family") or FONT_FAMILY
+
+    def _font_size(self) -> int:
+        override = self._cfg.get("font_size") or 0
+        if override:  # 사용자가 설정에서 고정 크기를 지정 — TUI 스케일 무시
+            return max(8, int(override))
+        char_x, char_y = self._get_char_rect()[:2]
+        return round(terminal_font_size(char_x, char_y, self._terminal_cfg))

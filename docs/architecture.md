@@ -558,7 +558,7 @@ python scripts/kg_viz.py --output D:\intel_engram\docs\my_graph.html
 - 색상 = node type (concept/project/research/…) 또는 memory 타입
 - hover = 제목 + 타입 + summary + 태그
 
-### engram_dashboard.py — Streamlit 통합 대시보드
+### dashboard — Streamlit 통합 대시보드
 
 `core/dashboard/app.py`: 브라우저 기반 통합 GUI (본체).  
 `scripts/engram_dashboard.py`: 스탠드얼론 런처 — overlay.exe 기동 또는 직접 실행용.

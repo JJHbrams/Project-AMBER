@@ -51,6 +51,8 @@ _USER_CONFIG_PATH = Path.home() / ".engram" / "overlay.user.yaml"
 _STATE_PATH = Path.home() / ".engram" / "overlay.state.yaml"
 _ENGRAM_USER_CONFIG_PATH = Path.home() / ".engram" / "user.config.yaml"
 _SUPPORTED_CLI_PROVIDERS = {"copilot", "gemini", "claude-code", "claude-code-ollama", "ollama"}
+_SUPPORTED_CHAT_MODES = {"tui", "bubble"}
+_SUPPORTED_PERMISSION_LEVELS = {"auto", "confirm_risky", "confirm_always"}
 _CLI_PROVIDER_ALIASES = {
     "claude": "claude-code",
     "claude_code": "claude-code",
@@ -74,6 +76,7 @@ _USER_TEMPLATE = """\
 
 # overlay:
 #   char_height_ratio: 0.125
+#   chat_mode: "tui"  # tui | bubble (bubble은 실험적, 미구현 — 선택 시 tui로 폴백)
 #   character:
 #     name: "smoke_chroma"
 #     sequence:
@@ -85,6 +88,9 @@ _USER_TEMPLATE = """\
 #       interval_min_sec: 0.2
 #       interval_max_sec: 3.0
 #       idle_check_interval_sec: 1.0
+
+# bubble:
+#   permission_level: "auto"  # auto | confirm_risky | confirm_always
 
 # terminal:
 #   base_font_size: 8
@@ -239,6 +245,40 @@ def set_cli_provider(provider: str, sync_user: bool = False) -> str:
     return normalized
 
 
+def get_bubble_session_id() -> str | None:
+    """말풍선 모드의 resume 대상 claude 세션 id. state.yaml에 영속화된다."""
+    state = _safe_load_yaml(_STATE_PATH)
+    bubble_cfg = state.get("bubble") if isinstance(state, dict) else None
+    if not isinstance(bubble_cfg, dict):
+        return None
+    sid = bubble_cfg.get("claude_session_id")
+    return str(sid) if sid else None
+
+
+def set_bubble_session_id(session_id: str | None) -> None:
+    """resume용 claude 세션 id를 state.yaml에 저장한다(None이면 제거)."""
+    state = _safe_load_yaml(_STATE_PATH)
+    bubble_cfg = state.get("bubble") if isinstance(state, dict) else None
+    if not isinstance(bubble_cfg, dict):
+        bubble_cfg = {}
+
+    if session_id:
+        bubble_cfg["claude_session_id"] = session_id
+    else:
+        bubble_cfg.pop("claude_session_id", None)
+
+    if bubble_cfg:
+        state["bubble"] = bubble_cfg
+    else:
+        state.pop("bubble", None)
+
+    _STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    _STATE_PATH.write_text(
+        yaml.safe_dump(state, sort_keys=False, allow_unicode=False),
+        encoding="utf-8",
+    )
+
+
 def get_ollama_model(cfg: dict | None = None) -> str:
     if cfg is None:
         cfg = load_cfg()
@@ -266,6 +306,46 @@ def set_ollama_model(model: str, sync_user: bool = False) -> str:
     if sync_user:
         _set_user_cli_value("ollama_model", model)
     return model
+
+
+def normalize_chat_mode(mode: str | None) -> str:
+    value = str(mode or "").strip().lower()
+    if value in _SUPPORTED_CHAT_MODES:
+        return value
+    return "tui"
+
+
+def get_chat_mode(cfg: dict | None = None) -> str:
+    if cfg is None:
+        cfg = load_cfg()
+    overlay_cfg = cfg.get("overlay", {}) if isinstance(cfg, dict) else {}
+    if not isinstance(overlay_cfg, dict):
+        overlay_cfg = {}
+    return normalize_chat_mode(overlay_cfg.get("chat_mode"))
+
+
+def normalize_permission_level(level: str | None) -> str:
+    value = str(level or "").strip().lower()
+    if value in _SUPPORTED_PERMISSION_LEVELS:
+        return value
+    return "auto"
+
+
+def get_permission_level(cfg: dict | None = None) -> str:
+    if cfg is None:
+        cfg = load_cfg()
+    bubble_cfg = cfg.get("bubble", {}) if isinstance(cfg, dict) else {}
+    if not isinstance(bubble_cfg, dict):
+        bubble_cfg = {}
+    return normalize_permission_level(bubble_cfg.get("permission_level"))
+
+
+def get_bubble_cfg(cfg: dict | None = None) -> dict:
+    """bubble: 섹션 전체(앵커/크기/dwell/fade 등 렌더링 설정)를 반환한다."""
+    if cfg is None:
+        cfg = load_cfg()
+    bubble_cfg = cfg.get("bubble", {}) if isinstance(cfg, dict) else {}
+    return bubble_cfg if isinstance(bubble_cfg, dict) else {}
 
 
 def get_workdir(cfg: dict | None = None) -> Path:

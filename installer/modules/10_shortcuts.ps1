@@ -6,25 +6,31 @@ $DistExe = Join-Path $ProjectRoot "dist\engram-overlay\engram-overlay.exe"
 $OverlayCmdPath = Join-Path $ShimDir "engram-overlay.cmd"
 
 # 12. Start Menu shortcut (Windows Search)
+# 바로가기는 exe 를 직접 가리켜야 한다:
+#   - Windows 는 타깃이 .exe 가 아니면(.cmd 등) '작업표시줄에 고정' 을 비활성화한다
+#   - .cmd 경유 실행은 부팅/실행 시 콘솔창이 깜빡이고 AppUserModelID 연결이 끊긴다
+# (.cmd 는 터미널에서 `engram-overlay` 로 호출하는 PATH 용으로만 유지)
 Write-Step "Start Menu shortcut..."
 $StartMenuDir = [Environment]::GetFolderPath("Programs")
 $StartMenuLink = Join-Path $StartMenuDir "Engram Overlay.lnk"
-if (Test-Path $OverlayCmdPath) {
+if (Test-Path $DistExe) {
+    $shell = New-Object -ComObject WScript.Shell
+    $shortcut = $shell.CreateShortcut($StartMenuLink)
+    $shortcut.TargetPath = $DistExe
+    $shortcut.WorkingDirectory = Split-Path $DistExe
+    $shortcut.Description = "Engram Overlay"
+    $shortcut.IconLocation = "$DistExe,0"
+    $shortcut.Save()
+    Write-Ok $StartMenuLink
+} elseif (Test-Path $OverlayCmdPath) {
+    # exe 가 아직 없을 때만 .cmd 폴백 (이 경우 작업표시줄 고정 불가)
     $shell = New-Object -ComObject WScript.Shell
     $shortcut = $shell.CreateShortcut($StartMenuLink)
     $shortcut.TargetPath = $OverlayCmdPath
     $shortcut.WorkingDirectory = $ShimDir
     $shortcut.Description = "Engram Overlay"
     $shortcut.Save()
-    Write-Ok $StartMenuLink
-} elseif (Test-Path $DistExe) {
-    $shell = New-Object -ComObject WScript.Shell
-    $shortcut = $shell.CreateShortcut($StartMenuLink)
-    $shortcut.TargetPath = $DistExe
-    $shortcut.WorkingDirectory = Split-Path $DistExe
-    $shortcut.Description = "Engram Overlay"
-    $shortcut.Save()
-    Write-Ok $StartMenuLink
+    Write-Warn "$StartMenuLink (exe 미빌드 — .cmd 폴백, 작업표시줄 고정 불가)"
 } else { Write-Warn "Skipped — launcher/exe not found" }
 
 # 13. Startup shortcut (auto-start on boot)
@@ -32,22 +38,24 @@ $StartupDir = [Environment]::GetFolderPath("Startup")
 $StartupLink = Join-Path $StartupDir "engram-overlay.lnk"
 if ($EnableAutoStart) {
     Write-Step "Startup registration (자동시작)..."
-    if (Test-Path $OverlayCmdPath) {
+    if (Test-Path $DistExe) {
+        $shell = New-Object -ComObject WScript.Shell
+        $shortcut = $shell.CreateShortcut($StartupLink)
+        $shortcut.TargetPath = $DistExe
+        $shortcut.WorkingDirectory = Split-Path $DistExe
+        $shortcut.Description = "Engram Overlay — Auto Start"
+        $shortcut.IconLocation = "$DistExe,0"
+        $shortcut.Save()
+        Write-Ok $StartupLink
+    } elseif (Test-Path $OverlayCmdPath) {
+        # exe 가 아직 없을 때만 .cmd 폴백 (부팅 시 콘솔창 깜빡 + 고정 불가)
         $shell = New-Object -ComObject WScript.Shell
         $shortcut = $shell.CreateShortcut($StartupLink)
         $shortcut.TargetPath = $OverlayCmdPath
         $shortcut.WorkingDirectory = $ShimDir
         $shortcut.Description = "Engram Overlay — Auto Start"
         $shortcut.Save()
-        Write-Ok $StartupLink
-    } elseif (Test-Path $DistExe) {
-        $shell = New-Object -ComObject WScript.Shell
-        $shortcut = $shell.CreateShortcut($StartupLink)
-        $shortcut.TargetPath = $DistExe
-        $shortcut.WorkingDirectory = Split-Path $DistExe
-        $shortcut.Description = "Engram Overlay — Auto Start"
-        $shortcut.Save()
-        Write-Ok $StartupLink
+        Write-Warn "$StartupLink (exe 미빌드 — .cmd 폴백)"
     } else { Write-Warn "Skipped — launcher/exe not found" }
 } else {
     Write-Step "Startup registration (건너뜀 — 사용자 선택)..."

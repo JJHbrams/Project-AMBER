@@ -13,6 +13,58 @@ import urllib.request
 import urllib.error
 import ctypes
 
+
+# ── 멀티콜 바이너리 디스패치 ────────────────────────────────────────────
+# 같은 exe 가 `--role` 인자에 따라 백엔드(mcp_server / kg_watcher)로도 동작한다.
+# frozen 번들에서 conda python 없이 백엔드를 구동하기 위함(통짜 installer 핵심).
+# 백엔드 역할이면 무거운 tk/pystray(overlay.main) import 전에 바로 처리하고 종료한다.
+# overlay 역할일 때만 아래로 계속 진행한다.
+def _dispatch_backend_role() -> bool:
+    argv = sys.argv[1:]
+    if not argv or argv[0] != "--role":
+        return False
+    role = argv[1] if len(argv) > 1 else ""
+    rest = argv[2:]
+    # 백엔드 역할: UTF-8 콘솔 강제. frozen exe 는 stdout 이 cp949(한국어 로케일)로 잡혀
+    # kg_watcher/mcp_server 의 한글·이모지 로그 줄에서 UnicodeEncodeError 로 크래시한다.
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            if _stream is not None:
+                _stream.reconfigure(encoding="utf-8")
+        except Exception:
+            pass
+    if not getattr(sys, "frozen", False):
+        # 소스 모드: 루트 및 scripts/kg 를 import 경로에 추가
+        here = _Path(__file__).parent
+        sys.path.insert(0, str(here))
+        sys.path.insert(0, str(here / "scripts" / "kg"))
+    # 백엔드 역할은 부모(overlay)가 stdout/stderr 를 로그 파일로 리다이렉트한 서브프로세스다.
+    # 크래시 시 PyInstaller 윈도우 부트로더의 모달 다이얼로그가 뜨지 않도록 여기서 잡아
+    # stderr(=로그)로 트레이스백만 남기고 조용히 종료한다.
+    try:
+        if role == "mcp-server":
+            import mcp_server
+            mcp_server.main(rest)
+            return True
+        if role == "kg-watcher":
+            import kg_watcher
+            kg_watcher.main(rest)
+            return True
+        raise SystemExit(f"[entry] unknown --role: {role!r}")
+    except SystemExit:
+        raise
+    except BaseException:
+        import traceback
+        try:
+            traceback.print_exc()
+        except Exception:
+            pass
+        sys.exit(1)
+
+
+if _dispatch_backend_role():
+    sys.exit(0)
+
 from overlay.main import main
 
 # ── 가장 먼저: import 전에도 파일에 기록하는 원시 로거 ───────────────────
@@ -132,12 +184,15 @@ def _kill_orphan_engram_children() -> None:
         try:
             result = _sp.run(
                 [
-                    "powershell", "-Command",
+                    "powershell",
+                    "-Command",
                     f"Get-CimInstance Win32_Process -Filter \"Name='python.exe'\""
                     f" | Where-Object {{ $_.CommandLine -like '*{pattern}*' }}"
                     f" | Select-Object -ExpandProperty ProcessId",
                 ],
-                capture_output=True, text=True, timeout=5,
+                capture_output=True,
+                text=True,
+                timeout=5,
                 creationflags=getattr(_sp, "CREATE_NO_WINDOW", 0),
             )
             for pid_str in result.stdout.strip().splitlines():
@@ -196,4 +251,4 @@ except Exception as _e:
 
 
 if __name__ == "__main__":
-    pass  # 위 try 블록에서 이미 main() 호출됨
+    pass  # pyinstaller는 __main__ 블록을 실행하지 않음, main()은 위에서 바로 호출

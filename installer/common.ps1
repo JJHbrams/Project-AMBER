@@ -29,11 +29,11 @@ $LegacyShimPath = Join-Path $ShimDir ("con" + "tinuum.cmd")
 $CopilotSkillDir = Join-Path $env:USERPROFILE ".copilot\skills\engram"
 $CopilotSkillPath = Join-Path $CopilotSkillDir "SKILL.md"
 $LegacyCopilotSkillDir = Join-Path $env:USERPROFILE (".copilot\\skills\\" + ("con" + "tinuum"))
+$ClaudeCommandsDir = Join-Path $env:USERPROFILE ".claude\commands"
+$ClaudeCommandPath = Join-Path $ClaudeCommandsDir "engram.md"
 $SkillsSourceDir = Join-Path $ProjectRoot "config\skills"
 $CopilotAgentsDir = Join-Path $env:USERPROFILE ".copilot\agents"
 $ClaudeAgentsDir = Join-Path $env:USERPROFILE ".claude\agents"
-$ClaudeCommandsDir = Join-Path $env:USERPROFILE ".claude\commands"
-$ClaudeCommandPath = Join-Path $ClaudeCommandsDir "engram.md"
 $McpConfigPath = Join-Path $env:USERPROFILE ".copilot\mcp-config.json"
 $ClaudeConfigPath = Join-Path $env:USERPROFILE ".claude.json"
 $RuntimeConfigPath = Join-Path $ProjectRoot "config\config.yaml"
@@ -87,6 +87,21 @@ function Write-Step($msg) { Write-Host "  [+] $msg" -ForegroundColor Cyan }
 function Write-Ok($msg)   { Write-Host "  [OK] $msg" -ForegroundColor Green }
 function Write-Warn($msg) { Write-Host "  [!] $msg" -ForegroundColor Yellow }
 function Write-Err($msg)  { Write-Host "  [X] $msg" -ForegroundColor Red }
+
+# 비대화형(-NonInteractive / stdin 리다이렉트 / CI)에서 Read-Host 는 예외를 던져
+# 무인 설치를 중단시킨다. 이 래퍼는 그런 환경에서 프롬프트 없이 $Default 를 반환한다.
+function Read-HostOrDefault([string]$Prompt, [string]$Default = "") {
+    if (-not [Environment]::UserInteractive -or [Console]::IsInputRedirected) {
+        Write-Warn "비대화형 모드 — 기본값 사용 ('$Prompt')"
+        return $Default
+    }
+    try {
+        return Read-Host $Prompt
+    } catch {
+        Write-Warn "입력을 받을 수 없어 기본값 사용 ('$Prompt')"
+        return $Default
+    }
+}
 
 # Runs $ScriptBlock, printing each output line truncated to a single overwriting
 # console line so the user sees progress. Returns a List<string> of all lines
@@ -344,7 +359,10 @@ function Get-LatestWriteTimeUtc([string[]]$paths) {
             continue
         }
 
+        # __pycache__/*.pyc 는 앱이 import 할 때마다 mtime 이 갱신되므로
+        # 소스 변경 신호로 쓰면 오탐(불필요 재빌드)이 발생한다 — 제외한다.
         $dirLatest = Get-ChildItem -Path $path -Recurse -File -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -notmatch '\\__pycache__\\' -and $_.Extension -notin @('.pyc', '.pyo') } |
             Sort-Object LastWriteTimeUtc -Descending |
             Select-Object -First 1
         if ($dirLatest -and $dirLatest.LastWriteTimeUtc -gt $latest) {
@@ -352,6 +370,33 @@ function Get-LatestWriteTimeUtc([string[]]$paths) {
         }
     }
     return $latest
+}
+
+function Stop-EngramOverlay {
+    # 실행 중인 overlay 및 engram 자식 프로세스(mcp_server/dashboard/kg_watcher)를 종료한다.
+    # 두 시점에서 필요하다:
+    #   1) PyInstaller COLLECT 가 dist 폴더를 삭제하기 전 (핸들 점유 해제)
+    #   2) 설치 완료 후 최신 exe 로 재기동하기 전 (old 인스턴스가 살아있으면 자동갱신이 안 됨)
+    # 반환값: overlay 프로세스를 실제로 종료했으면 $true
+    $overlayProcs = Get-Process -Name "engram-overlay" -ErrorAction SilentlyContinue
+    $stopped = $false
+    if ($overlayProcs) {
+        Write-Warn "실행 중인 engram-overlay 종료 중..."
+        $overlayProcs | Stop-Process -Force
+        $stopped = $true
+    }
+    # mcp_server / dashboard / kg_watcher — python.exe 고아 프로세스 정리
+    foreach ($pattern in @("mcp_server.py", "engram_dashboard.py", "kg_watcher.py")) {
+        $procIds = (Get-CimInstance Win32_Process -Filter "Name='python.exe'" -ErrorAction SilentlyContinue |
+            Where-Object { $_.CommandLine -like "*$pattern*" } |
+            Select-Object -ExpandProperty ProcessId)
+        foreach ($procId in $procIds) {
+            try { Stop-Process -Id $procId -Force -ErrorAction SilentlyContinue } catch {}
+        }
+    }
+    # 커널이 핸들을 해제할 때까지 충분히 대기
+    if ($stopped) { Start-Sleep -Seconds 2 }
+    return $stopped
 }
 
 function Test-OverlayBuildRequired([string]$projectRoot, [string]$specPath, [string]$distExePath) {

@@ -46,6 +46,25 @@ NODE_COLORS = {
     "tool":      "#00b894",
 }
 
+# 위키 콘텐츠가 아닌 경로 — sync/lint 스캔에서 공통으로 제외
+IGNORE_DIR_NAMES = {
+    "_templates",
+    "$RECYCLE.BIN",
+    ".git",
+    ".venv",
+    "venv",
+    "node_modules",
+    "__pycache__",
+}
+
+
+def iter_wiki_md_files(vault_path: Path):
+    """vault_path 하위 .md 파일 중 위키 콘텐츠가 아닌 경로(IGNORE_DIR_NAMES)를 제외하고 순회."""
+    for p in vault_path.rglob("*.md"):
+        if IGNORE_DIR_NAMES & set(p.parts):
+            continue
+        yield p
+
 
 # ── 스키마 초기화 ─────────────────────────────────────────
 
@@ -59,6 +78,7 @@ CREATE TABLE IF NOT EXISTS kg_nodes (
     tags        TEXT NOT NULL DEFAULT '[]',
     summary     TEXT NOT NULL DEFAULT '',
     vault_path  TEXT NOT NULL DEFAULT '',
+    source_mtime REAL NOT NULL DEFAULT 0,
     created_at  TEXT DEFAULT (datetime('now','localtime')),
     updated_at  TEXT DEFAULT (datetime('now','localtime'))
 );
@@ -86,6 +106,10 @@ def initialize_kg_tables():
     conn = get_connection()
     with conn:
         conn.executescript(KG_SCHEMA)
+        # 마이그레이션: kg_nodes.source_mtime 컬럼이 없으면 추가 (증분 sync용)
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(kg_nodes)").fetchall()]
+        if "source_mtime" not in cols:
+            conn.execute("ALTER TABLE kg_nodes ADD COLUMN source_mtime REAL NOT NULL DEFAULT 0")
     conn.close()
 
 
@@ -186,24 +210,32 @@ class KnowledgeGraph:
 
     def add_node(self, title: str, note_type: str = "concept", tags: list | None = None,
                  summary: str = "", path: str = "", vault_path: str = "",
-                 node_id: str | None = None) -> str:
+                 node_id: str | None = None, source_mtime: float = 0.0) -> str:
         nid = node_id or _slugify(title)
         conn = get_connection()
         with conn:
             conn.execute(
                 """
-                INSERT INTO kg_nodes (id, title, path, type, tags, summary, vault_path)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO kg_nodes (id, title, path, type, tags, summary, vault_path, source_mtime)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     title=excluded.title, path=excluded.path, type=excluded.type,
                     tags=excluded.tags, summary=excluded.summary, vault_path=excluded.vault_path,
+                    source_mtime=excluded.source_mtime,
                     updated_at=datetime('now','localtime')
                 """,
                 (nid, title, path, note_type, json.dumps(tags or [], ensure_ascii=False),
-                 summary, vault_path),
+                 summary, vault_path, source_mtime),
             )
         conn.close()
         return nid
+
+    def get_path_mtimes(self, vault_path: Path) -> dict[str, float]:
+        """rel_path -> source_mtime 매핑을 한 번의 쿼리로 반환한다 (증분 sync 판단용)."""
+        conn = get_connection()
+        rows = conn.execute("SELECT path, source_mtime FROM kg_nodes WHERE path != ''").fetchall()
+        conn.close()
+        return {r[0]: (r[1] or 0.0) for r in rows}
 
     def get_node(self, identifier: str) -> dict | None:
         """id 또는 title로 노드 조회"""
@@ -223,6 +255,23 @@ class KnowledgeGraph:
             cur = conn.execute("DELETE FROM kg_nodes WHERE id=?", (node_id,))
         conn.close()
         return cur.rowcount > 0
+
+    def prune_missing(self, vault_path: Path) -> list[str]:
+        """path가 더 이상 디스크에 없는 노드를 DB에서 제거 (파일 이동/삭제 후 고아 노드 정리).
+        vault_path는 sync_file에 넘긴 것과 동일한 루트(보통 docs/)여야 한다."""
+        conn = get_connection()
+        rows = conn.execute("SELECT id, path FROM kg_nodes").fetchall()
+        conn.close()
+        pruned = []
+        for row in rows:
+            rel_path = row["path"]
+            node_id = row["id"]
+            if not rel_path:
+                continue
+            if not (vault_path / rel_path).exists():
+                self.delete_node(node_id)
+                pruned.append(node_id)
+        return pruned
 
     def list_nodes(self, note_type: str | None = None, tag: str | None = None,
                    limit: int = 50) -> list[dict]:
@@ -384,8 +433,11 @@ class KnowledgeGraph:
 
     # ── 마크다운 파일 → 노드 동기화 ──────────────────────
 
-    def sync_file(self, filepath: Path, vault_path: Path) -> str | None:
-        """단일 마크다운 파일을 DB에 동기화. 노드 id 반환"""
+    def sync_file(self, filepath: Path, vault_path: Path, source_mtime: float | None = None) -> str | None:
+        """단일 마크다운 파일을 DB에 동기화. 노드 id 반환.
+
+        source_mtime을 호출자가 이미 stat()했다면 그대로 전달해 중복 stat을 피할 수 있다.
+        """
         try:
             text = filepath.read_text(encoding="utf-8", errors="ignore")
         except Exception:
@@ -396,6 +448,12 @@ class KnowledgeGraph:
         if not title:
             return None
 
+        if source_mtime is None:
+            try:
+                source_mtime = filepath.stat().st_mtime
+            except OSError:
+                source_mtime = 0.0
+
         rel_path = str(filepath.relative_to(vault_path))
         nid = self.add_node(
             title=title,
@@ -405,18 +463,25 @@ class KnowledgeGraph:
             path=rel_path,
             vault_path=str(vault_path),
             node_id=parsed["id"],
+            source_mtime=source_mtime,
         )
         return nid
 
-    def resolve_links(self, vault_path: Path):
-        """마크다운 wikilinks를 파싱해 kg_edges에 반영"""
-        conn = get_connection()
-        # 기존 자동 links 엣지 제거 (수동 엣지는 유지)
-        with conn:
-            conn.execute("DELETE FROM kg_edges WHERE rel_type='links'")
-        conn.close()
+    def resolve_links(self, vault_path: Path, restrict_to_paths: set[str] | None = None):
+        """마크다운 wikilinks를 파싱해 kg_edges에 반영.
 
-        md_files = [p for p in vault_path.rglob("*.md") if "_templates" not in p.parts]
+        restrict_to_paths가 주어지면 그 상대경로에 해당하는 파일들의 outgoing 'links'
+        엣지만 제거·재생성한다(증분 sync용, 나머지 노드의 기존 엣지는 그대로 유지).
+        None이면 기존처럼 전체 재생성(하위호환)."""
+        if restrict_to_paths is not None:
+            md_files = [
+                f for f in iter_wiki_md_files(vault_path)
+                if str(f.relative_to(vault_path)) in restrict_to_paths
+            ]
+        else:
+            md_files = list(iter_wiki_md_files(vault_path))
+
+        parsed_by_from_id: dict[str, dict] = {}
         for f in md_files:
             try:
                 text = f.read_text(encoding="utf-8", errors="ignore")
@@ -424,9 +489,24 @@ class KnowledgeGraph:
                 continue
             parsed = parse_markdown(text, f)
             from_id = parsed["id"]
-            if not from_id:
-                continue
+            if from_id:
+                parsed_by_from_id[from_id] = parsed
 
+        conn = get_connection()
+        with conn:
+            if restrict_to_paths is not None:
+                if parsed_by_from_id:
+                    placeholders = ",".join("?" * len(parsed_by_from_id))
+                    conn.execute(
+                        f"DELETE FROM kg_edges WHERE rel_type='links' AND from_id IN ({placeholders})",
+                        tuple(parsed_by_from_id.keys()),
+                    )
+            else:
+                # 기존 자동 links 엣지 제거 (수동 엣지는 유지)
+                conn.execute("DELETE FROM kg_edges WHERE rel_type='links'")
+        conn.close()
+
+        for from_id, parsed in parsed_by_from_id.items():
             # from_id가 DB에 있는지 확인
             conn = get_connection()
             exists = conn.execute("SELECT id FROM kg_nodes WHERE id=?", (from_id,)).fetchone()

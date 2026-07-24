@@ -1,5 +1,11 @@
 """Semantic graph package."""
 
 from .semantic_graph import SemanticGraph, get_semantic_graph
-from .stm_promoter import maybe_promote, maybe_promote_async
+from .stm_promoter import (
+    maybe_promote,
+    maybe_promote_async,
+    update_working_memory_from_recent_session,
+    update_working_memory_from_recent_session_async,
+    flag_reflection_event_from_recent_session,
+)
 

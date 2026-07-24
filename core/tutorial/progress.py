@@ -25,7 +25,10 @@ _STEP_INDEX = {step: idx + 1 for idx, step in enumerate(_STEP_ORDER)}
 _STEP_TOTAL = len(_STEP_ORDER)
 _DECISION_STEP_SET = {"persona_setup", "wiki_basic", "wiki_advanced", "session_continuity"}
 _PROCEEDABLE_STEPS = {"wiki_basic", "wiki_advanced", "session_continuity"}
-_DEBUG_KEYWORDS: set[str] = set()
+_DEBUG_KEYWORDS = {
+    "튜토리얼 디버그 통과",
+    "tutorial debug pass",
+}
 
 
 def _safe_load_yaml(path: Path) -> dict[str, Any]:
@@ -39,9 +42,7 @@ def _safe_load_yaml(path: Path) -> dict[str, Any]:
 
 
 def contains_tutorial_debug_keyword(*texts: Any) -> bool:
-    """배포 빌드에서는 디버그 우회 키워드를 비활성화한다."""
-    if not _DEBUG_KEYWORDS:
-        return False
+    """튜토리얼 디버그 우회 키워드(정확 일치) 여부를 반환한다."""
     for raw in texts:
         text = str(raw or "").strip().lower()
         if not text:

@@ -162,6 +162,7 @@ class CharacterOverlay:
         on_reload_ollama_models: Callable[[], None] | None = None,
         on_settings: Callable[[], None] | None = None,
         on_restart: Callable[[], None] | None = None,
+        on_history: Callable[[], None] | None = None,
     ):
         self.root = root
         self.on_activate = on_activate
@@ -174,6 +175,7 @@ class CharacterOverlay:
         self.on_reload_ollama_models = on_reload_ollama_models
         self.on_settings = on_settings
         self.on_restart = on_restart
+        self.on_history = on_history
 
         self.root.overrideredirect(True)
         self.root.attributes("-topmost", True)
@@ -270,6 +272,7 @@ class CharacterOverlay:
 
         self._context_menu = tk.Menu(self.root, tearoff=0)
         self._context_menu.add_command(label="채팅 열기/닫기", command=self._invoke_activate)
+        self._context_menu.add_command(label="대화 기록 보기", command=self._invoke_history)
 
         self._provider_menu = tk.Menu(self._context_menu, tearoff=0)
         self._claude_submenu = tk.Menu(self._provider_menu, tearoff=0)
@@ -492,6 +495,15 @@ class CharacterOverlay:
             return
         try:
             self.on_settings()
+        except Exception:
+            self._log_overlay_exception()
+
+    def _invoke_history(self):
+        self._dismiss_context_menu()
+        if self.on_history is None:
+            return
+        try:
+            self.on_history()
         except Exception:
             self._log_overlay_exception()
 

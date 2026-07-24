@@ -15,6 +15,7 @@ sys.path.insert(0, str(_ROOT))
 
 from core.storage.db import initialize_db
 from core.graph.knowledge import get_kg
+from core.graph.knowledge.knowledge_graph import iter_wiki_md_files
 
 
 def sync(vault_path: Path, verbose: bool = False):
@@ -26,7 +27,7 @@ def sync(vault_path: Path, verbose: bool = False):
     initialize_db()
     kg = get_kg()
 
-    md_files = [f for f in docs_dir.rglob("*.md") if "_templates" not in f.parts]
+    md_files = list(iter_wiki_md_files(docs_dir))
     print(f"🔍 {len(md_files)}개 마크다운 파일 발견: {docs_dir}")
 
     synced, skipped = 0, 0
@@ -45,6 +46,10 @@ def sync(vault_path: Path, verbose: bool = False):
 
     print("🔗 wikilink 엣지 재구성 중...")
     kg.resolve_links(docs_dir)
+
+    pruned = kg.prune_missing(docs_dir)
+    if pruned:
+        print(f"🗑️  고아 노드 정리: {len(pruned)}개 ({', '.join(pruned)})")
 
     # 통계
     from core.storage.db import get_connection

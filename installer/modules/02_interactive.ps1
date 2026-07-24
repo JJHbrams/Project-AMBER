@@ -28,19 +28,73 @@ if ((Test-Path $OverlayUserConfigPath) -and $PythonExe) {
     }
 }
 
+# ── 기존 설정 재사용 판단 (TUI 스킵) ──────────────────────────
+# 재설치처럼 기존 값이 이미 다 있으면 화살표선택/Read-Host를 매번 다시
+# 태우지 않고 조용히 재사용한다. -Reconfigure를 주면 항상 TUI를 다시 띄운다.
+$ProviderAvailability = @{
+    "copilot" = ($null -ne $CopilotCmdDetected)
+    "gemini" = ($null -ne $GeminiCmdDetected)
+    "claude-code" = ($null -ne $ClaudeCliCmdDetected)
+    "claude-code-ollama" = (($null -ne $ClaudeCliCmdDetected) -and ($null -ne $OllamaCmdDetected))
+    "ollama" = ($null -ne $OllamaCmdDetected)
+}
+$_needsOllamaModel = $ExistingCliProvider -in @("claude-code-ollama", "ollama")
+$_hasCompleteExisting = $ExistingDbDir -and $ExistingWorkDir -and $ExistingCliProvider -and (-not $_needsOllamaModel -or $ExistingOllamaModel)
+
+if ($_hasCompleteExisting -and -not $Reconfigure) {
+    $DbDir = $ExistingDbDir
+    $WorkDir = $ExistingWorkDir
+    $McpSharedCommand = "python"
+    $McpSharedArgs = @("mcp_server.py")
+    $SelectedCliProvider = $ExistingCliProvider
+    $SelectedOllamaModel = $ExistingOllamaModel
+    $DefaultCliProvider = Resolve-AvailableCliProvider $SelectedCliProvider $ProviderAvailability
+    $_existingStartupLink = Join-Path ([Environment]::GetFolderPath("Startup")) "engram-overlay.lnk"
+    $EnableAutoStart = Test-Path $_existingStartupLink
+
+    Write-Host "  [설정] 기존 설정 재사용 (재설정하려면 .\install.ps1 -Reconfigure)" -ForegroundColor DarkCyan
+    $_summary = $DefaultCliProvider
+    if ($SelectedOllamaModel) { $_summary += " (ollama: $SelectedOllamaModel)" }
+    Write-Ok "CLI provider: $_summary | DB: $DbDir | 자동시작: $(if ($EnableAutoStart) { '활성화' } else { '비활성화' })"
+    Write-Host ""
+    return
+}
+
 # ── DB 경로 ────────────────────────────────────────────────
 $DbDefault = if ($ExistingDbDir) { $ExistingDbDir } else { $DefaultDbDir }
 Write-Host "  [설정] DB 경로 — engram 데이터 저장 위치" -ForegroundColor White
 Write-Host "         기본값: $DbDefault" -ForegroundColor DarkGray
-$DbInput = Read-Host "  DB 경로 (Enter = 기본값)"
+$DbInput = Read-HostOrDefault "  DB 경로 (Enter = 기본값)" ""
 $DbDir = if ($DbInput.Trim()) { $DbInput.Trim() } else { $DbDefault }
 
 # ── 작업 디렉토리 ─────────────────────────────────────────
 $WdDefault = $ProjectRoot
+if ($ExistingWorkDir) {
+    $sameAsProjectRoot = [string]::Equals($ExistingWorkDir, $ProjectRoot, [System.StringComparison]::OrdinalIgnoreCase)
+    $existingWorkDirExists = Test-Path -Path $ExistingWorkDir -PathType Container
+    $existingLooksLikeEngramRoot = $false
+
+    if ($existingWorkDirExists) {
+        $existingInstaller = Join-Path $ExistingWorkDir "installer\install.ps1"
+        $existingMcpServer = Join-Path $ExistingWorkDir "mcp_server.py"
+        $existingLooksLikeEngramRoot = (Test-Path $existingInstaller) -and (Test-Path $existingMcpServer)
+    }
+
+    if ($sameAsProjectRoot -or (-not $existingLooksLikeEngramRoot -and $existingWorkDirExists)) {
+        $WdDefault = $ExistingWorkDir
+    } elseif (-not $existingWorkDirExists) {
+        Write-Warn "기존 작업 디렉토리를 찾을 수 없어 현재 배포 루트를 기본값으로 사용합니다."
+        Write-Host "         현재 루트: $ProjectRoot" -ForegroundColor DarkGray
+    } else {
+        Write-Warn "기존 작업 디렉토리가 다른 Engram repo를 가리켜 현재 배포 루트를 기본값으로 사용합니다."
+        Write-Host "         기존값: $ExistingWorkDir" -ForegroundColor DarkGray
+        Write-Host "         현재 루트: $ProjectRoot" -ForegroundColor DarkGray
+    }
+}
 Write-Host ""
 Write-Host "  [설정] 작업 디렉토리 — engram 실행 시 자동 이동할 경로" -ForegroundColor White
 Write-Host "         기본값: $WdDefault" -ForegroundColor DarkGray
-$WdInput = Read-Host "  작업 디렉토리 (Enter = 기본값)"
+$WdInput = Read-HostOrDefault "  작업 디렉토리 (Enter = 기본값)" ""
 $WorkDir = if ($WdInput.Trim()) { $WdInput.Trim() } else { $WdDefault }
 
 # ── MCP 인터프리터 (안내) ──────────────────────────────────
@@ -53,13 +107,7 @@ Write-Host "         기본값: $McpInterpDefault" -ForegroundColor DarkGray
 Write-Host "         Python 환경 구성 결과에 따라 자동으로 설정됩니다." -ForegroundColor DarkGray
 
 # ── CLI provider 선택 ─────────────────────────────────────
-$ProviderAvailability = @{
-    "copilot" = ($null -ne $CopilotCmdDetected)
-    "gemini" = ($null -ne $GeminiCmdDetected)
-    "claude-code" = ($null -ne $ClaudeCliCmdDetected)
-    "claude-code-ollama" = (($null -ne $ClaudeCliCmdDetected) -and ($null -ne $OllamaCmdDetected))
-    "ollama" = ($null -ne $OllamaCmdDetected)
-}
+# $ProviderAvailability는 위 "기존 설정 재사용 판단" 단계에서 이미 계산됨.
 $CliProviderDefault = Resolve-AvailableCliProvider $ExistingCliProvider $ProviderAvailability
 Write-Host ""
 Write-Host "  [설정] 기본 CLI 서비스 — 오버레이에서 기본으로 사용할 provider" -ForegroundColor White

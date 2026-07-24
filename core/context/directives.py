@@ -12,65 +12,25 @@ from core.config.runtime_config import get_cfg_value
 from core.storage.db import get_connection
 from core.common.sanitizer import sanitize
 
+
 # ── 트리거 키워드 매핑 ────────────────────────────────────────────────────────
 _TRIGGER_KEYWORDS: dict[str, list[str]] = {
     "wiki": [
-        "wiki",
-        "문서",
-        "노트",
-        "작성",
-        "기록",
-        "저장",
-        "vault",
-        "kg_add",
-        "kg_update",
-        "kg_read",
-        "위키",
-        "정리",
+        "wiki", "문서", "노트", "작성", "기록", "저장", "vault",
+        "kg_add", "kg_update", "kg_read", "위키", "정리",
     ],
     "code": [
-        "코드",
-        "수정",
-        "구현",
-        "버그",
-        "디버깅",
-        "리팩토링",
-        "파일",
-        "함수",
-        "클래스",
-        "모듈",
-        "import",
-        "fix",
-        "refactor",
-        "구현",
-        "작성",
-        "빌드",
-        "테스트",
+        "코드", "수정", "구현", "버그", "디버깅", "리팩토링", "파일",
+        "함수", "클래스", "모듈", "import", "fix", "refactor", "구현",
+        "작성", "빌드", "테스트",
     ],
     "git": [
-        "git",
-        "커밋",
-        "commit",
-        "브랜치",
-        "branch",
-        "push",
-        "merge",
-        "pr",
-        "풀리퀘",
-        "rebase",
-        "checkout",
+        "git", "커밋", "commit", "브랜치", "branch", "push", "merge",
+        "pr", "풀리퀘", "rebase", "checkout",
     ],
     "reflection": [
-        "reflect",
-        "/reflect",
-        "반성",
-        "세션",
-        "close_session",
-        "피드백",
-        "종료",
-        "정리",
-        "끝",
-        "수고",
+        "reflect", "/reflect", "반성", "세션", "close_session",
+        "피드백", "종료", "정리", "끝", "수고",
     ],
 }
 
@@ -155,9 +115,11 @@ def get_directives(
     """
     conn = get_connection()
     if include_inactive:
-        rows = conn.execute("""SELECT key, content, source, scope, priority, active, trigger_type, created_at, updated_at
+        rows = conn.execute(
+            """SELECT key, content, source, scope, priority, active, trigger_type, created_at, updated_at
                FROM directives
-               ORDER BY priority DESC, created_at ASC""").fetchall()
+               ORDER BY priority DESC, created_at ASC"""
+        ).fetchall()
         conn.close()
         return [dict(r) for r in rows]
 
@@ -182,7 +144,11 @@ def get_directives(
         pinned_keys: set[str] = set()
         if enforcement_mode == "hybrid":
             pin_top_n = _directive_pin_top_n()
-            pinned_keys = {str(d.get("key", "")).strip() for d in directives[:pin_top_n] if str(d.get("key", "")).strip()}
+            pinned_keys = {
+                str(d.get("key", "")).strip()
+                for d in directives[:pin_top_n]
+                if str(d.get("key", "")).strip()
+            }
 
         result = []
         for d in directives:
@@ -231,7 +197,9 @@ def update_directive(
 
     conn = get_connection()
     with conn:
-        cursor = conn.execute(f"UPDATE directives SET {', '.join(updates)} WHERE key = ?", params)
+        cursor = conn.execute(
+            f"UPDATE directives SET {', '.join(updates)} WHERE key = ?", params
+        )
     conn.close()
     return cursor.rowcount > 0
 
@@ -255,8 +223,11 @@ def render_directives_prompt(caller: str = "all", user_query: str = "") -> str:
     lines = []
     if enforcement_mode in {"hybrid", "always"}:
         header = "[지침|강제]"
-        lines.append("아래 지침은 상위 운영 규칙이다. 충돌 시 지침을 우선하고, 실행 불가 시 이유를 먼저 설명할 것.")
+        lines.append(
+            "아래 지침은 상위 운영 규칙이다. 충돌 시 지침을 우선하고, 실행 불가 시 이유를 먼저 설명할 것."
+        )
     for d in directives:
         scope_tag = f" [{d['scope']}]" if d["scope"] != "all" else ""
         lines.append(f"• {d['content']}{scope_tag}")
     return header + "\n" + "\n".join(lines)
+

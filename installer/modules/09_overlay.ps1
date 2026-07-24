@@ -7,6 +7,12 @@ Write-Step "Overlay build..."
 $DistExe = Join-Path $ProjectRoot "dist\engram-overlay\engram-overlay.exe"
 $specFile = Join-Path $ProjectRoot "engram-overlay.spec"
 
+# 실행 중인 overlay 를 먼저 종료한다 — 빌드 여부와 무관하게 항상.
+#   - 빌드 시: PyInstaller COLLECT 가 dist 를 삭제하려면 exe 핸들이 풀려야 함
+#   - 빌드 스킵 시: install 마지막의 auto-launch 가 최신 exe 로 재기동하려면
+#     old 인스턴스가 먼저 죽어야 함(단일 인스턴스 가드가 없어 안 죽이면 자동갱신 실패)
+Stop-EngramOverlay | Out-Null
+
 if (-not (Test-Path $specFile)) {
     Write-Warn "Spec not found — skipping overlay build"
 } elseif ($OverlayBuildMode -eq "skip") {
@@ -23,25 +29,7 @@ if (-not (Test-Path $specFile)) {
     } else {
         Write-Step "Building overlay exe... ($($buildDecision.Reason))"
 
-        # PyInstaller COLLECT는 항상 dist 폴더를 먼저 삭제 시도하므로
-        # 빌드 전에 overlay 및 모든 engram 자식 프로세스(python.exe)를 종료해야 한다.
-        $overlayProcs = Get-Process -Name "engram-overlay" -ErrorAction SilentlyContinue
-        if ($overlayProcs) {
-            Write-Warn "실행 중인 engram-overlay 종료 중..."
-            $overlayProcs | Stop-Process -Force
-        }
-        # mcp_server / dashboard / kg_watcher — python.exe 고아 프로세스 정리
-        foreach ($pattern in @("mcp_server.py", "engram_dashboard.py", "kg_watcher.py")) {
-            $procIds = (Get-CimInstance Win32_Process -Filter "Name='python.exe'" -ErrorAction SilentlyContinue |
-                Where-Object { $_.CommandLine -like "*$pattern*" } |
-                Select-Object -ExpandProperty ProcessId)
-            foreach ($procId in $procIds) {
-                try { Stop-Process -Id $procId -Force -ErrorAction SilentlyContinue } catch {}
-            }
-        }
-        # 커널이 핸들을 해제할 때까지 충분히 대기
-        if ($overlayProcs) { Start-Sleep -Seconds 2 }
-
+        # overlay/자식 프로세스 종료는 모듈 진입 시 Stop-EngramOverlay 로 이미 수행됨.
         $buildLog = Join-Path $env:TEMP "engram_pyinstaller_build.log"
         $attemptCleanBuild = ($OverlayBuildMode -eq "clean")
         $cleanRetried = $false

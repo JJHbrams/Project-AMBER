@@ -27,6 +27,11 @@ overlay:
   char_margin_x: 20
   char_margin_y: 60
 
+  # 채팅 UI 모드
+  # - tui: 기존 Windows Terminal(wt) 스폰 방식
+  # - bubble: 캐릭터 옆 말풍선 대화창 (실험적, 미구현 — 선택 시 tui로 폴백)
+  chat_mode: "tui"
+
   # 단축키
   hotkey: "alt+f12"
 
@@ -49,6 +54,50 @@ terminal:
   # 동적 폰트 크기 (WT engram 프로필에 적용)
   base_font_size: 8 # 1080p 기준 폰트 크기
   ref_screen_height: 1080 # 기준 해상도 높이
+
+bubble:
+  # 말풍선 모드(chat_mode: bubble)의 도구 사용 권한 수준
+  # - auto: 전부 자동 승인, 승인 풍선 없음 (기본값 — 말풍선 모드는 가볍게 쓰는 게 목적)
+  # - confirm_risky: 조회성 도구(Read/Grep/engram_* 조회류 등)는 자동 승인, 쓰기/실행류만 승인 풍선으로 확인
+  # - confirm_always: 모든 도구 호출마다 승인 풍선으로 확인
+  permission_level: "auto"
+
+  # 대화/입력 풍선은 캐릭터 위가 아니라 옆(화면 중심 반대쪽)에 배치된다.
+  # side_gap: 캐릭터와의 좌우 간격(px). anchor_y_ratio: 캐릭터 상단에서 이 비율만큼
+  # 내려온 지점에 풍선의 세로 중심을 맞춤(캐릭터 폭/높이 기준 비율 — terminal 섹션과
+  # 같은 의미론이지만 x축은 이제 비율이 아니라 고정 간격을 쓴다).
+  side_gap: 10
+  anchor_y_ratio: 0.30
+
+  # 크기 — 기본 폭은 모니터 비율이 아니라 캐릭터(오버레이 이미지) 폭 기준.
+  # 사용자가 각 풍선 우하단 grip을 드래그해서 직접 조절할 수도 있음(그 이후엔 override 유지).
+  width_to_char_ratio: 2.6 # 대화/생각/입력창 기본 폭 = char_w * 이 값
+  min_width: 160 # px
+
+  # 글꼴/폰트 크기 (설정 창의 "말풍선" 탭에서 조절 가능)
+  font_family: "Noto Sans KR Medium" # 대화/생각/입력 풍선 본문 글꼴
+  # font_size: 0 이면 자동 — terminal.base_font_size/ref_screen_height 기준 TUI 스케일을
+  # 그대로 쓴다(모니터 배율 반영). 양수면 그 크기(px)로 고정한다(모니터 배율 무시).
+  font_size: 0
+
+  # 확장 사고(extended thinking) 토큰 예산 — 생각풍선에 모델의 실제 추론 텍스트를
+  # 보여주기 위함. 0이면 끔(추론 거의 안 하고 "생각 중…" 자리표시자만 뜸). 값이 클수록
+  # 더 깊이 생각하지만 응답이 느려지고 토큰을 더 쓴다. MAX_THINKING_TOKENS env로 전달됨.
+  thinking_tokens: 2000
+
+  # 사용자 메시지 에코 말풍선이 입력창 자리에 유지되는 시간(ms) — 이후 페이드아웃,
+  # 다음 입력이 오면 즉시 교체.
+  echo_dwell_ms: 8000
+
+  # 도구 상태 줄(생각풍선에 병합) 하나가 완료 표시 후 사라지기까지(ms)
+  tool_dwell_ms: 1800
+
+  # 생각풍선에 동시에 보여줄 도구 상태 줄 최대 개수 (FIFO)
+  tool_stack_max: 3
+
+  # 히스토리 패널 기본값
+  history_default_limit: 50
+  history_default_within_minutes: 120
 
 cli:
   # 오버레이에서 스폰할 CLI provider 선택

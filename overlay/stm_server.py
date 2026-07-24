@@ -8,6 +8,7 @@ overlay.exe가 실행 중일 때 localhost:PORT에 바인딩하여
   POST /stm/message                → { session_id, role, content, request_id? } → { status }
   GET  /stm/messages?scope_key=... → [{ role, content }]
   POST /stm/session/close          → { session_id?, scope_key?, summary? } → { status, closed_session_id }
+  POST /bubble/new                 → {} → { status } (말풍선 상주 세션 리셋 = 새 대화 시작)
   GET  /health                     → { status: "ok", pid }
 """
 
@@ -26,6 +27,7 @@ _SEEN_REQUEST_IDS: set[str] = set()
 _SEEN_LOCK = threading.Lock()
 _MAX_SEEN = 1000
 _shutdown_callback: "Optional[callable]" = None
+_new_session_callback: "Optional[callable]" = None
 
 
 def _resolve_open_session_id(session_id: object, scope_key: Optional[str]) -> Optional[int]:
@@ -215,6 +217,15 @@ class _STMHandler(BaseHTTPRequestHandler):
 
                 threading.Thread(target=_shutdown_callback, daemon=True).start()
 
+        elif path == "/bubble/new":
+            # 말풍선 상주 세션 리셋(새 대화 시작) — 응답 후 콜백 트리거.
+            # overlay 재시작 없이 claude_session_id 를 비우고 현재 세션을 종료한다.
+            if _new_session_callback is not None:
+                self._send_json({"status": "ok", "action": "bubble_new_session"})
+                threading.Thread(target=_new_session_callback, daemon=True).start()
+            else:
+                self._send_json({"error": "bubble new session not available"}, 503)
+
         else:
             self._send_json({"error": "not found"}, 404)
 
@@ -222,12 +233,14 @@ class _STMHandler(BaseHTTPRequestHandler):
 class STMServer:
     """overlay.exe 내 상주 STM HTTP 서버."""
 
-    def __init__(self, port: Optional[int] = None, shutdown_callback: "Optional[callable]" = None):
-        global _shutdown_callback
+    def __init__(self, port: Optional[int] = None, shutdown_callback: "Optional[callable]" = None,
+                 new_session_callback: "Optional[callable]" = None):
+        global _shutdown_callback, _new_session_callback
         self._port = port or _get_port()
         self._server: Optional[HTTPServer] = None
         self._thread: Optional[threading.Thread] = None
         _shutdown_callback = shutdown_callback
+        _new_session_callback = new_session_callback
 
     def start(self):
         try:

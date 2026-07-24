@@ -97,40 +97,16 @@ print(name.strip())
     $charName = & $PythonExe -c $resolveCharNameScript 2>$null
     $charName = ($charName | Select-Object -Last 1).Trim()
     if ($charName) {
-        $leafName = Split-Path $charName -Leaf
-        $localBaseName = [System.IO.Path]::GetFileNameWithoutExtension($leafName)
-        if (-not $localBaseName) { $localBaseName = $charName }
-
-        $directPathCandidates = @(
-            (Join-Path $CharacterDir "$($localBaseName)_00.png"),
-            (Join-Path $CharacterDir "$($localBaseName)_0.png"),
-            (Join-Path $CharacterDir "$($localBaseName).png"),
-            (Join-Path $CharacterDir $leafName),
-            (Join-Path $ProjectRoot $charName),
-            $charName
+        $candidates = @(
+            (Join-Path $CharacterDir "$($charName)_00.png"),
+            (Join-Path $CharacterDir "$($charName)_0.png"),
+            (Join-Path $CharacterDir "$($charName).png")
         )
-        foreach ($src in $directPathCandidates | Select-Object -Unique) {
-            if ($src -and (Test-Path $src -PathType Leaf)) {
+        foreach ($src in $candidates) {
+            if (Test-Path $src) {
                 Copy-Item $src $OverlayPngPath -Force
                 $syncedChar = $src
                 break
-            }
-        }
-
-        if (-not $syncedChar) {
-            $baseName = [System.IO.Path]::GetFileNameWithoutExtension($leafName)
-            if (-not $baseName) { $baseName = $charName }
-            $namedCandidates = @(
-                (Join-Path $CharacterDir "$($baseName)_00.png"),
-                (Join-Path $CharacterDir "$($baseName)_0.png"),
-                (Join-Path $CharacterDir "$($baseName).png")
-            )
-            foreach ($src in $namedCandidates | Select-Object -Unique) {
-                if (Test-Path $src -PathType Leaf) {
-                    Copy-Item $src $OverlayPngPath -Force
-                    $syncedChar = $src
-                    break
-                }
             }
         }
     }

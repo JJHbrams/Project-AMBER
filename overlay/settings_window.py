@@ -16,13 +16,16 @@ from typing import Callable
 
 import yaml
 
+from overlay.bubble import shapes
 from overlay.config import (
     _ENGRAM_USER_CONFIG_PATH,
     _USER_CONFIG_PATH,
     _safe_load_yaml,
     get_ollama_model,
     load_cfg,
+    normalize_chat_mode,
     normalize_cli_provider,
+    normalize_permission_level,
 )
 from core.identity import set_persona_baseline
 from core.tutorial import complete_tutorial_step, has_user_persona_override, reset_tutorial_state
@@ -48,6 +51,42 @@ _PROVIDER_VALUE_TO_DISPLAY = {
     "claude-code-ollama": "claude-code(ollama)",
     "ollama": "ollama",
 }
+_CHAT_MODE_OPTIONS = ["터미널 (TUI)", "말풍선 (실험적, 준비 중)"]
+_CHAT_MODE_DISPLAY_TO_VALUE = {
+    "터미널 (TUI)": "tui",
+    "말풍선 (실험적, 준비 중)": "bubble",
+}
+_CHAT_MODE_VALUE_TO_DISPLAY = {
+    "tui": "터미널 (TUI)",
+    "bubble": "말풍선 (실험적, 준비 중)",
+}
+
+_PERMISSION_LEVEL_OPTIONS = ["자동 (승인 없음)", "위험한 작업만 확인", "항상 확인"]
+_PERMISSION_LEVEL_DISPLAY_TO_VALUE = {
+    "자동 (승인 없음)": "auto",
+    "위험한 작업만 확인": "confirm_risky",
+    "항상 확인": "confirm_always",
+}
+_PERMISSION_LEVEL_VALUE_TO_DISPLAY = {
+    "auto": "자동 (승인 없음)",
+    "confirm_risky": "위험한 작업만 확인",
+    "confirm_always": "항상 확인",
+}
+_THEME_COLOR_ROWS = [
+    ("speech_bg", "대화풍선 배경"),
+    ("speech_outline", "대화풍선 테두리"),
+    ("speech_fg", "대화풍선 글자"),
+    ("thought_bg", "생각풍선 배경"),
+    ("thought_outline", "생각풍선 테두리"),
+    ("thought_fg", "생각풍선 글자"),
+    ("thought_tool_fg", "도구 상태 글자"),
+    ("input_bg", "입력창 배경"),
+    ("input_outline", "입력창 테두리"),
+    ("tool_bg", "승인풍선 배경"),
+    ("tool_outline", "승인풍선 테두리"),
+    ("tool_fg", "승인풍선 글자"),
+]
+
 _USER_PERSONA_PATH = Path.home() / ".engram" / "persona.user.yaml"
 _PROJECT_PERSONA_PATH = Path(__file__).parent.parent / "config" / "persona.yaml"
 _PERSONA_NUMERIC_FIELDS = ("warmth", "formality", "humor", "directness")
@@ -191,23 +230,40 @@ def _nested_get(d: dict, keys: list[str], default=None):
     return d if d != {} else default
 
 
-def open_settings(root: tk.Tk, on_saved: Callable[[], None] | None = None) -> None:
+def open_settings(
+    root: tk.Tk,
+    on_saved: Callable[[], None] | None = None,
+    on_get_ollama_models: Callable[[], list[str]] | None = None,
+    on_reload_ollama_models: Callable[[], None] | None = None,
+) -> None:
     """설정 창을 열거나 이미 열려 있으면 포커스를 줍니다."""
-    # 이미 열린 창이 있으면 포커스 이동
     for widget in root.winfo_children():
         if isinstance(widget, tk.Toplevel) and getattr(widget, "_is_settings_window", False):
             widget.lift()
             widget.focus_force()
             return
 
-    win = _SettingsWindow(root, on_saved=on_saved)
+    win = _SettingsWindow(
+        root,
+        on_saved=on_saved,
+        on_get_ollama_models=on_get_ollama_models,
+        on_reload_ollama_models=on_reload_ollama_models,
+    )
     win.window.focus_force()
 
 
 class _SettingsWindow:
-    def __init__(self, root: tk.Tk, on_saved: Callable[[], None] | None = None):
+    def __init__(
+        self,
+        root: tk.Tk,
+        on_saved: Callable[[], None] | None = None,
+        on_get_ollama_models: Callable[[], list[str]] | None = None,
+        on_reload_ollama_models: Callable[[], None] | None = None,
+    ):
         self._root = root
         self._on_saved = on_saved
+        self._on_get_ollama_models = on_get_ollama_models
+        self._on_reload_ollama_models = on_reload_ollama_models
         self._toast_after_id: str | None = None
 
         self.window = tk.Toplevel(root)
@@ -259,18 +315,21 @@ class _SettingsWindow:
         self._tab_cli = ttk.Frame(notebook)
         self._tab_persona = ttk.Frame(notebook)
         self._tab_terminal = ttk.Frame(notebook)
+        self._tab_bubble = ttk.Frame(notebook)
         self._tab_global = ttk.Frame(notebook)
 
         notebook.add(self._tab_overlay, text="오버레이")
         notebook.add(self._tab_cli, text="CLI 공급자")
         notebook.add(self._tab_persona, text="페르소나")
         notebook.add(self._tab_terminal, text="터미널")
+        notebook.add(self._tab_bubble, text="말풍선")
         notebook.add(self._tab_global, text="전역")
 
         self._build_overlay_tab(PAD)
         self._build_cli_tab(PAD)
         self._build_persona_tab(PAD)
         self._build_terminal_tab(PAD)
+        self._build_bubble_theme_tab(PAD)
         self._build_global_tab(PAD)
 
         self._save_feedback_var = tk.StringVar(value="")
@@ -323,6 +382,38 @@ class _SettingsWindow:
         ttk.Entry(f, textvariable=self._workdir_var, width=22).grid(row=3, column=1, sticky="ew", **PAD)
         ttk.Button(f, text="찾기...", command=self._browse_workdir).grid(row=3, column=2, **PAD)
 
+        # 채팅 UI 모드
+        ttk.Label(f, text="채팅 UI 모드:").grid(row=4, column=0, sticky="w", **PAD)
+        self._chat_mode_var = tk.StringVar()
+        ttk.Combobox(
+            f,
+            textvariable=self._chat_mode_var,
+            values=_CHAT_MODE_OPTIONS,
+            state="readonly",
+            width=22,
+        ).grid(row=4, column=1, sticky="ew", **PAD)
+        ttk.Label(
+            f,
+            text="말풍선 모드는 아직 미구현이라 선택해도 터미널로 동작합니다.",
+            foreground="gray",
+        ).grid(row=5, column=0, columnspan=3, sticky="w", padx=8, pady=(0, 4))
+
+        # 말풍선 모드 권한 수준
+        ttk.Label(f, text="말풍선 권한 수준:").grid(row=6, column=0, sticky="w", **PAD)
+        self._permission_level_var = tk.StringVar()
+        ttk.Combobox(
+            f,
+            textvariable=self._permission_level_var,
+            values=_PERMISSION_LEVEL_OPTIONS,
+            state="readonly",
+            width=22,
+        ).grid(row=6, column=1, sticky="ew", **PAD)
+        ttk.Label(
+            f,
+            text="말풍선 모드에서 도구 사용을 얼마나 자동으로 승인할지 (기본: 자동).",
+            foreground="gray",
+        ).grid(row=7, column=0, columnspan=3, sticky="w", padx=8, pady=(0, 4))
+
         f.columnconfigure(1, weight=1)
 
     def _build_cli_tab(self, PAD: dict):
@@ -337,7 +428,12 @@ class _SettingsWindow:
         # Ollama 모델
         ttk.Label(f, text="Ollama 모델:").grid(row=1, column=0, sticky="w", **PAD)
         self._ollama_model_var = tk.StringVar()
-        ttk.Entry(f, textvariable=self._ollama_model_var, width=22).grid(row=1, column=1, sticky="ew", **PAD)
+        model_frame = ttk.Frame(f)
+        model_frame.grid(row=1, column=1, sticky="ew", **PAD)
+        model_frame.columnconfigure(0, weight=1)
+        self._ollama_model_combo = ttk.Combobox(model_frame, textvariable=self._ollama_model_var, width=19)
+        self._ollama_model_combo.grid(row=0, column=0, sticky="ew")
+        ttk.Button(model_frame, text="↻", width=3, command=self._refresh_ollama_models).grid(row=0, column=1, padx=(4, 0))
 
         # Ollama 명령어
         ttk.Label(f, text="Ollama 명령어:").grid(row=2, column=0, sticky="w", **PAD)
@@ -364,6 +460,20 @@ class _SettingsWindow:
         )
 
         f.columnconfigure(1, weight=1)
+
+    def _refresh_ollama_models(self) -> None:
+        """Ollama 백엔드에서 모델 목록을 새로고침하고 Combobox를 업데이트한다."""
+        if self._on_reload_ollama_models:
+            self._on_reload_ollama_models()
+        # 새로고침 후 잠시 뒤 목록 반영 (백그라운드 로드 완료 대기)
+        self.window.after(1500, self._update_ollama_model_combo)
+
+    def _update_ollama_model_combo(self) -> None:
+        models = self._on_get_ollama_models() if self._on_get_ollama_models else []
+        current = self._ollama_model_var.get()
+        self._ollama_model_combo["values"] = models
+        if models and current not in models:
+            self._ollama_model_combo.set(models[0])
 
     @staticmethod
     def _make_resizable_text(parent, height: int = 3):
@@ -540,6 +650,144 @@ class _SettingsWindow:
 
         f.columnconfigure(1, weight=1)
 
+    def _build_bubble_theme_tab(self, PAD: dict):
+        import tkinter.font as tkfont
+
+        f = self._tab_bubble
+        self._theme_vars: dict[str, tk.StringVar] = {}
+        self._theme_swatches: dict[str, tk.Button] = {}
+
+        ttk.Label(
+            f,
+            text="말풍선 모드(실험적)의 글꼴과 색상 테마 — 저장하면 실행 중인 오버레이에 바로 반영됩니다.",
+            foreground="gray",
+        ).grid(row=0, column=0, columnspan=3, sticky="w", padx=8, pady=(4, 8))
+
+        # 글꼴 — @로 시작하는 세로쓰기 변형 제외, 중복 제거 후 정렬.
+        families = sorted({fam for fam in tkfont.families() if not fam.startswith("@")})
+        ttk.Label(f, text="글꼴:").grid(row=1, column=0, sticky="w", **PAD)
+        self._bubble_font_var = tk.StringVar()
+        font_combo = ttk.Combobox(f, textvariable=self._bubble_font_var, values=families, width=28, state="readonly")
+        font_combo.grid(row=1, column=1, columnspan=2, sticky="w", **PAD)
+        font_combo.bind("<<ComboboxSelected>>", self._update_font_preview)
+
+        # 폰트 크기 — 0이면 자동(TUI 스케일). 양수면 고정 px.
+        ttk.Label(f, text="폰트 크기:").grid(row=2, column=0, sticky="w", **PAD)
+        size_frame = ttk.Frame(f)
+        size_frame.grid(row=2, column=1, columnspan=2, sticky="w", **PAD)
+        self._bubble_font_size_var = tk.IntVar()
+        ttk.Spinbox(
+            size_frame, textvariable=self._bubble_font_size_var, from_=0, to=48, width=6,
+            command=self._update_font_preview,
+        ).pack(side="left")
+        ttk.Label(size_frame, text="(0 = 자동)", foreground="gray").pack(side="left", padx=(6, 0))
+        # 스핀박스에 직접 타이핑할 때도 갱신되게 변수 트레이스.
+        self._bubble_font_size_var.trace_add("write", lambda *_: self._update_font_preview())
+
+        # 미리보기 — IDE처럼 실제 글꼴/크기/색으로 샘플 텍스트를 보여준다(저장 전에 확인).
+        ttk.Label(f, text="미리보기:").grid(row=3, column=0, sticky="nw", **PAD)
+        self._font_preview = tk.Label(
+            f, justify="left", anchor="w", relief="solid", bd=1, padx=12, pady=10,
+            text="말풍선 미리보기\n안녕하세요 Hello 0123 가나다라마",
+        )
+        self._font_preview.grid(row=3, column=1, columnspan=2, sticky="we", **PAD)
+
+        for i, (key, label) in enumerate(_THEME_COLOR_ROWS, start=4):
+            self._add_theme_color_row(f, i, label, key, PAD)
+
+        # ── 자동 페이드아웃 — 입력/응답/생각 풍선 각각 on/off + 유지 시간(초) ──
+        fade_row = 4 + len(_THEME_COLOR_ROWS)
+        fade_box = ttk.LabelFrame(f, text="자동 사라짐 (fade-out)")
+        fade_box.grid(row=fade_row, column=0, columnspan=3, sticky="we", padx=8, pady=(10, 4))
+        self._fade_vars: dict[str, tk.BooleanVar] = {}
+        self._fade_secs: dict[str, tk.DoubleVar] = {}
+        for r, (key, label, hint) in enumerate((
+            ("echo", "입력(내 메시지)", "보낸 뒤"),
+            ("speech", "응답", "생성 끝난 뒤"),
+            ("thought", "생각", "응답 끝나면"),
+        )):
+            on_var = tk.BooleanVar()
+            self._fade_vars[key] = on_var
+            ttk.Checkbutton(fade_box, text=label, variable=on_var, width=16).grid(row=r, column=0, sticky="w", padx=8, pady=3)
+            sec_var = tk.DoubleVar()
+            self._fade_secs[key] = sec_var
+            ttk.Label(fade_box, text=hint).grid(row=r, column=1, sticky="e", padx=(8, 2), pady=3)
+            ttk.Spinbox(fade_box, textvariable=sec_var, from_=0.0, to=120.0, increment=0.5, width=6).grid(
+                row=r, column=2, sticky="w", pady=3
+            )
+            ttk.Label(fade_box, text="초 뒤").grid(row=r, column=3, sticky="w", padx=(2, 8), pady=3)
+        fade_box.columnconfigure(1, weight=1)
+
+        f.columnconfigure(1, weight=1)
+
+    def _preview_font_size(self) -> int:
+        try:
+            size = int(self._bubble_font_size_var.get())
+        except (tk.TclError, ValueError):
+            return 11
+        if size > 0:
+            return size
+        # 자동 — 설정 창이 떠 있는 모니터 기준으로 TUI 스케일 폰트 크기를 근사해서 보여준다.
+        try:
+            from overlay.chat_window import terminal_font_size
+
+            tcfg = {
+                "base_font_size": _nested_get(self._cfg, ["terminal", "base_font_size"], 8),
+                "ref_screen_height": _nested_get(self._cfg, ["terminal", "ref_screen_height"], 1080),
+            }
+            x, y = self.window.winfo_x(), self.window.winfo_y()
+            return max(8, round(terminal_font_size(x, y, tcfg)))
+        except Exception:
+            return 12
+
+    def _update_font_preview(self, *_args) -> None:
+        if not hasattr(self, "_font_preview"):
+            return
+        fam = self._bubble_font_var.get() or "Noto Sans KR Medium"
+        size = self._preview_font_size()
+        bg = (self._theme_vars.get("speech_bg").get() if self._theme_vars.get("speech_bg") else "") or shapes.DEFAULT_THEME["speech_bg"]
+        fg = (self._theme_vars.get("speech_fg").get() if self._theme_vars.get("speech_fg") else "") or shapes.DEFAULT_THEME["speech_fg"]
+        try:
+            self._font_preview.config(font=(fam, size), bg=bg, fg=fg)
+        except tk.TclError:
+            pass
+
+    def _add_theme_color_row(self, parent, row: int, label: str, key: str, PAD: dict):
+        ttk.Label(parent, text=f"{label}:").grid(row=row, column=0, sticky="w", **PAD)
+        var = tk.StringVar()
+        self._theme_vars[key] = var
+        swatch = tk.Button(parent, width=10, command=lambda k=key: self._pick_theme_color(k))
+        swatch.grid(row=row, column=1, sticky="w", **PAD)
+        self._theme_swatches[key] = swatch
+        ttk.Button(
+            parent, text="기본값", width=6, command=lambda k=key: self._reset_theme_color(k)
+        ).grid(row=row, column=2, sticky="w", **PAD)
+
+    def _pick_theme_color(self, key: str) -> None:
+        current = self._theme_vars[key].get() or shapes.DEFAULT_THEME[key]
+        try:
+            _rgb, hex_color = colorchooser.askcolor(color=current, parent=self.window, title="색상 선택")
+        except tk.TclError:
+            _rgb, hex_color = colorchooser.askcolor(parent=self.window, title="색상 선택")
+        if hex_color:
+            self._theme_vars[key].set(hex_color)
+            self._update_theme_swatch(key)
+
+    def _reset_theme_color(self, key: str) -> None:
+        self._theme_vars[key].set(shapes.DEFAULT_THEME[key])
+        self._update_theme_swatch(key)
+
+    def _update_theme_swatch(self, key: str) -> None:
+        color = self._theme_vars[key].get() or shapes.DEFAULT_THEME[key]
+        btn = self._theme_swatches[key]
+        try:
+            btn.config(bg=color, activebackground=color, text=color)
+        except tk.TclError:
+            pass
+        # speech 색을 바꾸면 미리보기도 그 색으로 갱신(글꼴 미리보기가 실제 말풍선 색을 반영).
+        if key in ("speech_bg", "speech_fg"):
+            self._update_font_preview()
+
     def _build_global_tab(self, PAD: dict):
         f = self._tab_global
 
@@ -625,12 +873,21 @@ class _SettingsWindow:
             workdir = str(self._engram_user_cfg.get("workdir") or "")
         self._workdir_var.set(str(workdir))
 
+        chat_mode = normalize_chat_mode(_nested_get(cfg, ["overlay", "chat_mode"], "tui"))
+        self._chat_mode_var.set(_CHAT_MODE_VALUE_TO_DISPLAY.get(chat_mode, _CHAT_MODE_OPTIONS[0]))
+
+        permission_level = normalize_permission_level(_nested_get(cfg, ["bubble", "permission_level"], "auto"))
+        self._permission_level_var.set(_PERMISSION_LEVEL_VALUE_TO_DISPLAY.get(permission_level, _PERMISSION_LEVEL_OPTIONS[0]))
+
         # CLI 탭
         provider = normalize_cli_provider(_nested_get(cfg, ["cli", "provider"], "copilot"))
         self._provider_var.set(_PROVIDER_VALUE_TO_DISPLAY.get(provider, provider))
 
         ollama_model = get_ollama_model(cfg)
         self._ollama_model_var.set(ollama_model)
+        if self._on_get_ollama_models:
+            models = self._on_get_ollama_models()
+            self._ollama_model_combo["values"] = models
 
         ollama_cmd = _nested_get(cfg, ["cli", "ollama_command"], "ollama")
         self._ollama_cmd_var.set(str(ollama_cmd or "ollama"))
@@ -652,6 +909,23 @@ class _SettingsWindow:
         t_height = _nested_get(cfg, ["terminal", "height_ratio"], 0.60)
         self._term_height_var.set(float(t_height))
         self._theight_label.config(text=f"{float(t_height):.2f}")
+
+        # 말풍선 탭 — 글꼴/폰트 크기
+        self._bubble_font_var.set(_nested_get(cfg, ["bubble", "font_family"], "Noto Sans KR Medium"))
+        self._bubble_font_size_var.set(int(_nested_get(cfg, ["bubble", "font_size"], 0) or 0))
+
+        # 말풍선 탭 — 자동 페이드아웃 (ms → 초 표시)
+        for key, dflt_on, dflt_ms in (("echo", True, 8000), ("speech", True, 20000), ("thought", True, 0)):
+            self._fade_vars[key].set(bool(_nested_get(cfg, ["bubble", f"{key}_fade"], dflt_on)))
+            ms = int(_nested_get(cfg, ["bubble", f"{key}_dwell_ms"], dflt_ms) or 0)
+            self._fade_secs[key].set(round(ms / 1000, 1))
+
+        # 말풍선 탭 — 색상 테마
+        for key, default in shapes.DEFAULT_THEME.items():
+            value = _nested_get(cfg, ["bubble", "theme", key], default)
+            self._theme_vars[key].set(str(value))
+            self._update_theme_swatch(key)
+        self._update_font_preview()  # 로드된 글꼴/크기/색으로 미리보기 초기화
 
         # 전역 탭
         self._autostart_var.set(_is_autostart_enabled())
@@ -865,6 +1139,14 @@ class _SettingsWindow:
         workdir = self._workdir_var.get().strip()
         _nested_set(user, ["cli", "workdir"], workdir or None)
 
+        chat_mode_display = self._chat_mode_var.get().strip()
+        chat_mode = _CHAT_MODE_DISPLAY_TO_VALUE.get(chat_mode_display, "tui")
+        _nested_set(user, ["overlay", "chat_mode"], None if chat_mode == "tui" else chat_mode)
+
+        permission_level_display = self._permission_level_var.get().strip()
+        permission_level = _PERMISSION_LEVEL_DISPLAY_TO_VALUE.get(permission_level_display, "auto")
+        _nested_set(user, ["bubble", "permission_level"], None if permission_level == "auto" else permission_level)
+
         # ── CLI 탭 ──
         provider = self._provider_var.get().strip()
         provider_value = _PROVIDER_DISPLAY_TO_VALUE.get(provider, provider)
@@ -902,6 +1184,30 @@ class _SettingsWindow:
         default_th = _nested_get(self._cfg, ["terminal", "height_ratio"], 0.60)
         if abs(t_height - float(default_th)) > 0.005:
             _nested_set(user, ["terminal", "height_ratio"], t_height)
+
+        # ── 말풍선 탭 — 글꼴/폰트 크기 (기본값이면 저장 안 함) ──
+        fam = (self._bubble_font_var.get() or "").strip()
+        _nested_set(user, ["bubble", "font_family"], None if (not fam or fam == "Noto Sans KR Medium") else fam)
+        try:
+            fsize = int(self._bubble_font_size_var.get())
+        except (tk.TclError, ValueError):
+            fsize = 0
+        _nested_set(user, ["bubble", "font_size"], None if fsize <= 0 else fsize)
+
+        # ── 말풍선 탭 — 자동 페이드아웃 (기본값이면 저장 안 함) ──
+        for key, dflt_on, dflt_ms in (("echo", True, 8000), ("speech", True, 20000), ("thought", True, 0)):
+            on = bool(self._fade_vars[key].get())
+            _nested_set(user, ["bubble", f"{key}_fade"], None if on == dflt_on else on)
+            try:
+                ms = int(round(float(self._fade_secs[key].get()) * 1000))
+            except (tk.TclError, ValueError):
+                ms = dflt_ms
+            _nested_set(user, ["bubble", f"{key}_dwell_ms"], None if ms == dflt_ms else ms)
+
+        # ── 말풍선 탭 — 색상 테마 (기본값과 같으면 저장 안 함) ──
+        for key, default in shapes.DEFAULT_THEME.items():
+            value = self._theme_vars[key].get().strip()
+            _nested_set(user, ["bubble", "theme", key], None if (not value or value == default) else value)
 
         # 파일 쓰기 (overlay.user.yaml)
         _USER_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)

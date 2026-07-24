@@ -322,20 +322,34 @@ def upsert_working_memory(
     safe_summary = sanitize(summary, max_length=summary_max)
     safe_open_intents = sanitize(open_intents, max_length=intents_max)
     ttl_value = ttl_hours if ttl_hours is not None else default_ttl
-    safe_ttl = max(1, min(ttl_value, 24 * 30))
+    # ttl_hours=0 → expires_at=NULL (무기한 보존). 그 외: 1~720시간 클램핑.
+    permanent = ttl_value == 0
 
     conn = get_connection()
     with conn:
-        conn.execute(
-            """INSERT INTO working_memory (scope_key, summary, open_intents, updated_at, expires_at)
-               VALUES (?, ?, ?, datetime('now','localtime'), datetime('now','localtime', ?))
-               ON CONFLICT(scope_key) DO UPDATE SET
-                 summary = excluded.summary,
-                 open_intents = excluded.open_intents,
-                 updated_at = datetime('now','localtime'),
-                 expires_at = excluded.expires_at""",
-            (normalized_scope, safe_summary, safe_open_intents, f"+{safe_ttl} hours"),
-        )
+        if permanent:
+            conn.execute(
+                """INSERT INTO working_memory (scope_key, summary, open_intents, updated_at, expires_at)
+                   VALUES (?, ?, ?, datetime('now','localtime'), NULL)
+                   ON CONFLICT(scope_key) DO UPDATE SET
+                     summary = excluded.summary,
+                     open_intents = excluded.open_intents,
+                     updated_at = datetime('now','localtime'),
+                     expires_at = NULL""",
+                (normalized_scope, safe_summary, safe_open_intents),
+            )
+        else:
+            safe_ttl = max(1, min(ttl_value, 24 * 30))
+            conn.execute(
+                """INSERT INTO working_memory (scope_key, summary, open_intents, updated_at, expires_at)
+                   VALUES (?, ?, ?, datetime('now','localtime'), datetime('now','localtime', ?))
+                   ON CONFLICT(scope_key) DO UPDATE SET
+                     summary = excluded.summary,
+                     open_intents = excluded.open_intents,
+                     updated_at = datetime('now','localtime'),
+                     expires_at = excluded.expires_at""",
+                (normalized_scope, safe_summary, safe_open_intents, f"+{safe_ttl} hours"),
+            )
         conn.execute("DELETE FROM working_memory WHERE expires_at IS NOT NULL AND expires_at <= datetime('now','localtime')")
     conn.close()
 

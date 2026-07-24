@@ -1,5 +1,53 @@
 # Release Notes
 
+## 2026-07-24 - v0.1.1: One-Shot Native Installer, Offline Model, and Stability Fixes
+
+### Highlights
+
+- **One-shot native Windows installer (`EngramOverlay_0.1.1_x64-setup.exe`)** — double-click,
+  GUI wizard (DB path / CLI provider / Ollama model / identity / autostart), and done.
+  **No conda required on the user machine** — the backend runs inside the frozen binary.
+- **Offline embedding model bundled** — `paraphrase-multilingual-MiniLM-L12-v2` (Apache-2.0) is
+  packaged into the distribution, removing the HuggingFace download dependency at install/runtime.
+- **Explicit "new session" for bubble chat** — reset the resident Claude session without
+  restarting the overlay.
+- **Reliability fixes** — restored vault→KG auto-sync (kg_sync), and fixed a Windows
+  kg-watcher startup crash.
+
+### What Changed
+
+- `engram-overlay.exe` is now a **multi-call binary**: `--role mcp-server` / `--role kg-watcher`
+  run the backend self-referentially, so `mcp_server` / `kg_watcher` no longer need a separate
+  conda Python (`overlay/main.py`, `engram_overlay_entry.py`, `mcp_server.py`,
+  `scripts/kg/kg_watcher.py`, `engram-overlay.spec`).
+- New installer pipeline: `installer/build-installer.ps1` (PyInstaller freeze → Inno Setup
+  compile → root `setup.exe`), `installer/engram-overlay.iss` (GUI wizard), and
+  `installer/configure.ps1` (install-time config · MCP · shortcuts, pure PowerShell, no conda).
+- Offline model: `engram-overlay.spec` bundles `resource/embedding-model`; the loader prefers
+  the bundled model when frozen (`core/graph/semantic/semantic_graph.py`).
+- Bubble new-session: `POST /bubble/new` on the overlay STM server (`overlay/stm_server.py`,
+  `overlay/main.py`) + `.github/skills/engram-new-session` agent skill.
+- Fixes: `/kg_sync` route awaited an unawaited coroutine (JSON-serialize failure);
+  `kg-watcher` used `os.kill(pid, 0)` (unsafe on Windows) → `OpenProcess`; installer now always
+  relaunches the overlay after install, targets shortcuts at the `.exe` (Pin-to-taskbar),
+  ignores `__pycache__` for rebuild detection, falls back to safe defaults under
+  `-NonInteractive`, and is saved as UTF-8 BOM for PowerShell 5.1.
+
+### Impact
+
+- End users install and run entirely offline after download — no conda setup, no HuggingFace
+  fetch, no scattered TUI prompts.
+- Distribution is a single `setup.exe`; re-running it upgrades in place (config/DB preserved).
+- Overlay auto-sync (wiki→KG) works again; the overlay no longer crashes on kg-watcher startup.
+
+### Files
+
+- engram_overlay_entry.py, overlay/main.py, overlay/stm_server.py, mcp_server.py
+- scripts/kg/kg_watcher.py, core/graph/semantic/semantic_graph.py, engram-overlay.spec
+- installer/build-installer.ps1, installer/configure.ps1, installer/engram-overlay.iss
+- installer/common.ps1, installer/modules/{06_db,07_shims,09_overlay,10_shortcuts}.ps1
+- .github/skills/engram-new-session/SKILL.md, CHANGELOG.md
+
 ## 2026-05-03 - MCP Reconnect Stabilization and Transport Unification
 
 ### Highlights
