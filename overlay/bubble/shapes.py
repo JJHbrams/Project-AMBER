@@ -79,6 +79,11 @@ DEFAULT_THEME = {
     "tool_bg": TOOL_BG,
     "tool_outline": TOOL_OUTLINE,
     "tool_fg": TOOL_FG,
+    # 능동 발화(initiative nudge) — 캐릭터가 스스로 건네는 말. 답변(보라 speech)과
+    # 구분되게 teal 계열 외곽선을 써서 "먼저 말 걸어온 것"임을 한눈에 알린다.
+    "nudge_bg": "#f0faf8",
+    "nudge_outline": TOOL_OUTLINE,
+    "nudge_fg": SPEECH_FG,
 }
 
 _SPINNER_FRAMES = ("●○○", "○●○", "○○●")
@@ -127,6 +132,39 @@ def _measure_plain(text: str, font) -> int:
 
 def _spans_plain_text(spans) -> str:
     return "".join(sp.text for sp in spans)
+
+
+_SCROLLBAR_W = 10  # 스크롤바 너비(px) — 너무 넓으면 말풍선이 좁아 보임
+
+
+def _scrollbar_widget(canvas: tk.Canvas, bg: str = "#444444", trough: str = "#222222") -> tk.Scrollbar:
+    """캔버스 자식으로 스크롤바를 한 번만 만들어 재사용 — _rich_text_widget과 동일한 수명 관리."""
+    sb = getattr(canvas, "_scrollbar_widget", None)
+    if sb is not None:
+        try:
+            if sb.winfo_exists():
+                sb.configure(bg=bg, troughcolor=trough, activebackground=bg)
+                return sb
+        except tk.TclError:
+            pass
+    sb = tk.Scrollbar(canvas, orient="vertical", width=_SCROLLBAR_W,
+                      bg=bg, troughcolor=trough, activebackground=bg,
+                      relief="flat", bd=0)
+    canvas._scrollbar_widget = sb
+    return sb
+
+
+def _hide_scrollbar(canvas: tk.Canvas) -> None:
+    sb = getattr(canvas, "_scrollbar_widget", None)
+    if sb is not None:
+        try:
+            sb.place_forget()
+            # 텍스트 위젯과의 연결도 끊어 마우스휠 스크롤이 남지 않게 한다
+            tw = getattr(canvas, "_rich_text_widget", None)
+            if tw is not None and tw.winfo_exists():
+                tw.configure(yscrollcommand="")
+        except Exception:
+            pass
 
 
 def _rich_text_widget(canvas: tk.Canvas) -> tk.Text:
@@ -745,6 +783,7 @@ def draw_speech_bubble(
     outline: str = SPEECH_OUTLINE,
     fixed_body_w: "int | None" = None,
     grip_corner: str = "top-right",
+    max_body_h: "int | None" = None,
 ) -> tuple[int, int]:
     """fixed_body_w: 사용자가 grip으로 폭을 직접 정한 경우 — 짧은 텍스트라도 그 폭으로
     고정한다(기본은 텍스트에 맞춰 줄어드는 shrink-to-fit).
@@ -768,9 +807,30 @@ def draw_speech_bubble(
     if not used_html:
         body_w, body_h = render_rich_text(canvas, text or " ", max_width, font, fg, bg, outline, CODE_BG, CODE_FG, fixed_body_w)
 
+    needs_scroll = (not used_html) and (max_body_h is not None) and (body_h > max_body_h)
+    if max_body_h is not None:
+        body_h = min(body_h, max_body_h)
+
     total_w, total_h, body_x0, body_y0 = _place_bubble_image(canvas, body_w, body_h, angle_rad, bg, outline, radius=16)
     widget = _html_widget(canvas) if used_html else _rich_text_widget(canvas)
-    widget.place(x=body_x0 + PADDING, y=body_y0 + PADDING, width=body_w - PADDING * 2, height=body_h - PADDING * 2)
+
+    inner_x = body_x0 + PADDING
+    inner_y = body_y0 + PADDING
+    inner_w = body_w - PADDING * 2
+    inner_h = body_h - PADDING * 2
+
+    if needs_scroll:
+        sb = _scrollbar_widget(canvas, bg=outline, trough=bg)
+        text_w = inner_w - _SCROLLBAR_W - 2
+        widget.configure(yscrollcommand=sb.set)
+        sb.configure(command=widget.yview)
+        widget.place(x=inner_x, y=inner_y, width=text_w, height=inner_h)
+        sb.place(x=inner_x + text_w + 2, y=inner_y, width=_SCROLLBAR_W, height=inner_h)
+        sb.lift()
+    else:
+        _hide_scrollbar(canvas)
+        widget.place(x=inner_x, y=inner_y, width=inner_w, height=inner_h)
+
     widget.lift()
     draw_resize_grip(canvas, total_w, total_h, color=outline, corner=grip_corner, margin=TAIL_REACH)
     return total_w, total_h
@@ -809,6 +869,7 @@ def draw_thought_bubble(
     tool_lines: str = "",
     tool_fg: str = THOUGHT_TOOL_FG,
     grip_corner: str = "top-right",
+    max_body_h: "int | None" = None,
 ) -> tuple[int, int]:
     """angle_rad: 몸통 중심 기준 캐릭터가 있는 방향(라디안, 기본값은 위쪽 -90도 —
     캐릭터 머리 바로 위 중앙 배치의 기존 기본 케이스). draw_speech_bubble과 동일하게
@@ -825,6 +886,9 @@ def draw_thought_bubble(
     text_w, text_h = _measure_text(canvas, combined or " ", max_width, font)
     body_w = fixed_body_w if fixed_body_w is not None else max(text_w + PADDING * 2, MIN_BODY_W + 10)
     body_h = max(text_h + PADDING * 2, MIN_BODY_H + 10)
+    needs_scroll = (max_body_h is not None) and (body_h > max_body_h)
+    if max_body_h is not None:
+        body_h = min(body_h, max_body_h)
 
     margin = TAIL_REACH
     body_x0, body_y0 = margin, margin
@@ -852,15 +916,36 @@ def draw_thought_bubble(
         cx += dx * (sz + 4)
         cy += dy * (sz * 0.4 + 4)
 
-    text_x = body_x0 + PADDING
-    ty = body_y0 + PADDING
+    inner_x = body_x0 + PADDING
+    inner_y = body_y0 + PADDING
+    inner_w = body_w - PADDING * 2
+    inner_h = body_h - PADDING * 2
+
+    widget = _rich_text_widget(canvas)
+    widget.configure(state="normal", font=font, bg=bg, fg=fg,
+                     bd=0, highlightthickness=0, relief="flat", cursor="arrow", wrap="word")
+    widget.tag_configure("tool", foreground=tool_fg)
+    widget.delete("1.0", "end")
     if text:
-        canvas.create_text(text_x, ty, text=text, width=max_width, font=font, fill=fg, anchor="nw")
-        if tool_lines:
-            _, seg_h = _measure_text(canvas, text, max_width, font)
-            ty += seg_h + PADDING
+        widget.insert("end", text)
+    if text and tool_lines:
+        widget.insert("end", "\n\n")
     if tool_lines:
-        canvas.create_text(text_x, ty, text=tool_lines, width=max_width, font=font, fill=tool_fg, anchor="nw")
+        widget.insert("end", tool_lines, "tool")
+    widget.configure(state="disabled")
+
+    if needs_scroll:
+        sb = _scrollbar_widget(canvas, bg=outline, trough=bg)
+        tw = inner_w - _SCROLLBAR_W - 2
+        widget.configure(yscrollcommand=sb.set)
+        sb.configure(command=widget.yview)
+        widget.place(x=inner_x, y=inner_y, width=tw, height=inner_h)
+        sb.place(x=inner_x + tw + 2, y=inner_y, width=_SCROLLBAR_W, height=inner_h)
+        sb.lift()
+    else:
+        _hide_scrollbar(canvas)
+        widget.place(x=inner_x, y=inner_y, width=inner_w, height=inner_h)
+    widget.lift()
 
     draw_resize_grip(canvas, int(total_w), int(total_h), color=outline, corner=grip_corner, margin=TAIL_REACH)
     return int(total_w), int(total_h)

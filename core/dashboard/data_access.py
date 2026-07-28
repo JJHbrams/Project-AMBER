@@ -104,7 +104,9 @@ def memory_nodes_edges(show_semantic: bool = True) -> tuple[list[dict], list[dic
         if id_row:
             extra_edges.append({"from": identity_id, "to": nid, "rel_type": "has_directive", "context": r.get("scope", "")})
 
-    for r in query("SELECT * FROM curiosities WHERE status != 'addressed' ORDER BY created_at DESC"):
+    # 그래프에는 미해결(pending)만 — 예전 `!= 'addressed'` 조건은 폐기(dismissed)된
+    # 것까지 통과시켜, 중복으로 쌓였다 정리된 항목이 계속 노드로 남았다.
+    for r in query("SELECT * FROM curiosities WHERE status = 'pending' ORDER BY created_at DESC"):
         nid = f"memory::cur_{r['id']}"
         extra_nodes.append({"id": nid, "title": f"❓ {r.get('topic','')[:35]}", "type": "curiosity", "summary": r.get("reason", ""), "tags": []})
         if id_row:

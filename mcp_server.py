@@ -28,7 +28,7 @@ from core.identity import (
     get_identity,
     update_narrative,
     get_themes,
-    update_themes_from_text,
+    update_themes,
     decay_themes,
     get_persona,
     update_persona,
@@ -1280,11 +1280,15 @@ def engram_get_themes(top_n: int = 10) -> list:
 
 
 @engramMCP.tool()
-def engram_update_themes(text: str) -> dict:
-    """텍스트에서 주제어를 추출하여 테마 가중치를 누적합니다.
-    의미 있는 대화 내용에 대해 호출하세요."""
-    update_themes_from_text(text)
-    return {"status": "themes_updated"}
+def engram_update_themes(themes: list[str]) -> dict:
+    """관심사 테마의 가중치를 누적합니다.
+
+    themes에는 원문 텍스트가 아니라 **의미 단위 관심사 라벨**을 넣으세요.
+    좋은 예: ["기억 연속성", "말풍선 능동성"]
+    나쁜 예: ["완료", "추가", "바탕으로"] — 작업 상태어·조사 붙은 어절은 관심사가 아닙니다.
+    한 번에 최대 5개까지 반영되며, 각 라벨은 20자 내외로 짧게 쓰세요."""
+    applied = update_themes(themes)
+    return {"status": "themes_updated", "applied": applied}
 
 
 # ── Memory ────────────────────────────────────────────────

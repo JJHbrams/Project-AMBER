@@ -64,12 +64,10 @@ class MemoryBusTests(unittest.TestCase):
         )
 
     @patch("core.memory.bus.append_working_memory_hint")
-    @patch("core.memory.bus.update_themes_from_text")
     @patch("core.memory.bus.save_message")
     def test_record_assistant_message_updates_working_memory(
         self,
         mock_save_message,
-        mock_update_themes,
         mock_append_working_memory_hint,
     ):
         session = MemorySession(session_id=9, scope_key="default:main")
@@ -78,12 +76,10 @@ class MemoryBusTests(unittest.TestCase):
             session,
             "reply",
             user_content="question",
-            update_themes=True,
             update_working_memory=True,
         )
 
         mock_save_message.assert_called_once_with(9, "assistant", "reply")
-        mock_update_themes.assert_called_once_with("reply")
         mock_append_working_memory_hint.assert_called_once_with("default:main", "question", "reply")
 
     @patch("core.memory.bus.save_memory")

@@ -12,7 +12,7 @@ from .service import (
     set_persona_baseline,
     update_narrative,
     update_persona,
-    update_themes_from_text,
+    update_themes,
 )
 from .curiosity import (
     add_curiosity,

@@ -75,10 +75,12 @@ class BubbleSessionManager:
         on_session_id: Optional[Callable[[str], None]] = None,
         stm_bridge: Any = None,
         thinking_tokens: int = 0,
+        bootstrap_prompt: Optional[str] = None,
     ):
         self._cwd = cwd
         self._env_overrides = dict(env_overrides or {})
         self._thinking_tokens = int(thinking_tokens or 0)
+        self._bootstrap_prompt = (bootstrap_prompt or "").strip() or None
         self._on_event = on_event or (lambda ev: None)
         self._resume_session_id = resume_session_id
         self._on_session_id = on_session_id
@@ -222,6 +224,11 @@ class BubbleSessionManager:
             extra_args["settings"] = json.dumps(
                 {"skipDangerousModePermissionPrompt": False, "skipAutoPermissionPrompt": False}
             )
+        # auto_inject(session.auto_inject) 가 켜지면 스타일 프롬프트 뒤에 engram 부트스트랩
+        # 지시문을 덧댄다 — 첫 응답 전 get_context_once 를 1회 부르도록 유도(중복은 무해).
+        append_prompt = _BUBBLE_STYLE_PROMPT
+        if self._bootstrap_prompt:
+            append_prompt = f"{_BUBBLE_STYLE_PROMPT}\n\n{self._bootstrap_prompt}"
         return ClaudeCodeOptions(
             resume=self._resume_session_id,
             cwd=self._cwd,
@@ -229,7 +236,7 @@ class BubbleSessionManager:
             permission_mode=self._permission_mode,
             can_use_tool=self._can_use_tool,
             include_partial_messages=True,
-            append_system_prompt=_BUBBLE_STYLE_PROMPT,
+            append_system_prompt=append_prompt,
             extra_args=extra_args,
         )
 

@@ -2,6 +2,56 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.2.1] — 2026-07-28
+
+### Added
+
+- **능동 발화 (initiative)** — 말풍선 모드에서 유휴 시 캐릭터가 스스로 말을 건다.
+  소재: 미완 작업(working memory `open_intents`) · 미해결 호기심 · git 미커밋/미push ·
+  persona 혼잣말. 가드: 유휴 대기 · 최소 간격 · 조용한 시간대 · 소스별 쿨다운 · 무시 백오프.
+  문구는 하이브리드 — 템플릿 폴백 + 격리된 1회성 LLM 프레이징(persona 말투, 상주 세션
+  STM/resume 무오염). 설정창 → 오버레이 탭 "능동 발화" 그룹으로 on/off·빈도 조절
+  (저장 즉시 반영). 기본 꺼짐. (`overlay/bubble/initiative.py` 신규,
+  `config/overlay.yaml` 의 `bubble.initiative`)
+- **클릭으로 마지막 교환 복원** — 캐릭터를 클릭해 입력창을 열 때, 페이드로 사라진 마지막
+  응답(+질문 에코)을 되살린다. 자율발화(teal 단독) vs 사용자 질문(응답+에코)이 색·구성만으로
+  구분됨.
+
+### Changed
+
+- **테마 갱신 방식 전환** — 메시지 원문에서 명사를 추출하던 방식(어절 부스러기 누적)을
+  폐기하고, **세션 종료 시 Claude 판정**으로 의미 단위 관심사 라벨을 갱신한다
+  (`core/graph/semantic/stm_promoter.py`). MCP `engram_update_themes(text)` →
+  `engram_update_themes(themes: list[str])` 로 시그니처 변경, `record_*_message` 의
+  `update_themes` 인자 제거.
+- **curiosity 품질 정리** — 같은 topic 의 pending 중복 방지(`add_curiosity(dedup=True)`),
+  오래 안 다뤄진 pending 자동 폐기(`expire_stale_curiosities`, 기본 14일) 및 처리된 항목
+  정리(`purge_processed_curiosities`, 기본 30일). context 주입 규칙에 "실제로 다뤄서
+  해소되면 `engram_address_curiosity(id)` 로 표시" 명시. 대시보드 그래프는 pending 만 표시.
+
+## [0.2.0] — 2026-07-27
+
+### Added
+
+- **말풍선 최대 높이 제한 + 스크롤** — `speech_max_height_ratio`(기본 0.55) /
+  `thought_max_height_ratio`(기본 0.30) 설정으로 모니터 작업영역 높이 대비 상한을 지정.
+  초과 시 스크롤바 자동 표시. 설정창 → 말풍선 탭에 슬라이더 UI 추가(0 = 무제한).
+- **grip 높이 조절** — 말풍선/생각풍선 코너 grip을 수직 드래그해 최대 높이를 실시간 override.
+  위로 올리면 확장, 아래로 내리면 축소(재시작 전까지 유지).
+- **생각풍선 스크롤** — `canvas.create_text` → `tk.Text` 위젯 전환으로 스크롤 지원.
+- **전역 engram 자동 부트스트랩** (`core/integrations/engram_bootstrap.py` 신규)
+  · 설정 `session.auto_inject` 켜면 `~/.claude/settings.json`에 `SessionStart` hook 자동 등록.
+  · hook이 `engram_get_context_once` 호출 지시문을 세션 컨텍스트에 주입 — 오버레이 바깥의
+    Claude Code 세션(데스크톱 앱 / 순정 CLI)에도 적용.
+  · Bubble 세션도 `append_system_prompt`로 동일 지시문 주입(auto_inject 설정 연동).
+  · 설정 끄면 hook 자동 제거(멱등).
+- **dev-rebuild.ps1** — kill → build → robocopy → restart 원스텝 자동화 빌드 스크립트.
+
+### Fixed
+
+- **PyInstaller Tcl/Tk 번들** — `engram-overlay.spec`에 `_collect_tcl_tk()` 추가로
+  `_tcl_data`/`_tk_data` 리소스 누락 경고 해소.
+
 ## [0.1.1] — 2026-07-24
 
 ### Added

@@ -99,7 +99,10 @@ def _set_last_promoted_ts(scope_key: str) -> None:
             data = json.loads(_PROMOTE_TS_FILE.read_text())
         except Exception:
             pass
-        data[scope_key] = datetime.now().isoformat()
+        # sqlite의 datetime('now','localtime') 포맷과 맞춘다 — ISO 'T' 구분자로
+        # 저장하면 m.timestamp > last_ts 문자열 비교가 같은 날 메시지를 전부
+        # 걸러버린다(' ' < 'T'). fromisoformat은 공백 구분자도 파싱한다.
+        data[scope_key] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         tmp = _PROMOTE_TS_FILE.with_suffix(".tmp")
         tmp.write_text(json.dumps(data))
         os.replace(tmp, _PROMOTE_TS_FILE)
@@ -370,16 +373,93 @@ def maybe_promote_async(scope_key: str = "overlay") -> threading.Thread:
 # 낮으므로, 새 API 키 없이 이미 인증된 claude CLI 세션(OAuth/구독)을 resume해서
 # 재사용 — Claude 품질 판단을 얻으면서 새 키 관리 표면은 늘리지 않는다.
 
+# 같은 호출에서 테마(관심사 라벨)도 함께 받는다 — 모델은 이미 대화 전문을 보고
+# 있으므로 추가 호출 없이 의미 단위 라벨을 얻을 수 있다. 예전엔 정규식으로 한글
+# 명사를 주워 담아 "바탕으로", "완료" 같은 게 관심사 자리에 올라왔다.
 _REFLECTION_EVENT_SCHEMA = {
     "type": "object",
     "properties": {
         "detected": {"type": "boolean"},
         "note": {"type": "string"},
+        "themes": {
+            "type": "array",
+            "items": {"type": "string"},
+            "maxItems": 4,
+        },
+        # 해소된 궁금증 id — 생성만 자동이고 해소는 모델의 자발적 tool 호출에만
+        # 의존하던 비대칭 때문에, 전체 이력에서 addressed가 1건뿐이었다.
+        "addressed_curiosity_ids": {
+            "type": "array",
+            "items": {"type": "integer"},
+        },
     },
-    "required": ["detected", "note"],
+    "required": ["detected", "note", "themes", "addressed_curiosity_ids"],
 }
 
 _REFLECTION_SESSION_FILE = Path.home() / ".engram" / "_reflection_session.json"
+_REFLECT_TS_FILE = Path.home() / ".engram" / "_reflection_ts.json"
+
+# watchdog(죽은 PID마다 1회)과 stm_bridge.close()가 같은 종료에 대해 동시에
+# 들어오는 경우가 있어 프로세스 내 직렬화 — 워터마크 read-modify-write 보호.
+_REFLECT_LOCK = threading.Lock()
+
+
+def _get_last_reflect_ts(scope_key: str) -> Optional[str]:
+    try:
+        data = json.loads(_REFLECT_TS_FILE.read_text())
+        return data.get(scope_key)
+    except Exception:
+        return None
+
+
+def _set_last_reflect_ts(scope_key: str, ts: str) -> None:
+    """마지막으로 판정한 메시지 시각을 기록 (sqlite datetime 포맷 그대로)."""
+    try:
+        data: dict = {}
+        try:
+            data = json.loads(_REFLECT_TS_FILE.read_text())
+        except Exception:
+            pass
+        data[scope_key] = ts
+        _REFLECT_TS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = _REFLECT_TS_FILE.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data))
+        os.replace(tmp, _REFLECT_TS_FILE)
+    except Exception as e:
+        logger.warning("reflection ts 저장 실패: %s", e)
+
+
+def _get_reflectable_messages(scope_key: str, limit: int = _WM_MAX_MESSAGES) -> list[dict]:
+    """마지막 판정 이후에 새로 쌓인 메시지만 반환.
+
+    워터마크가 없으면 같은 대화를 종료 때마다 다시 판정해 동일한 curiosity가
+    반복 생성된다 — 실제로 그 버그로 같은 항목이 17개까지 쌓였다.
+    """
+    last_ts = _get_last_reflect_ts(scope_key)
+    conn = get_connection()
+    try:
+        if last_ts:
+            rows = conn.execute(
+                """SELECT m.role, m.content, m.timestamp
+                   FROM messages m JOIN sessions s ON s.id = m.session_id
+                   WHERE s.scope_key = ? AND m.timestamp > ?
+                   ORDER BY m.timestamp DESC LIMIT ?""",
+                (scope_key, last_ts, limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """SELECT m.role, m.content, m.timestamp
+                   FROM messages m JOIN sessions s ON s.id = m.session_id
+                   WHERE s.scope_key = ?
+                   ORDER BY m.timestamp DESC LIMIT ?""",
+                (scope_key, limit),
+            ).fetchall()
+    finally:
+        conn.close()
+    return [
+        {"role": r["role"], "content": r["content"], "timestamp": r["timestamp"]}
+        for r in reversed(rows)
+    ]
 
 
 def _get_reflection_session_id() -> Optional[str]:
@@ -398,8 +478,11 @@ def _set_reflection_session_id(session_id: str) -> None:
         logger.warning("reflection session_id 저장 실패: %s", e)
 
 
-def _detect_reflection_event_with_claude(msgs: list[dict]) -> Optional[str]:
-    """resume 가능한 Claude 세션으로 있음/없음 + 근거를 JSON 스키마로 받는다.
+def _read_session_insight_with_claude(msgs: list[dict], pending: list[dict]) -> Optional[dict]:
+    """resume 가능한 Claude 세션으로 반성 이벤트·관심사·해소된 궁금증을 한 번에 받는다.
+
+    반환: {"note": str, "themes": list[str], "addressed": list[int]}
+    note는 반성 이벤트가 없으면 "". 호출 실패/파싱 실패 시 None.
 
     이 세션은 매번 resume되므로 과거 회차의 판단 이력이 누적된다 — 페르소나
     발달 판단을 위한 자기만의 지속적 기록이 되는 셈(사용자의 원래 의도인
@@ -411,12 +494,38 @@ def _detect_reflection_event_with_claude(msgs: list[dict]) -> Optional[str]:
     for m in msgs:
         role = "사용자" if m["role"] == "user" else "AI"
         lines.append(f"{role}: {m['content'][:300]}")
+
+    pending_section = ""
+    if pending:
+        pending_lines = "\n".join(f"  #{c['id']} {c['topic']} ({c.get('reason', '')[:120]})" for c in pending)
+        pending_section = (
+            "3) 해소된 궁금증(addressed_curiosity_ids): 아래는 이전 세션에서 남긴 "
+            "미해결 궁금증이다. 이번 대화에서 **실제로 다뤄져 해소된** 것의 id만 "
+            "배열로 넣어라. 대화에 등장하지 않았거나 스치듯 언급만 됐으면 넣지 마라 "
+            "— 확신이 없으면 넣지 않는 쪽이 맞다. 해소된 게 없으면 빈 배열.\n"
+            f"{pending_lines}\n\n"
+        )
+    else:
+        pending_section = (
+            "3) addressed_curiosity_ids: 미해결 궁금증이 없으므로 빈 배열로 둬라.\n\n"
+        )
+
     prompt = (
-        "다음은 방금 끝난 대화의 일부다. AI 자신의 성격·말투·행동 방식에 대해 "
-        "사용자가 직접 의견을 냈거나(칭찬/지적 모두 포함), 대화에 특이하게 강한 "
-        "감정적 텐션이 있었거나, AI가 자기 자신에 대해 몰랐던 걸 알게 된 순간이 "
-        "있는지 판단해라. detected는 true/false, note는 감지됐을 때만 한 문장으로 "
-        "무슨 일이 있었는지, 없으면 빈 문자열.\n\n" + "\n".join(lines)
+        "다음은 방금 끝난 대화의 일부다. 아래 세 가지를 판단해라.\n\n"
+        "1) 반성 이벤트: AI 자신의 성격·말투·행동 방식에 대해 사용자가 직접 "
+        "의견을 냈거나(칭찬/지적 모두 포함), 대화에 특이하게 강한 감정적 텐션이 "
+        "있었거나, AI가 자기 자신에 대해 몰랐던 걸 알게 된 순간이 있는지. "
+        "detected는 true/false, note는 감지됐을 때만 한 문장으로 무슨 일이 "
+        "있었는지, 없으면 빈 문자열.\n\n"
+        "2) 관심사(themes): 이 대화에서 드러난 '지속적 관심사'를 0~4개. "
+        "명사 나열이 아니라 의미 단위 라벨이어야 한다 — 예: '기억 연속성', "
+        "'말풍선 능동성', '설치 자립성'. 다음은 테마가 아니다: 작업 상태어"
+        "('완료', '추가', '수정'), 조사가 붙은 어절, 그냥 언급된 파일·도구 이름. "
+        "이번 대화가 잡담이거나 관심사라 할 게 없으면 빈 배열로 둬라. "
+        "각 라벨은 20자 이내.\n\n"
+        + pending_section
+        + "--- 대화 ---\n"
+        + "\n".join(lines)
     )
     session_id = _get_reflection_session_id()
     text, new_session_id = call_claude_resumable(prompt, session_id=session_id, json_schema=_REFLECTION_EVENT_SCHEMA)
@@ -429,34 +538,95 @@ def _detect_reflection_event_with_claude(msgs: list[dict]) -> Optional[str]:
     except (json.JSONDecodeError, ValueError):
         logger.warning("reflection event 응답 JSON 파싱 실패: %s", text[:200])
         return None
-
-    if not isinstance(parsed, dict) or not parsed.get("detected"):
+    if not isinstance(parsed, dict):
         return None
-    note = str(parsed.get("note", "")).strip()
-    return note[:300] if note else None
+
+    raw_themes = parsed.get("themes")
+    themes = [t for t in raw_themes if isinstance(t, str)] if isinstance(raw_themes, list) else []
+
+    # 모델이 없는 id를 지어내도 실제 pending에 있는 것만 반영한다.
+    pending_ids = {c["id"] for c in pending}
+    raw_ids = parsed.get("addressed_curiosity_ids")
+    addressed = (
+        [i for i in raw_ids if isinstance(i, int) and i in pending_ids]
+        if isinstance(raw_ids, list)
+        else []
+    )
+
+    note = ""
+    if parsed.get("detected"):
+        note = str(parsed.get("note", "")).strip()[:300]
+    return {"note": note, "themes": themes, "addressed": addressed}
 
 
 def flag_reflection_event_from_recent_session(scope_key: str = "overlay") -> bool:
-    """세션 종료 시 실행 — 반성할 만한 이벤트가 있으면 curiosity로 남겨 다음 세션에 넘긴다.
+    """세션 종료 시 실행 — 반성 이벤트는 curiosity로, 관심사는 테마로 남긴다.
 
     narrative/persona는 여기서 절대 직접 수정하지 않는다 — 그건 실제 대화 중인
     모델의 자율 판단 몫이다. 이 함수는 오직 "이런 게 있었다"는 신호만 남긴다.
+    반환값은 반성 이벤트 감지 여부(테마만 갱신된 경우는 False).
     """
-    msgs = _get_recent_messages_for_scope(scope_key)
-    if not msgs:
-        return False
+    with _REFLECT_LOCK:
+        msgs = _get_reflectable_messages(scope_key)
+        if not msgs:
+            logger.debug("reflection skip: 새 메시지 없음 (scope=%s)", scope_key)
+            return False
 
-    note = _detect_reflection_event_with_claude(msgs)
-    if not note:
-        return False
+        # 판정 성공/실패와 무관하게 워터마크를 먼저 전진시킨다 — 이벤트가 없던
+        # 대화를 다음 종료 때 다시 훑지 않도록.
+        _set_last_reflect_ts(scope_key, msgs[-1]["timestamp"])
 
-    from core.identity.curiosity import add_curiosity
+        from core.identity.curiosity import (
+            add_curiosity,
+            address_curiosity,
+            expire_stale_curiosities,
+            get_pending_curiosities,
+            purge_processed_curiosities,
+        )
 
-    add_curiosity(
-        topic="지난 세션에서 반성할 만한 순간이 있었어",
-        reason=note,
-    )
-    logger.info("reflection event 감지 → curiosity 등록 (scope=%s): %s", scope_key, note[:80])
-    return True
+        pending = get_pending_curiosities(limit=5)
+        insight = _read_session_insight_with_claude(msgs, pending)
+        if not insight:
+            return False
+
+        if insight["themes"]:
+            try:
+                from core.identity import update_themes
+
+                applied = update_themes(insight["themes"])
+                if applied:
+                    logger.info("테마 갱신 (scope=%s): %s", scope_key, ", ".join(applied))
+            except Exception:
+                logger.exception("테마 갱신 실패 (scope=%s)", scope_key)
+
+        for cid in insight["addressed"]:
+            try:
+                address_curiosity(cid)
+                logger.info("궁금증 #%d 해소 처리 (scope=%s)", cid, scope_key)
+            except Exception:
+                logger.exception("궁금증 #%d 해소 처리 실패", cid)
+
+        # 아무도 다뤄주지 않은 채 오래 남은 건 자동 폐기 — 큐가 무한정 쌓이면
+        # context에 늘 같은 항목만 주입돼 오히려 해소를 방해한다.
+        try:
+            expired = expire_stale_curiosities()
+            if expired:
+                logger.info("오래된 궁금증 %d건 자동 폐기", expired)
+            purged = purge_processed_curiosities()
+            if purged:
+                logger.info("처리된 궁금증 %d건 삭제(보존기간 경과)", purged)
+        except Exception:
+            logger.exception("궁금증 정리 실패")
+
+        note = insight["note"]
+        if not note:
+            return False
+
+        add_curiosity(
+            topic="지난 세션에서 반성할 만한 순간이 있었어",
+            reason=note,
+        )
+        logger.info("reflection event 감지 → curiosity 등록 (scope=%s): %s", scope_key, note[:80])
+        return True
 
 

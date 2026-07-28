@@ -25,11 +25,13 @@ class BubbleWindow:
         self.tag: "str | None" = None  # 호출부가 매칭용으로 쓰는 임의 식별자(예: tool_use id)
         self._on_click: Optional[Callable[[], None]] = None
         self._on_resize: Optional[Callable[[int], None]] = None
+        self._on_resize_h: Optional[Callable[[int], None]] = None
         self._on_move_end: Optional[Callable[[int, int], None]] = None
         self._on_dismissed: Optional[Callable[[], None]] = None
         self._current_w = 0
         self._current_h = 0
-        self._resize_start: "tuple[int, int] | None" = None  # (mouse_x_root, width_at_press)
+        # (mouse_x_root, width_at_press, mouse_y_root, height_at_press) — 코너 grip에서 한 번에 기록
+        self._resize_start: "tuple[int, int, int, int] | None" = None
         self._move_start: "tuple[int, int, int, int] | None" = None  # (mouse_x_root, mouse_y_root, win_x_at_press, win_y_at_press)
         self._dragged = False
         self._grip_corner = "top-right"  # shapes.draw_resize_grip과 반드시 같은 값을 써야 함
@@ -40,9 +42,12 @@ class BubbleWindow:
         self._on_click = callback
 
     def set_on_resize(self, callback: "Callable[[int], None] | None") -> None:
-        """우상단 grip을 드래그하는 동안 새 폭(px)을 계속 전달받을 콜백 등록.
-        실제 최소/최대 폭 clamp는 호출부 책임(여기선 원본 델타만 넘김)."""
+        """코너 grip 수평 드래그 — 새 폭(px) 전달. clamp는 호출부 책임."""
         self._on_resize = callback
+
+    def set_on_resize_h(self, callback: "Callable[[int], None] | None") -> None:
+        """코너 grip 수직 드래그 — 새 높이(px) 전달. clamp는 호출부 책임."""
+        self._on_resize_h = callback
 
     def set_on_move_end(self, callback: "Callable[[int, int], None] | None") -> None:
         """grip이 아닌 본문을 드래그해서 풍선 전체를 옮겼을 때, 드래그가 끝나는 순간
@@ -81,6 +86,16 @@ class BubbleWindow:
             self.canvas.bind("<ButtonRelease-1>", self._handle_release)
         return self.canvas
 
+    def is_visible(self) -> bool:
+        """지금 화면에 실제로 떠 있는지 — hide()는 withdraw()를 쓰므로 텍스트 버퍼가
+        아니라 창 상태로 판정해야 정확하다(페이드로 사라진 뒤 버퍼만 남는 경우 방지)."""
+        if self.win is None:
+            return False
+        try:
+            return bool(self.win.winfo_exists()) and self.win.state() != "withdrawn"
+        except Exception:
+            return False
+
     def is_moving(self) -> bool:
         """지금 사용자가 본문을 드래그해서 창을 이동 중인지(리사이즈는 별개) — 호출부가
         콘텐츠 갱신으로 인한 재배치가 이동 드래그와 충돌하지 않게 방어할 때 쓴다.
@@ -109,7 +124,7 @@ class BubbleWindow:
 
     def _handle_press(self, event) -> None:
         if self._in_grip_zone(event.x, event.y):
-            self._resize_start = (event.x_root, self._current_w)
+            self._resize_start = (event.x_root, self._current_w, event.y_root, self._current_h)
             return
         if self.win is not None:
             self._move_start = (event.x_root, event.y_root, self.win.winfo_x(), self.win.winfo_y())
@@ -117,12 +132,16 @@ class BubbleWindow:
 
     def _handle_drag(self, event) -> None:
         if self._resize_start is not None:
+            start_x_root, start_w, start_y_root, start_h = self._resize_start
+            dx = event.x_root - start_x_root
+            dy = event.y_root - start_y_root
+            if self._grip_corner == "top-left":
+                dx = -dx
             if self._on_resize is not None:
-                start_x_root, start_w = self._resize_start
-                delta = event.x_root - start_x_root
-                if self._grip_corner == "top-left":
-                    delta = -delta  # 왼쪽 손잡이는 왼쪽으로 끌수록 넓어져야 함
-                self._on_resize(start_w + delta)
+                self._on_resize(start_w + dx)
+            if self._on_resize_h is not None:
+                # 상단 grip → 위로 드래그(dy < 0)하면 키가 커야 함
+                self._on_resize_h(start_h - dy)
             return
         if self._move_start is None or self.win is None:
             return
@@ -138,6 +157,7 @@ class BubbleWindow:
         if self._resize_start is not None:
             self._resize_start = None
             return
+
         if self._move_start is not None:
             start_x_root, start_y_root, win_x, win_y = self._move_start
             was_dragged = self._dragged

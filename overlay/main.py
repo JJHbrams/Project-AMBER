@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 import tkinter as tk
 import urllib.error
 import urllib.request
@@ -38,9 +39,15 @@ from .settings_window import open_settings
 from .stm_server import STMServer
 from .bubble.bubble_manager import BubbleManager
 from .bubble.history_panel import HistoryPanel
+from .bubble.initiative import InitiativeEngine, default_sources, make_persona_phraser
 from .bubble.input_bar import InputBar
 from .bubble.session import BubbleSessionManager
 from .bubble.stm_bridge import StmBridge
+from core.integrations.engram_bootstrap import (
+    bubble_bootstrap_prompt,
+    is_auto_inject_enabled,
+    sync_sessionstart_hook,
+)
 
 # Claude 모델 alias — 이 외 이름은 Ollama 로컬 모델로 간주
 _CLAUDE_MODEL_ALIASES = {
@@ -337,6 +344,24 @@ class OverlayApp:
             get_speech_rect=self._bubble_manager.get_speech_rect,
         )
         self._bubble_history = HistoryPanel(self.root, get_stm_port=lambda: self._stm_server.port, scope_key="overlay", cfg_bubble=bubble_cfg)
+
+        # 능동적 상주(initiative) — 유휴 시 캐릭터가 스스로 말을 건다.
+        # 활동 추적: 마지막 상호작용 시각 + 현재 턴 진행 여부(발화 가능 판정용).
+        self._bubble_last_activity = time.monotonic()
+        self._bubble_turn_active = False
+        init_cfg = bubble_cfg.get("initiative") if isinstance(bubble_cfg, dict) else None
+        init_cfg = init_cfg if isinstance(init_cfg, dict) else {}
+        self._initiative = InitiativeEngine(
+            self.root,
+            init_cfg,
+            is_screen_clear=self._bubble_screen_clear,
+            seconds_since_activity=lambda: time.monotonic() - self._bubble_last_activity,
+            show_nudge=self._initiative_show_nudge,
+            phrase=make_persona_phraser(float(init_cfg.get("phrasing_timeout_sec", 25))),
+            sources=default_sources(lambda: str(get_workdir()), scope_key="overlay"),
+        )
+        if self._chat_mode == "bubble":
+            self._initiative.start()
 
         self._mcp_http_proc = self._start_mcp_http_server()
 
@@ -799,6 +824,11 @@ class OverlayApp:
         self._wait_mcp_ready(timeout=float(settings["ready_timeout_secs"]), port=int(settings["port"]))
         self._kg_watcher_proc = self._start_kg_watcher()
         self._dashboard_proc = self._start_dashboard()
+        # 전역 SessionStart hook 을 현재 auto_inject 설정과 동기화한다(설치/제거 멱등).
+        try:
+            sync_sessionstart_hook(is_auto_inject_enabled())
+        except Exception:
+            log.exception("[overlay] SessionStart hook 동기화 실패")
 
     def _start_dashboard(self) -> "subprocess.Popen | None":
         """engram_dashboard.py 를 streamlit으로 시작한다. 이미 실행 중이면 스킵."""
@@ -948,6 +978,14 @@ class OverlayApp:
         self._bubble_manager.update_cfg(bubble_cfg)
         self._bubble_input.update_cfg(bubble_cfg)
 
+        # 능동적 상주 설정 반영 + 모드에 따라 루프 on/off.
+        init_cfg = bubble_cfg.get("initiative") if isinstance(bubble_cfg, dict) else None
+        self._initiative.update_cfg(init_cfg if isinstance(init_cfg, dict) else {})
+        if self._chat_mode == "bubble":
+            self._initiative.start()
+        else:
+            self._initiative.stop()
+
     def get_cli_provider(self) -> str:
         return self._cli_provider
 
@@ -1001,17 +1039,20 @@ class OverlayApp:
             return
         cfg = load_cfg()
         bubble_cfg = get_bubble_cfg(cfg)
+        workdir = str(get_workdir(cfg))
         self._bubble_session = BubbleSessionManager(
-            cwd=str(get_workdir(cfg)),
+            cwd=workdir,
             env_overrides={"ENGRAM_SCOPE_KEY": "overlay", "ENGRAM_CLI_PROVIDER": "claude-code"},
             permission_level=get_permission_level(cfg),
-            on_event=lambda ev: self.root.after(0, lambda ev=ev: self._bubble_manager.handle_event(ev)),
+            on_event=lambda ev: self.root.after(0, lambda ev=ev: self._on_bubble_event(ev)),
             on_approval_request=lambda req: self.root.after(0, lambda req=req: self._bubble_manager.show_approval_request(req)),
             resume_session_id=get_bubble_session_id(),
             on_session_id=lambda sid: set_bubble_session_id(sid),
             stm_bridge=StmBridge(scope_key="overlay"),
             # 확장 사고 예산 — 생각풍선에 실제 추론 텍스트를 보여주기 위함(0이면 끔).
             thinking_tokens=int(bubble_cfg.get("thinking_tokens", 2000)),
+            # session.auto_inject 가 켜졌을 때만 engram 부트스트랩 지시문을 덧댄다(꺼지면 None).
+            bootstrap_prompt=bubble_bootstrap_prompt(workdir),
         )
         self._bubble_session.start()
 
@@ -1023,16 +1064,73 @@ class OverlayApp:
             self._bubble_input.hide()
             return
         self._ensure_bubble_session()
+        # 클릭으로 입력창을 열 때, 페이드로 사라진 마지막 교환(응답 +/- 질문 에코)을
+        # 되살려서 "방금 뭐였지" 를 바로 다시 볼 수 있게 한다.
+        self._bubble_manager.replay_last()
         self._bubble_input.show(on_submit=self._on_bubble_submit)
 
     def _on_bubble_submit(self, text: str) -> None:
         # 내 메시지는 입력창이 있던 자리에 "에코 말풍선"으로 잠깐 남긴다(응답과 별개).
         # 응답 말풍선은 입력창과 무관하게 자기 위치(마지막 드래그 위치 또는 캐릭터 옆
         # 상단 기본)에 별도로 뜬다 — 내 입력이 응답으로 출력되는 것처럼 보이던 문제 해결.
+        self._bubble_last_activity = time.monotonic()
+        self._bubble_turn_active = True  # 턴 시작 — 응답이 끝날(turn_end/error/result) 때까지 발화 억제
+        self._initiative.notify_engaged()  # 사용자가 직접 말을 걸었으니 무시 백오프 리셋
         self._bubble_manager.show_echo(text, self._bubble_input.get_last_rect())
         self._bubble_manager.show_user_message(text)
         if self._bubble_session is not None:
             self._bubble_session.send(text)
+
+    def _on_bubble_event(self, ev: dict) -> None:
+        """세션 이벤트를 렌더러로 넘기면서, initiative 발화 판정에 필요한 상태
+        (마지막 활동 시각 + 턴 진행 여부)를 갱신한다."""
+        self._bubble_last_activity = time.monotonic()
+        kind = ev.get("kind") if isinstance(ev, dict) else None
+        if kind in ("turn_end", "error", "result"):
+            self._bubble_turn_active = False
+        self._bubble_manager.handle_event(ev)
+
+    def _bubble_screen_clear(self) -> bool:
+        """지금 능동 발화를 띄워도 되는가 — bubble 모드 · 입력창 닫힘 · 턴 진행 안 함 ·
+        떠 있는 풍선 없음일 때만 True."""
+        if self._chat_mode != "bubble":
+            return False
+        if self._bubble_turn_active:
+            return False
+        if self._bubble_input.is_showing():
+            return False
+        return self._bubble_manager.is_idle()
+
+    def _initiative_show_nudge(self, text: str, engine_on_click) -> None:
+        """엔진이 만든 능동 발화를 말풍선으로 렌더한다. 클릭하면 엔진에 알린 뒤(백오프
+        리셋) 입력창을 열어 대화로 잇는다 — 발화에 engage_prompt 가 딸려 있으면 그
+        프롬프트로 바로 대화를 시작한다."""
+        dwell = None
+        cfg_init = getattr(self._initiative, "_cfg", {}) or {}
+        try:
+            dwell = int(cfg_init.get("nudge_dwell_ms")) if cfg_init.get("nudge_dwell_ms") else None
+        except Exception:
+            dwell = None
+
+        def _click():
+            try:
+                engine_on_click()
+            finally:
+                self._engage_nudge()
+
+        self._bubble_manager.show_nudge(text, _click, dwell_ms=dwell)
+
+    def _engage_nudge(self) -> None:
+        self._bubble_last_activity = time.monotonic()
+        prompt = self._initiative.take_pending_engage()
+        self._ensure_bubble_session()
+        if prompt:
+            self._bubble_input.hide()
+            self._on_bubble_submit(prompt)
+        else:
+            self._bubble_manager.refresh_positions()
+            if not self._bubble_input.is_showing():
+                self._bubble_input.show(on_submit=self._on_bubble_submit)
 
     def show_bubble_history(self) -> None:
         self._bubble_history.show()
@@ -1074,6 +1172,10 @@ class OverlayApp:
 
         if self._discord_bot:
             self._discord_bot.stop()
+        try:
+            self._initiative.stop()
+        except Exception:
+            pass
         if self._bubble_session is not None:
             self._bubble_session.stop(timeout=5.0)
             self._bubble_session = None

@@ -3,7 +3,6 @@ from typing import List, Optional, Union
 
 from core.context.context_builder import build_system_prompt
 from core.context.project_scope import resolve_project_key, resolve_scope_key
-from core.identity import update_themes_from_text
 from .store import (
     DEFAULT_SCOPE_KEY,
     append_working_memory_hint,
@@ -42,11 +41,9 @@ class MemoryBus:
         session_id = create_session(scope_key=resolved_scope, project_keys=all_keys or None)
         return MemorySession(session_id=session_id, scope_key=resolved_scope)
 
-    def record_user_message(self, session: SessionLike, content: str, update_themes: bool = False):
+    def record_user_message(self, session: SessionLike, content: str):
         session_id = self._get_session_id(session)
         save_message(session_id, "user", content)
-        if update_themes:
-            update_themes_from_text(content)
 
     def record_assistant_message(
         self,
@@ -57,15 +54,15 @@ class MemoryBus:
         scope_key: Optional[str] = None,
         project_key: Optional[str] = None,
         cwd: Optional[str] = None,
-        update_themes: bool = False,
         update_working_memory: bool = False,
     ):
+        # 테마는 여기서 갱신하지 않는다 — 메시지 원문에서 명사를 추출하던 방식은
+        # 관심사 대신 어절 부스러기를 쌓았다. 지금은 세션 종료 시 Claude 판정이
+        # 의미 단위 라벨로 갱신한다(core/graph/semantic/stm_promoter.py).
         session_id = self._get_session_id(session)
         resolved_scope = self._resolve_scope_key(session, scope_key, project_key=project_key, cwd=cwd)
 
         save_message(session_id, "assistant", content)
-        if update_themes:
-            update_themes_from_text(content)
         if update_working_memory:
             append_working_memory_hint(resolved_scope, user_content, content)
 

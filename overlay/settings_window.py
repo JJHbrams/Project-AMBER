@@ -85,6 +85,9 @@ _THEME_COLOR_ROWS = [
     ("tool_bg", "승인풍선 배경"),
     ("tool_outline", "승인풍선 테두리"),
     ("tool_fg", "승인풍선 글자"),
+    ("nudge_bg", "능동발화 배경"),
+    ("nudge_outline", "능동발화 테두리"),
+    ("nudge_fg", "능동발화 글자"),
 ]
 
 _USER_PERSONA_PATH = Path.home() / ".engram" / "persona.user.yaml"
@@ -287,6 +290,14 @@ class _SettingsWindow:
         self._persona_banner_var = tk.StringVar(value="현재 기본 페르소나가 적용되어 있습니다. 커스텀 페르소나를 적용해 보세요.")
         self._autostart_var = tk.BooleanVar()
         self._auto_inject_var = tk.BooleanVar()
+        # 능동 발화(initiative) — 빈도/타이밍 knob 들을 GUI 로 노출.
+        self._initiative_enabled_var = tk.BooleanVar()
+        self._initiative_idle_min_var = tk.IntVar()      # 유휴 대기(분)
+        self._initiative_gap_min_var = tk.IntVar()       # 최소 간격(분)
+        self._initiative_quiet_on_var = tk.BooleanVar()  # 조용한 시간대 사용
+        self._initiative_quiet_start_var = tk.IntVar()   # 시작 시(0-23)
+        self._initiative_quiet_end_var = tk.IntVar()     # 끝 시(0-23)
+        self._initiative_phrasing_var = tk.BooleanVar()  # LLM 문구 다듬기(하이브리드)
 
         self._build_ui()
         self._load_current_values()
@@ -413,6 +424,45 @@ class _SettingsWindow:
             text="말풍선 모드에서 도구 사용을 얼마나 자동으로 승인할지 (기본: 자동).",
             foreground="gray",
         ).grid(row=7, column=0, columnspan=3, sticky="w", padx=8, pady=(0, 4))
+
+        # ── 능동 발화 (initiative) — 유휴 시 캐릭터가 스스로 말을 건다(말풍선 모드 전용) ──
+        init_box = ttk.LabelFrame(f, text="능동 발화 — 유휴 시 스스로 말 걸기")
+        init_box.grid(row=8, column=0, columnspan=3, sticky="we", padx=8, pady=(10, 4))
+
+        ttk.Checkbutton(
+            init_box, text="능동 발화 사용", variable=self._initiative_enabled_var,
+        ).grid(row=0, column=0, columnspan=4, sticky="w", padx=8, pady=(6, 2))
+
+        ttk.Label(init_box, text="유휴 대기:").grid(row=1, column=0, sticky="w", padx=8, pady=3)
+        ttk.Spinbox(init_box, textvariable=self._initiative_idle_min_var, from_=1, to=120, width=6).grid(
+            row=1, column=1, sticky="w", pady=3)
+        ttk.Label(init_box, text="분 이상 조용하면").grid(row=1, column=2, columnspan=2, sticky="w", padx=(2, 8), pady=3)
+
+        ttk.Label(init_box, text="최소 간격:").grid(row=2, column=0, sticky="w", padx=8, pady=3)
+        ttk.Spinbox(init_box, textvariable=self._initiative_gap_min_var, from_=1, to=240, width=6).grid(
+            row=2, column=1, sticky="w", pady=3)
+        ttk.Label(init_box, text="분마다 최대 1번").grid(row=2, column=2, columnspan=2, sticky="w", padx=(2, 8), pady=3)
+
+        ttk.Checkbutton(
+            init_box, text="조용한 시간대", variable=self._initiative_quiet_on_var,
+        ).grid(row=3, column=0, sticky="w", padx=8, pady=3)
+        ttk.Spinbox(init_box, textvariable=self._initiative_quiet_start_var, from_=0, to=23, width=4).grid(
+            row=3, column=1, sticky="w", pady=3)
+        ttk.Label(init_box, text="시 ~").grid(row=3, column=2, sticky="w", pady=3)
+        ttk.Spinbox(init_box, textvariable=self._initiative_quiet_end_var, from_=0, to=23, width=4).grid(
+            row=3, column=3, sticky="w", pady=3)
+
+        ttk.Checkbutton(
+            init_box, text="LLM 문구 다듬기(하이브리드) — 끄면 토큰 0·문구 단조",
+            variable=self._initiative_phrasing_var,
+        ).grid(row=4, column=0, columnspan=4, sticky="w", padx=8, pady=(2, 2))
+
+        ttk.Label(
+            init_box,
+            text="미완 작업·호기심·git 상태 등을 가끔 먼저 건넵니다. 세부(소스별 on/off·쿨다운)는 overlay.yaml 의 bubble.initiative 로 조절.",
+            foreground="gray", wraplength=440, justify="left",
+        ).grid(row=5, column=0, columnspan=4, sticky="w", padx=8, pady=(2, 6))
+        init_box.columnconfigure(3, weight=1)
 
         f.columnconfigure(1, weight=1)
 
@@ -718,6 +768,35 @@ class _SettingsWindow:
             ttk.Label(fade_box, text="초 뒤").grid(row=r, column=3, sticky="w", padx=(2, 8), pady=3)
         fade_box.columnconfigure(1, weight=1)
 
+        # ── 최대 높이 비율 (0 = 무제한) ──
+        height_row = fade_row + 1
+        h_box = ttk.LabelFrame(f, text="최대 높이 (화면 작업영역 비율, 0 = 무제한)")
+        h_box.grid(row=height_row, column=0, columnspan=3, sticky="we", padx=8, pady=(6, 4))
+        self._speech_max_h_var = tk.DoubleVar()
+        self._thought_max_h_var = tk.DoubleVar()
+        for r, (var, label, default_val) in enumerate((
+            (self._speech_max_h_var, "응답 풍선", 0.55),
+            (self._thought_max_h_var, "생각 풍선", 0.30),
+        )):
+            lbl_var = tk.StringVar()
+
+            def _make_update(v=var, lv=lbl_var):
+                def _upd(*_):
+                    val = float(v.get())
+                    lv.set("무제한" if val == 0 else f"{val:.2f}")
+                return _upd
+
+            updater = _make_update()
+            var.trace_add("write", updater)
+            ttk.Label(h_box, text=label, width=12).grid(row=r, column=0, sticky="w", padx=8, pady=3)
+            ttk.Scale(
+                h_box, from_=0.0, to=1.0, variable=var,
+                orient="horizontal", length=160,
+                command=lambda v, lv=lbl_var: lv.set("무제한" if float(v) == 0 else f"{float(v):.2f}"),
+            ).grid(row=r, column=1, sticky="w", pady=3)
+            ttk.Label(h_box, textvariable=lbl_var, width=8).grid(row=r, column=2, sticky="w", padx=(4, 8), pady=3)
+            lbl_var.set("무제한" if default_val == 0 else f"{default_val:.2f}")
+
         f.columnconfigure(1, weight=1)
 
     def _preview_font_size(self) -> int:
@@ -818,7 +897,12 @@ class _SettingsWindow:
         warn_frame.grid(row=6, column=0, columnspan=2, sticky="ew", padx=16, pady=(4, 8))
         tk.Label(
             warn_frame,
-            text=("⚠  활성화하면 세션 시작마다 engram_get_context 가 자동 호출됩니다.\n" "    초기 컨텍스트 토큰이 추가로 소모됩니다."),
+            text=(
+                "⚠  활성화하면 말풍선·터미널 세션은 물론, 전역 hook 을 통해 데스크톱 앱/CLI 등\n"
+                "    임의 지점에서 시작된 claude 세션에도 engram_get_context 가 자동 호출됩니다.\n"
+                "    (~/.claude/settings.json 의 SessionStart hook 을 자동 등록/해제)\n"
+                "    세션 시작마다 초기 컨텍스트 토큰이 추가로 소모됩니다."
+            ),
             bg="#fff8e1",
             anchor="w",
             justify="left",
@@ -878,6 +962,18 @@ class _SettingsWindow:
 
         permission_level = normalize_permission_level(_nested_get(cfg, ["bubble", "permission_level"], "auto"))
         self._permission_level_var.set(_PERMISSION_LEVEL_VALUE_TO_DISPLAY.get(permission_level, _PERMISSION_LEVEL_OPTIONS[0]))
+        init_cfg = _nested_get(cfg, ["bubble", "initiative"], {})
+        if not isinstance(init_cfg, dict):
+            init_cfg = {}
+        self._initiative_enabled_var.set(bool(init_cfg.get("enabled", False)))
+        self._initiative_idle_min_var.set(max(1, round(int(init_cfg.get("idle_min_sec", 600) or 600) / 60)))
+        self._initiative_gap_min_var.set(max(1, round(int(init_cfg.get("min_gap_sec", 1800) or 1800) / 60)))
+        qs = int(init_cfg.get("quiet_start_hour", 22)) % 24
+        qe = int(init_cfg.get("quiet_end_hour", 8)) % 24
+        self._initiative_quiet_on_var.set(qs != qe)  # start==end 면 조용시간 없음
+        self._initiative_quiet_start_var.set(qs if qs != qe else 22)
+        self._initiative_quiet_end_var.set(qe if qs != qe else 8)
+        self._initiative_phrasing_var.set(bool(init_cfg.get("phrasing", True)))
 
         # CLI 탭
         provider = normalize_cli_provider(_nested_get(cfg, ["cli", "provider"], "copilot"))
@@ -914,6 +1010,10 @@ class _SettingsWindow:
         self._bubble_font_var.set(_nested_get(cfg, ["bubble", "font_family"], "Noto Sans KR Medium"))
         self._bubble_font_size_var.set(int(_nested_get(cfg, ["bubble", "font_size"], 0) or 0))
 
+        # 말풍선 탭 — 최대 높이 비율
+        self._speech_max_h_var.set(float(_nested_get(cfg, ["bubble", "speech_max_height_ratio"], 0.55) or 0))
+        self._thought_max_h_var.set(float(_nested_get(cfg, ["bubble", "thought_max_height_ratio"], 0.30) or 0))
+
         # 말풍선 탭 — 자동 페이드아웃 (ms → 초 표시)
         for key, dflt_on, dflt_ms in (("echo", True, 8000), ("speech", True, 20000), ("thought", True, 0)):
             self._fade_vars[key].set(bool(_nested_get(cfg, ["bubble", f"{key}_fade"], dflt_on)))
@@ -921,9 +1021,15 @@ class _SettingsWindow:
             self._fade_secs[key].set(round(ms / 1000, 1))
 
         # 말풍선 탭 — 색상 테마
+        # DEFAULT_THEME에 키가 늘어도 UI 행이 아직 없을 수 있다. 예전엔 여기서
+        # KeyError가 나면서 아래 _load_persona_values()까지 통째로 건너뛰어
+        # 페르소나 탭이 빈 채로 뜨는 사고가 있었다 — 없는 키는 조용히 건너뛴다.
         for key, default in shapes.DEFAULT_THEME.items():
+            var = self._theme_vars.get(key)
+            if var is None:
+                continue
             value = _nested_get(cfg, ["bubble", "theme", key], default)
-            self._theme_vars[key].set(str(value))
+            var.set(str(value))
             self._update_theme_swatch(key)
         self._update_font_preview()  # 로드된 글꼴/크기/색으로 미리보기 초기화
 
@@ -1147,6 +1253,29 @@ class _SettingsWindow:
         permission_level = _PERMISSION_LEVEL_DISPLAY_TO_VALUE.get(permission_level_display, "auto")
         _nested_set(user, ["bubble", "permission_level"], None if permission_level == "auto" else permission_level)
 
+        # 능동 발화 — 기본값과 같은 항목은 사용자 yaml 을 어지럽히지 않게 저장하지 않는다(None → 제거).
+        initiative_on = bool(self._initiative_enabled_var.get())
+        _nested_set(user, ["bubble", "initiative", "enabled"], True if initiative_on else None)
+
+        idle_sec = max(1, int(self._initiative_idle_min_var.get() or 10)) * 60
+        _nested_set(user, ["bubble", "initiative", "idle_min_sec"], None if idle_sec == 600 else idle_sec)
+
+        gap_sec = max(1, int(self._initiative_gap_min_var.get() or 30)) * 60
+        _nested_set(user, ["bubble", "initiative", "min_gap_sec"], None if gap_sec == 1800 else gap_sec)
+
+        if self._initiative_quiet_on_var.get():
+            qs = int(self._initiative_quiet_start_var.get()) % 24
+            qe = int(self._initiative_quiet_end_var.get()) % 24
+            if qs == qe:
+                qe = (qs + 1) % 24  # start==end 는 "조용시간 없음"이므로, 켠 상태에선 최소 1시간 확보
+        else:
+            qs = qe = 0  # start==end → 조용시간 없음
+        _nested_set(user, ["bubble", "initiative", "quiet_start_hour"], None if qs == 22 else qs)
+        _nested_set(user, ["bubble", "initiative", "quiet_end_hour"], None if qe == 8 else qe)
+
+        phrasing_on = bool(self._initiative_phrasing_var.get())
+        _nested_set(user, ["bubble", "initiative", "phrasing"], None if phrasing_on else False)
+
         # ── CLI 탭 ──
         provider = self._provider_var.get().strip()
         provider_value = _PROVIDER_DISPLAY_TO_VALUE.get(provider, provider)
@@ -1194,6 +1323,17 @@ class _SettingsWindow:
             fsize = 0
         _nested_set(user, ["bubble", "font_size"], None if fsize <= 0 else fsize)
 
+        # ── 말풍선 탭 — 최대 높이 비율 ──
+        for attr, key, default in (
+            ("_speech_max_h_var", "speech_max_height_ratio", 0.55),
+            ("_thought_max_h_var", "thought_max_height_ratio", 0.30),
+        ):
+            try:
+                val = round(float(getattr(self, attr).get()), 2)
+            except (tk.TclError, ValueError):
+                val = default
+            _nested_set(user, ["bubble", key], None if val == default else (val if val > 0 else 0))
+
         # ── 말풍선 탭 — 자동 페이드아웃 (기본값이면 저장 안 함) ──
         for key, dflt_on, dflt_ms in (("echo", True, 8000), ("speech", True, 20000), ("thought", True, 0)):
             on = bool(self._fade_vars[key].get())
@@ -1206,7 +1346,10 @@ class _SettingsWindow:
 
         # ── 말풍선 탭 — 색상 테마 (기본값과 같으면 저장 안 함) ──
         for key, default in shapes.DEFAULT_THEME.items():
-            value = self._theme_vars[key].get().strip()
+            var = self._theme_vars.get(key)
+            if var is None:
+                continue  # UI 행이 없는 키 — 사용자 설정값도 없으므로 건드리지 않는다
+            value = var.get().strip()
             _nested_set(user, ["bubble", "theme", key], None if (not value or value == default) else value)
 
         # 파일 쓰기 (overlay.user.yaml)
@@ -1225,6 +1368,14 @@ class _SettingsWindow:
             yaml.safe_dump(engram_user, allow_unicode=True, sort_keys=False),
             encoding="utf-8",
         )
+        # auto_inject 토글 즉시 반영 — 전역 SessionStart hook 설치/제거(멱등).
+        # runtime_config 캐시가 예전 값을 들고 있을 수 있어 방금 저장한 값으로 직접 동기화한다.
+        try:
+            from core.integrations.engram_bootstrap import sync_sessionstart_hook
+
+            sync_sessionstart_hook(auto_inject)
+        except Exception:
+            pass
 
         # ── 전역 탭 — 자동 시작 토글 ──
         _set_autostart(bool(self._autostart_var.get()))

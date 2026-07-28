@@ -3,10 +3,9 @@
 """
 
 import json
-import re
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, Iterable, List, Tuple
 from core.storage.db import get_connection
 from core.common.sanitizer import sanitize
 
@@ -458,23 +457,32 @@ def get_themes(top_n: int = 10) -> List[Tuple[str, float]]:
     return [(r["name"], r["weight"]) for r in rows]
 
 
-def update_themes_from_text(text: str):
-    """텍스트에서 주제어를 추출해 가중치 누적"""
-    keywords = _extract_themes(text)
-    if not keywords:
-        return
+def update_themes(labels: Iterable[str]) -> List[str]:
+    """의미 단위 관심사 라벨의 가중치를 누적한다. 반영된 라벨 목록 반환.
+
+    입력은 반드시 "말풍선 능동성", "기억 연속성"처럼 관심사를 나타내는 라벨이어야
+    한다 — 원문 텍스트를 넣고 여기서 명사를 추출하지 않는다. 예전에 정규식으로
+    한글 어절을 주워 담던 방식은 조사 붙은 어절("바탕으로", "이름을")과 활동로그
+    상태동사("완료", "추가")까지 테마로 쌓아, 성격과 무관한 목록을 만들었다.
+    라벨 생성은 대화 중인 모델(engram_update_themes) 또는 세션 종료 시
+    Claude SDK 판정(stm_promoter)이 담당한다.
+    """
+    cleaned = _normalize_theme_labels(labels)
+    if not cleaned:
+        return []
     conn = get_connection()
     with conn:
-        for kw in keywords:
+        for name in cleaned:
             conn.execute(
                 """INSERT INTO themes (name, weight, last_seen)
                    VALUES (?, 1.0, datetime('now','localtime'))
                    ON CONFLICT(name) DO UPDATE SET
                        weight = weight + 0.5,
                        last_seen = datetime('now','localtime')""",
-                (kw,),
+                (name,),
             )
     conn.close()
+    return cleaned
 
 
 def decay_themes(factor: float = 0.95):
@@ -486,33 +494,37 @@ def decay_themes(factor: float = 0.95):
     conn.close()
 
 
-def _extract_themes(text: str) -> List[str]:
-    # 한글 명사형 2~6자 단어 추출 (단순 규칙 기반)
-    candidates = re.findall(r"[가-힣]{2,6}", text)
-    stop = {
-        "나는",
-        "그것",
-        "하지만",
-        "그리고",
-        "그래서",
-        "때문",
-        "것이",
-        "있다",
-        "없다",
-        "한다",
-        "된다",
-        "하면",
-        "이라",
-        "으로",
-        "에서",
-        "이다",
-        "했다",
-        "했습",
-        "니다",
-        "습니",
-        "하는",
-        "있는",
-        "없는",
-    }
-    return [w for w in candidates if w not in stop]
+# 테마 라벨 정규화 — 모델이 준 라벨을 그대로 믿지 않고 형태를 다듬고 거른다.
+_MAX_THEMES_PER_UPDATE = 5
+_THEME_NAME_MAX_LEN = 24
+
+# 프롬프트로 "상태어는 테마가 아니다"라고 지시하지만 모델이 어길 수 있어
+# 코드에서도 막는다 — 관심사 자리에 "완료"가 올라오던 게 원래 증상이었다.
+_THEME_REJECT = {
+    "완료", "실패", "성공", "추가", "삭제", "제거", "수정", "변경", "적용",
+    "반영", "확인", "진행", "시작", "종료", "작성", "생성", "구현", "처리",
+    "사용", "설정", "정리", "개선", "해결", "업데이트", "리팩토링", "테스트",
+    "버그", "이슈", "작업", "개발", "코드", "파일", "기타", "없음",
+}
+
+
+def _normalize_theme_labels(labels: Iterable[str]) -> List[str]:
+    """라벨 목록을 정제(공백/기호 정리, 중복 제거, 개수 제한)한다."""
+    cleaned: List[str] = []
+    seen: set = set()
+    for raw in labels or []:
+        if not isinstance(raw, str):
+            continue
+        name = sanitize(raw, max_length=_THEME_NAME_MAX_LEN).strip()
+        name = name.strip("\"'`,.·/|-—[]()").strip()
+        if len(name) < 2 or name in _THEME_REJECT:
+            continue
+        key = name.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        cleaned.append(name)
+        if len(cleaned) >= _MAX_THEMES_PER_UPDATE:
+            break
+    return cleaned
 

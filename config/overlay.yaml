@@ -73,6 +73,9 @@ bubble:
   # 사용자가 각 풍선 우하단 grip을 드래그해서 직접 조절할 수도 있음(그 이후엔 override 유지).
   width_to_char_ratio: 2.6 # 대화/생각/입력창 기본 폭 = char_w * 이 값
   min_width: 160 # px
+  # 최대 높이 — 모니터 작업영역 높이 대비 비율. 0이면 무제한.
+  speech_max_height_ratio: 0.55 # 응답 풍선: 화면 높이의 55%
+  thought_max_height_ratio: 0.30 # 생각 풍선: 화면 높이의 30%
 
   # 글꼴/폰트 크기 (설정 창의 "말풍선" 탭에서 조절 가능)
   font_family: "Noto Sans KR Medium" # 대화/생각/입력 풍선 본문 글꼴
@@ -98,6 +101,27 @@ bubble:
   # 히스토리 패널 기본값
   history_default_limit: 50
   history_default_within_minutes: 120
+
+  # 능동적 상주(initiative) — 캐릭터가 유휴 상태에서 스스로 말을 건다.
+  # "조용함이 기본": 아래 조건을 전부 만족할 때만, 그것도 드물게만 발화한다.
+  # (bubble 모드에서만 동작. tui 모드에선 아무 일도 안 함.)
+  initiative:
+    enabled: false # 마스터 토글. 기본 꺼짐 — 설정/트레이에서 켠다.
+    tick_sec: 45 # 유휴 조건을 점검하는 주기(초). 실제 발화는 훨씬 드물다.
+    idle_min_sec: 600 # 마지막 상호작용 후 이만큼 지나야 발화 후보(기본 10분)
+    min_gap_sec: 1800 # 발화와 발화 사이 최소 간격(기본 30분)
+    quiet_start_hour: 22 # 조용한 시간대 시작(포함). start==end면 조용시간 없음.
+    quiet_end_hour: 8 # 조용한 시간대 끝(제외). 22→8은 자정을 넘는 구간으로 처리.
+    phrasing: true # LLM 프레이징(하이브리드). 끄면 항상 템플릿 문구만 사용.
+    phrasing_timeout_sec: 25
+    nudge_dwell_ms: 25000 # 능동 발화 풍선이 자동 페이드되기까지(ms)
+    ignore_backoff_max: 4 # 연속 무시 시 발화 간격 배수 상한
+    # 소스별 on/off + 쿨다운(초). 우선순위: unfinished → curiosity → git → persona.
+    sources:
+      unfinished: { enabled: true, cooldown_sec: 7200 } # 직전 세션의 미완 작업(open_intents)
+      curiosity: { enabled: true, cooldown_sec: 3600 } # 미해결 호기심
+      git: { enabled: true, cooldown_sec: 5400 } # 작업 디렉토리 미커밋/미push
+      persona: { enabled: true, cooldown_sec: 10800 } # 정체성 기반 혼잣말(프레이징 필요)
 
 cli:
   # 오버레이에서 스폰할 CLI provider 선택

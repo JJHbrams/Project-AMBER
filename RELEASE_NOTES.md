@@ -1,5 +1,60 @@
 # Release Notes
 
+## 2026-07-28 - v0.2.1: Proactive Presence (Initiative), Interest/Memory Quality, and Bubble UX
+
+> Folds in v0.2.0 (bubble max-height/scroll, grip resize, global engram bootstrap hook),
+> which was not separately released on this distribution repo.
+
+### Highlights
+
+- **Proactive presence (initiative)** — in bubble mode the desktop character can now speak on
+  its own when idle, surfacing unfinished work, open curiosities, git status, or a persona
+  remark. **Off by default**; idle wait / minimum gap / quiet hours are configurable in
+  Settings → Overlay. Phrasing is hybrid — a template fallback plus an isolated one-shot LLM
+  pass in the character's persona voice; the resident chat session's STM/resume is never touched.
+- **Recall last exchange on click** — clicking the character re-shows the last response (and your
+  question) even after the bubble faded. Autonomous remarks (teal) are visually distinct from
+  Q&A (response + user echo).
+- **Interest / memory quality** — interests (themes) are now labeled by a Claude judgment at
+  session close instead of raw noun extraction; curiosities dedupe and auto-expire so context
+  injection stays fresh.
+
+### What Changed
+
+- New `overlay/bubble/initiative.py` — idle-tick engine with guards (idle wait, min gap, quiet
+  hours, per-source cooldown, ignore-backoff) over four sources: unfinished work (`open_intents`)
+  / curiosity / git / persona. Settings → Overlay "능동 발화" group + `config/overlay.yaml`
+  `bubble.initiative`. Nudges render in the speech slot (teal) via `BubbleManager.show_nudge`
+  and engage on click.
+- Themes: message-text noun extraction removed; `core/graph/semantic/stm_promoter.py` now updates
+  semantic interest labels via a Claude judgment at session close. MCP
+  `engram_update_themes(text)` → `engram_update_themes(themes: list[str])`; `record_*_message`
+  `update_themes` argument dropped.
+- Curiosities: `add_curiosity(dedup=True)`, `expire_stale_curiosities` (14d) /
+  `purge_processed_curiosities` (30d); context rule marks resolution via
+  `engram_address_curiosity(id)`; dashboard graph shows pending only.
+- v0.2.0 (folded): bubble `speech/thought_max_height_ratio` + scroll, grip height resize,
+  global engram `SessionStart` hook (`core/integrations/engram_bootstrap.py`), PyInstaller
+  Tcl/Tk bundling (`engram-overlay.spec`).
+
+### Impact
+
+- The overlay character becomes an ambient presence rather than a reactive chat box — the
+  differentiator over a plain terminal chat.
+- Cleaner interest/curiosity signals mean context injection reflects real topics instead of noise.
+- Existing installs upgrade in place via the new `setup.exe` (config/DB preserved).
+
+### Files
+
+- overlay/bubble/{initiative (new), bubble_manager, bubble_window, shapes, session}.py,
+  overlay/main.py, overlay/settings_window.py, config/overlay.yaml
+- core/graph/semantic/stm_promoter.py, core/identity/{__init__, curiosity, service}.py,
+  core/context/context_builder.py, core/dashboard/data_access.py, core/memory/bus.py, mcp_server.py
+- core/integrations/engram_bootstrap.py (new), engram-overlay.spec, installer/engram-overlay.iss,
+  CHANGELOG.md
+- scripts/dev/cleanup_themes_curiosities.py (new), test/test_initiative.py (new),
+  test/test_memory_bus.py
+
 ## 2026-07-24 - v0.1.1: One-Shot Native Installer, Offline Model, and Stability Fixes
 
 ### Highlights

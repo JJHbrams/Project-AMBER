@@ -1,6 +1,34 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+import sys
 from pathlib import Path
+
+
+def _collect_tcl_tk() -> list[tuple[str, str]]:
+    """Bundle Tcl/Tk data files so pyi_rth__tkinter.py can find _tcl_data/_tk_data."""
+    candidates = [
+        Path(sys.prefix) / 'Library' / 'lib',
+        Path(sys.prefix) / 'tcl',
+        Path(sys.prefix) / 'lib',
+    ]
+    items: list[tuple[str, str]] = []
+    for base in candidates:
+        if not base.exists():
+            continue
+        for d in base.iterdir():
+            if not d.is_dir():
+                continue
+            n = d.name.lower()
+            if n.startswith('tcl') and len(n) > 3 and n[3].isdigit():
+                items.append((str(d), '_tcl_data'))
+            elif n.startswith('tk') and len(n) > 2 and n[2].isdigit():
+                items.append((str(d), '_tk_data'))
+        if items:
+            break
+    return items
+
+
+_tcl_tk_datas = _collect_tcl_tk()
 
 
 def _collect_character_datas() -> list[tuple[str, str]]:
@@ -66,6 +94,7 @@ a = Analysis(
         *_character_datas,
         *_embedding_model_datas,
         ('config\\overlay.yaml', 'config'),
+        *_tcl_tk_datas,
     ],
     hiddenimports=['core.context.context_builder', 'core.storage.db', 'core.identity', 'core.memory', 'core.context.directives', 'core.identity.reflection', 'core.identity.curiosity', 'core.common.sanitizer', 'core.memory.bus', 'core.config.runtime_config', 'core.graph.semantic', 'core.graph.semantic.stm_promoter', 'core.observability.activity', 'core.context.project_scope', 'discord_bot', 'discord_bot.bot', 'tkinterweb', 'tkinterweb_tkhtml', 'mcp_server', 'kg_watcher'],
     hookspath=[],
