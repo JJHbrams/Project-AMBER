@@ -83,6 +83,13 @@ class BubbleManager:
         # _last_was_nudge=True 면 그 발화가 자율발화(사용자 입력 없음)였다는 표시.
         self._last_speech_text = ""
         self._last_was_nudge = False
+        # 능동 발화 결과 판정 — 렌더된 nudge 하나에 대해 결과가 아직 안 정해졌으면 True.
+        # 반응 없이 사라지는 모든 경로(_settle_nudge_outcome)가 이 잠금을 소비한다.
+        self._nudge_outcome_pending = False
+        self._nudge_on_ignored: "Callable[[], None] | None" = None
+        # 답장 콜백은 결과 판정보다 오래 산다 — 판정이 끝난 뒤에도 캐릭터를 눌러 지난
+        # 발화를 되살려 답할 수 있어야 한다. 새 발화나 새 대화 턴이 오면 교체·해제된다.
+        self._nudge_reply_cb: "Callable[[], None] | None" = None
         self._speech_width_override: "int | None" = None
         self._speech_max_h_override: "int | None" = None
         self._speech_rect: "tuple[int, int, int, int] | None" = None  # (x, y, w, h) — InputBar가 이 아래로 쌓는 데 씀
@@ -156,6 +163,11 @@ class BubbleManager:
         self._speech_dismissed = False
         self._thought_dismissed = False
         self._clear_nudge_state()  # 사용자가 턴을 시작했으니 nudge 상태(색/클릭)를 응답용으로 되돌림
+        # nudge 를 클릭해서 시작한 턴이면 _on_speech_click 이 이미 잠금을 풀어놨으므로
+        # 여기서는 아무 일도 안 한다. 무관한 새 대화를 시작한 경우에만 무시로 마감된다.
+        self._settle_nudge_outcome()
+        # 새 대화가 시작됐으니 "마지막에 한 말"은 더 이상 자율발화가 아니다 — 답장 경로 해제.
+        self._nudge_reply_cb = None
         self._speech_block_id = None  # 다음 speech 델타가 이전 응답을 밀어내고 새로 시작
         self._thought_text = ""
         self._thought_block_id = None
@@ -214,7 +226,7 @@ class BubbleManager:
         안 따라가고 옛 위치에 남는다. 캐릭터를 클릭(제자리 클릭, 드래그 아님)해서
         입력창을 열 때마다 호출해서 캐릭터를 따라가게 한다 — 자동 배치든 사용자가
         드래그해서 옮긴 위치든(캐릭터 기준 오프셋이라) 그대로 다시 적용된다."""
-        self._render_thought()  # 내부에서 _render_speech()까지 호출
+        self._render_thought()  # 내부에서 _render_speech()까지 호출(버튼 행 포함)
 
     def replay_last(self) -> None:
         """캐릭터를 클릭했을 때 마지막 교환을 되살린다 — 풍선이 페이드로 사라졌어도
@@ -229,10 +241,14 @@ class BubbleManager:
             self._speech_block_id = None
             self._speech_text = self._last_speech_text
             self._speech_color_override = self._nudge_colors() if self._last_was_nudge else None
-            # 복원된 풍선은 클릭하면 그냥 닫히게 둔다 — nudge 의 "대화 잇기" 오버라이드는
-            # 원래 발화 시점의 일회성이라 복원하지 않는다.
-            self._speech_on_click_override = None
-            self._render_speech()
+            # 마지막이 자율발화였다면 답장 경로를 그대로 되살린다 — 사용자가 임의 시점에
+            # 캐릭터를 눌러 "마지막에 뭐라고 했더라"를 보고 거기에 답하는 게 상주
+            # 캐릭터의 기본 사용법이다. 마지막이 평범한 응답이면 오버라이드 없이
+            # (클릭하면 닫히고) 그냥 새 대화를 시작하면 된다.
+            self._speech_on_click_override = (
+                self._nudge_reply_cb if (self._last_was_nudge and self._nudge_reply_cb) else None
+            )
+            self._render_speech()  # 버튼 행도 _nudge_reply_cb 유무에 따라 함께 그려진다
             self._speech.schedule_dismiss(int(self._cfg.get("speech_dwell_ms", 20000)))
         if self._echo_text and self._echo_rect is not None and not self._echo.is_visible():
             self._render_echo()
@@ -269,6 +285,9 @@ class BubbleManager:
         self._speech_text = ""
         self._speech_rect = None
         self._clear_nudge_state()  # nudge 가 페이드로 사라진 경우 오버라이드도 정리
+        # 반응 없이 dwell 이 만료됐다 = 무시. 유일하게 "무시"를 실제로 관측하는 지점이다
+        # (예전엔 발화 시점에 미리 무시로 세느라 이 신호 자체가 필요 없었다).
+        self._settle_nudge_outcome()
 
     def show_approval_request(self, request) -> None:
         """confirm_risky/confirm_always 수준에서 도구 승인이 필요할 때(approval.py의
@@ -311,6 +330,8 @@ class BubbleManager:
             self._approval_windows.remove(win)
 
     def clear_all(self) -> None:
+        self._settle_nudge_outcome()  # 화면을 통째로 비우는 것도 반응 없이 끝난 경우
+        self._nudge_reply_cb = None
         self._speech.hide()
         self._speech_text = ""
         self._speech_dismissed = False
@@ -338,13 +359,29 @@ class BubbleManager:
 
     # ── 대화(speech) 슬롯 ────────────────────────────────────────────
 
-    def show_nudge(self, text: str, on_click: "Callable[[], None]", dwell_ms: "int | None" = None) -> None:
+    def show_nudge(
+        self,
+        text: str,
+        on_click: "Callable[[], None]",
+        dwell_ms: "int | None" = None,
+        on_ignored: "Callable[[], None] | None" = None,
+    ) -> None:
         """능동 발화(initiative)를 speech 슬롯에 렌더한다 — 답변과 같은 자리·모양이지만
         teal 색으로 구분하고, 클릭하면 닫히는 대신 on_click(대화로 잇기)이 불린다.
         dwell_ms 뒤 자동 페이드(마우스를 올려두면 유지). 새 턴/응답이 오면 상태가
-        응답용으로 되돌아간다(_clear_nudge_state)."""
+        응답용으로 되돌아간다(_clear_nudge_state).
+
+        on_ignored: 사용자가 반응하지 않은 채로 이 발화가 끝났을 때 정확히 1회 호출한다
+        (dwell 만료 페이드 · "나중에" 버튼 · 무관한 새 턴 시작). 클릭 경로에서는 부르지
+        않는다 — 그쪽 결과는 호출부가 답장 여부까지 보고 판정한다."""
         if not text:
             return
+        # 앞선 발화가 아직 결과 미확정이면 여기서 무시로 마감한다 — 새 발화가 화면을
+        # 덮어쓰면 이전 발화는 영영 판정될 기회가 없다.
+        self._settle_nudge_outcome()
+        self._nudge_on_ignored = on_ignored
+        self._nudge_outcome_pending = True
+        self._nudge_reply_cb = on_click  # 판정이 끝난 뒤에도 유지(복원 시 답장용)
         self._speech.cancel_dismiss()
         self._speech_dismissed = False
         self._speech_block_id = None
@@ -358,7 +395,7 @@ class BubbleManager:
         self._echo_text = ""
         self._echo_rect = None
         self._echo.hide()
-        self._render_speech()
+        self._render_speech()  # 버튼 행은 _render_speech 가 풍선과 함께 그린다
         dwell = int(dwell_ms if dwell_ms is not None else self._cfg.get("speech_dwell_ms", 20000))
         self._speech.schedule_dismiss(dwell)
 
@@ -369,12 +406,114 @@ class BubbleManager:
             outline=self._theme.get("nudge_outline", self._theme["speech_outline"]),
         )
 
+    # ── 능동 발화 결과 판정 ───────────────────────────────────────────
+
+    def _settle_nudge_outcome(self) -> None:
+        """결과 미확정 상태로 사라지는 발화를 "무시"로 마감한다 — 페이드/새 턴/교체 등
+        사용자가 반응하지 않은 모든 경로가 여기로 모인다. 한 발화당 정확히 1회만
+        불리도록 _nudge_outcome_pending 으로 잠근다."""
+        if not self._nudge_outcome_pending:
+            return
+        self._nudge_outcome_pending = False
+        cb, self._nudge_on_ignored = self._nudge_on_ignored, None
+        self._clear_reply_hint()
+        if cb is not None:
+            try:
+                cb()
+            except Exception:
+                pass
+
+    # 답장 아이콘 배지 — 말풍선 오른쪽 아래 모서리에 반쯤 걸치게 얹는다.
+    _NUDGE_ICON_R = 14          # 배지 반지름
+    _NUDGE_ICON_OVERHANG = 16   # 풍선 아래로 삐져나오는 만큼(캔버스를 이만큼 늘린다)
+    _NUDGE_ICON_TAG = "nudge_reply"
+
+    def _grow_for_nudge_row(self, canvas, total_w: int, h: int, tail_side: str = "left") -> int:
+        """풍선 아래로 배지가 삐져나올 만큼 캔버스를 늘리고 답장 아이콘을 그린다 —
+        늘어난 높이 반환. 아이콘이 필요 없으면 높이를 그대로 돌려준다."""
+        row_h = self._nudge_row_height()
+        if not row_h:
+            return h
+        bubble_h = h
+        h += row_h
+        canvas.config(height=h)
+        self._draw_reply_hint(canvas, total_w, bubble_h, tail_side)
+        return h
+
+    def _nudge_row_height(self) -> int:
+        """답장 아이콘을 그려야 하면 캔버스에 덧댈 높이, 아니면 0.
+
+        판정 대기 여부가 아니라 **답장 콜백이 살아있는지**로 정한다. 결과 판정 창
+        (dwell 25초)과 답할 수 있는 창은 별개다 — 사용자는 아무 때나 캐릭터를 눌러
+        "마지막에 뭐라고 했더라"를 확인하고 그때 답할 수 있어야 한다. 판정 창에
+        묶어두면 복원된 발화가 답장 불가가 되고, 직접 타이핑하는 경로엔 발화 문구
+        prepend 도 없어서 연속성이 끊긴다."""
+        if self._nudge_reply_cb is None:
+            return 0
+        return self._NUDGE_ICON_OVERHANG
+
+    def _draw_reply_hint(self, canvas, total_w: int, bubble_h: int, tail_side: str = "left") -> None:
+        """말풍선 오른쪽 아래 모서리에 SNS 식 REPLY 아이콘을 배지로 그린다.
+
+        tk.Button 두 개(답장/나중에)를 놓았다가 이걸로 교체했다 — 네이티브 버튼은
+        풍선의 조형과 전혀 안 맞고, "나중에"는 애초에 필요하지 않다(안 누르고 두면
+        그게 곧 무시다).
+
+        **캔버스 아이템으로 그린다**(위젯 아님): 폰트에 화살표 글리프가 있는지에
+        의존하지 않고, 임베드 위젯이 캔버스 아이템보다 항상 위에 그려지는 z순서
+        문제도 피한다. 클릭 판정은 따로 붙이지 않는다 — 풍선 전체 클릭이 이미
+        답장으로 이어지므로(_speech_on_click_override) 이 아이콘은 "눌러도 된다"는
+        표시 역할이다. 배지 절반이 투명 영역에 걸치므로 원형 바탕을 깔아야 읽힌다.
+
+        **꼬리 반대쪽 아래 모서리**에 놓는다 — 꼬리는 캐릭터를 향하므로, 같은 쪽에
+        놓으면 캐릭터가 오른쪽에 있을 때(기본 배치) 꼬리와 겹친다."""
+        r = self._NUDGE_ICON_R
+        if tail_side == "right":
+            cx = shapes.TAIL_REACH + r
+        else:
+            cx = total_w - shapes.TAIL_REACH - r
+        # 풍선의 "보이는" 바닥은 캔버스 바닥에서 꼬리 여백(TAIL_REACH)만큼 위다 —
+        # 캔버스 높이를 기준으로 잡으면 배지가 풍선에서 떨어져 떠 있는 것처럼 보인다.
+        cy = bubble_h - shapes.TAIL_REACH
+        bg = self._theme.get("nudge_bg", self._theme["speech_bg"])
+        line = self._theme.get("nudge_outline", self._theme["speech_outline"])
+        fg = self._theme.get("nudge_fg", self._theme["speech_fg"])
+        t = self._NUDGE_ICON_TAG
+        canvas.create_oval(cx - r, cy - r, cx + r, cy + r,
+                           fill=bg, outline=line, width=1.4, tags=t)
+        # SNS 답장 화살표 — 오른쪽 아래 꼬리에서 올라와 **수평으로 왼쪽을 향해** 끝난다.
+        # 마지막 구간이 수평이어야 화살머리가 정확히 왼쪽을 가리킨다(비스듬하면 마우스
+        # 커서처럼 보인다).
+        canvas.create_line(
+            cx + 6, cy + 6.5, cx + 5.5, cy + 1.5, cx + 2.5, cy - 3,
+            cx - 1.5, cy - 3, cx - 7, cy - 3,
+            smooth=True, width=1.7, fill=fg, capstyle=tk.ROUND,
+            arrow=tk.LAST, arrowshape=(6, 7, 3), tags=t,
+        )
+
+    def _clear_reply_hint(self, canvas=None) -> None:
+        """아이콘만 지운다 — 다음 렌더의 delete("all") 로도 사라지지만, 풍선을 다시
+        그리지 않고 상태만 정리하는 경로(판정 마감 등)에서는 명시적으로 필요하다."""
+        target = canvas if canvas is not None else self._speech.canvas
+        if target is None:
+            return
+        try:
+            target.delete(self._NUDGE_ICON_TAG)
+        except Exception:
+            pass
+
     def _clear_nudge_state(self) -> None:
         self._speech_on_click_override = None
         self._speech_color_override = None
+        self._clear_reply_hint()
 
     def _on_speech_click(self) -> None:
         override = self._speech_on_click_override
+        # 클릭은 무시가 아니다 — 마감 콜백이 돌지 않도록 잠금부터 푼다.
+        # (_clear_nudge_state → _settle_nudge_outcome 순서로 엮이면 같은 발화가
+        #  ignored 로 먼저 집계된 뒤 engaged 가 씹힌다.)
+        self._nudge_outcome_pending = False
+        self._nudge_on_ignored = None
         self._clear_nudge_state()
         self._speech_dismissed = True
         self._speech.hide()
@@ -388,6 +527,7 @@ class BubbleManager:
     def _handle_error(self, ev: dict) -> None:
         # 오류는 중요하므로 사용자가 방금 대화 풍선을 닫았어도 강제로 다시 띄운다.
         self._clear_nudge_state()
+        self._settle_nudge_outcome()  # 오류 풍선이 nudge 를 덮으면 그 발화는 판정 기회를 잃는다
         self._speech_dismissed = False
         self._speech_text = f"[오류] {ev.get('text') or ''}"
         self._render_speech()
@@ -461,6 +601,7 @@ class BubbleManager:
                       else self._max_body_h(char_y, "speech_max_height_ratio"))
         # 각도는 아직 모르니 임시값(0)으로 그려서 크기만 잰다(폭/높이는 각도와 무관).
         w, h = shapes.draw_speech_bubble(canvas, self._speech_text, max_width, font=font, fixed_body_w=fixed_w, max_body_h=max_body_h, **speech_colors)
+        h += self._nudge_row_height()  # 버튼 행까지 포함한 높이로 위치를 잡아야 한다
 
         if self._speech.is_moving():
             # 사용자가 지금 이 풍선을 드래그/리사이즈하는 중 — 스트리밍 중 도착한 텍스트가
@@ -479,6 +620,7 @@ class BubbleManager:
                     canvas, self._speech_text, max_width, angle_rad=angle_rad, font=font,
                     fixed_body_w=fixed_w, grip_corner=grip_corner, max_body_h=max_body_h, **speech_colors,
                 )
+                h = self._grow_for_nudge_row(canvas, w, h, tail_side)
                 win.geometry(f"{w}x{h}")
                 self._speech_rect = (cur_x, cur_y, w, h)
             return
@@ -512,6 +654,7 @@ class BubbleManager:
             canvas, self._speech_text, max_width, angle_rad=angle_rad, font=font,
             fixed_body_w=fixed_w, grip_corner=grip_corner, max_body_h=max_body_h, **speech_colors,
         )
+        h = self._grow_for_nudge_row(canvas, w, h, tail_side)
 
         self._speech.place(x, y, w, h)
         self._speech_rect = (x, y, w, h)
@@ -594,6 +737,7 @@ class BubbleManager:
         if kind == "speech":
             self._speech.cancel_dismiss()  # 새 응답 조각이 오는 중 — 이전 페이드 예약 취소
             self._clear_nudge_state()  # 실제 어시스턴트 응답 — nudge 색/클릭 오버라이드 해제
+            self._nudge_reply_cb = None  # 마지막에 한 말이 응답으로 바뀌었으니 답장 경로도 해제
             self._speech_dismissed = False
             if is_delta and block_id is not None and block_id != self._speech_block_id:
                 # 블록이 바뀌면(새 턴의 첫 조각, 또는 같은 턴 안에서 도구 호출 전/후로

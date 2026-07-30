@@ -91,6 +91,11 @@ class BubbleSessionManager:
             self._permission_mode = "bypassPermissions"
             self._can_use_tool = None
         else:
+            # confirm_risky/confirm_always에서 승인 풍선이 안 뜨는 문제 조사 중 —
+            # "default"→"manual" 치환을 시도했으나 실측(E2E)으로 효과 없음이 확인됨
+            # (can_use_tool 콜백이 어떤 permission_mode/settings 조합에서도 호출 안 됨).
+            # 원인 미해결 — 다음 유력 후보는 이 작업 디렉토리 자체의 CLI "trust" 상태가
+            # permission_mode/canUseTool보다 우선해서 전부 자동 승인시키는 경우.
             self._permission_mode = "default"
             broker = ToolApprovalBroker(self._permission_level, on_request=on_approval_request, timeout=approval_timeout)
             self._can_use_tool = broker.can_use_tool

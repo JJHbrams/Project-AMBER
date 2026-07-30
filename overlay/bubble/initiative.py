@@ -59,6 +59,20 @@ _DEFAULTS = {
 _SOURCE_ORDER = ("unfinished", "curiosity", "git", "persona")
 
 
+# 결과 판정에 쓰이는 세 가지 값 — 무엇을 "참여"로 볼지가 곧 학습 신호의 정의다.
+ENGAGED = "engaged"                     # 답장까지 실제로 도달
+ACKNOWLEDGED = "acknowledged_no_reply"  # 열어는 봤으나 응답 없음(중간 신호)
+IGNORED = "ignored"                     # dwell 만료 페이드 또는 "나중에"
+# 판정이 끝난 뒤(대개 페이드로 ignored 처리된 뒤) 사용자가 캐릭터를 눌러 지난 발화를
+# 다시 보고 그때 답한 경우. 이미 기록된 결과는 건드리지 않고 별도로 남긴다 —
+# "발화 1건 = 결과 1건" 불변식을 지키면서도 "결국 응했다"는 신호를 잃지 않기 위함.
+LATE_ENGAGED = "late_engaged"
+
+# 결과별 백오프 가중치 — ignored 는 1스텝, acknowledged 는 그 절반만 민다.
+# ("열어는 봤다"는 완전한 무시보다 약한 부정 신호라 간격을 덜 벌린다.)
+_BACKOFF_WEIGHT = {ENGAGED: 0.0, ACKNOWLEDGED: 0.5, IGNORED: 1.0}
+
+
 @dataclass
 class Nudge:
     """능동 발화 후보 하나.
@@ -66,13 +80,18 @@ class Nudge:
     - source_key: 어느 소스에서 나왔는지(쿨다운/백오프 키).
     - fallback_text: LLM 없이도 성립하는 완성 문구(말풍선용, 마크다운 허용).
     - context: 프레이징 LLM 에게 줄 상황 설명(없으면 fallback 을 그대로 프레이징 소스로).
-    - engage_prompt: 사용자가 풍선을 클릭해 대화로 이어갈 때 세션에 보낼 프롬프트
-      (None 이면 그냥 입력창만 연다).
-    """
+    - topic: 무엇에 대한 발화였는지 짧은 라벨 — 결과 로그에 남겨 소재별 반응을 집계한다.
+    - ref_id: 소재의 원본 레코드 id(예: curiosity id). 참여했을 때 그 레코드를 해소
+      처리하는 데 쓴다 — 이게 없으면 "발화했다"는 사실만 남고 지식이 갱신되지 않는다.
+
+    topic/ref_id 가 없으면 발화 결과를 어디에도 귀속시킬 수 없어 후처리 자체가
+    불가능하다. 그래서 이 두 필드는 발화 시점이 아니라 **결과가 확정될 때까지**
+    엔진이 _active_nudge 로 들고 있는다."""
     source_key: str
     fallback_text: str
     context: str = ""
-    engage_prompt: Optional[str] = None
+    topic: str = ""
+    ref_id: Optional[int] = None
 
 
 class SourceProvider(Protocol):
@@ -123,14 +142,14 @@ class GitStatusSource:
                 self.key,
                 fallback_text=f"`{branch}` 에 커밋 안 한 변경 {n}개 있어. 정리해둘까?",
                 context=f"현재 git 브랜치 '{branch}' 에 커밋되지 않은 변경 파일이 {n}개 있다.",
-                engage_prompt=f"지금 {branch} 브랜치의 커밋 안 된 변경들을 요약해줘.",
+                topic=f"{branch} 미커밋 변경",
             )
         if ahead_n:
             return Nudge(
                 self.key,
                 fallback_text=f"`{branch}` 에 아직 push 안 한 커밋 {ahead_n}개가 남아있어.",
                 context=f"현재 git 브랜치 '{branch}' 가 원격보다 {ahead_n}개 커밋 앞서 있다(미push).",
-                engage_prompt=None,
+                topic=f"{branch} 미push 커밋",
             )
         return None
 
@@ -164,7 +183,7 @@ class UnfinishedWorkSource:
             self.key,
             fallback_text=f"저번에 *{_clip(intents)}* 하다 멈췄었지. 이어서 할까?",
             context=f"직전 세션에서 아직 끝내지 못한 작업(open_intents): {intents}",
-            engage_prompt=f"아까 하다 만 작업 이어서 진행하자: {intents}",
+            topic=_clip(intents, 60),
         )
 
 
@@ -191,11 +210,14 @@ class CuriositySource:
         ctx = f"예전부터 미뤄둔 호기심: {topic}"
         if reason:
             ctx += f" (궁금해진 이유: {reason})"
+        # ref_id 를 실어 보내야 사용자가 실제로 이 화제에 응했을 때 해당 호기심을
+        # 해소 처리할 수 있다 — 안 그러면 이미 다룬 주제로 계속 다시 말을 건다.
         return Nudge(
             self.key,
             fallback_text=f"문득 궁금한 게 있는데 — {_clip(topic)}",
             context=ctx,
-            engage_prompt=f"전부터 궁금했던 거 같이 파보자: {topic}",
+            topic=topic,
+            ref_id=top.get("id"),
         )
 
 
@@ -220,7 +242,7 @@ class PersonaIdleSource:
             # 우선순위/쿨다운으로 조절한다.
             fallback_text=f"{name}, 여기 있어. 필요하면 불러.",
             context=ctx,
-            engage_prompt=None,
+            topic="혼잣말",
         )
 
 
@@ -296,6 +318,7 @@ class InitiativeEngine:
         show_nudge: Callable[[str, Callable[[], None]], None],
         phrase: Optional[Callable[[str, str], Optional[str]]] = None,
         sources: Optional[list[SourceProvider]] = None,
+        on_outcome: Optional[Callable[[Nudge, str, str], None]] = None,
     ):
         """
         - is_screen_clear(): 입력창 닫힘·턴 진행 안 함·뜬 풍선 없음 → True 일 때만 발화.
@@ -303,6 +326,14 @@ class InitiativeEngine:
         - show_nudge(text, on_click): 메인스레드에서 능동 발화 풍선을 렌더한다.
         - phrase(context, fallback): 프레이징 결과(없으면 None). 워커 스레드에서 불려도
           되게 만들어 두고, 결과 렌더는 엔진이 root.after 로 메인스레드에 넘긴다.
+        - on_outcome(nudge, outcome, shown_text, latency_sec): 발화 하나의 결과가 확정될
+          때 1회 호출. latency_sec 은 화면에 뜬 순간부터 결과가 정해질 때까지의 초 —
+          같은 ignored 라도 "3초 만에 물림"과 "25초 dwell 을 다 채우고 페이드"는 정반대
+          신호(전자는 관심 없음, 후자는 자리에 없었을 가능성)라 이 값 없이는 구분이 안
+          되고, 로그에 안 남기면 나중에 소급 복원할 방법도 없다.
+          엔진은 백오프 회계까지만 책임지고, "그래서 무엇을 남길지"(활동 로그·호기심
+          해소·KG)는 전부 이 콜백 바깥에서 처리한다 — 엔진이 DB 를 직접 알면 tkinter
+          없는 단위 테스트가 불가능해지기 때문.
         """
         self._root = root
         self._cfg = {**_DEFAULTS, **(cfg_initiative or {})}
@@ -311,14 +342,29 @@ class InitiativeEngine:
         self._seconds_since_activity = seconds_since_activity
         self._show_nudge = show_nudge
         self._phrase = phrase
+        self._on_outcome = on_outcome
         self._sources = {s.key: s for s in (sources or [])}
         self._source_state: dict[str, _SourceState] = {}
         self._last_spoke = 0.0
-        self._ignore_streak = 0
-        self._pending_engage: Optional[str] = None
+        # 결과 가중치가 0.5 단위라 float — 간격 배수 계산에서만 쓰이므로 정수일 필요 없다.
+        self._ignore_streak = 0.0
+        # 결과 대기 중인 발화 — 렌더된 순간부터 결과가 확정될 때까지만 살아있다.
+        # 이게 None 이면 지금 판정할 발화가 없다는 뜻이라 모든 notify_* 가 무시된다
+        # (같은 발화가 두 번 집계되는 걸 막는 유일한 장치).
+        self._active_nudge: Optional[Nudge] = None
+        self._active_text = ""
+        self._active_since = 0.0  # 화면에 뜬 시각 — 결과까지의 지연을 재는 기준점
+        # 결과가 확정된 뒤에도 남겨두는 "가장 마지막 발화" — 사용자가 아무 때나 캐릭터를
+        # 눌러 "마지막에 뭐라고 했더라" 를 확인하고 그때 답할 수 있어야 하기 때문.
+        # 25초 dwell 은 결과를 판정하는 창일 뿐이고, 답할 수 있는 창이 아니다.
+        self._last_nudge: Optional[Nudge] = None
+        self._last_nudge_text = ""
+        # 폐기 시 되돌릴 값 — _speak 이 간격/쿨다운을 선지불하기 때문에 필요하다.
+        self._rollback: Optional[tuple[float, str, float]] = None
         self._after_id = None
         self._phrasing_inflight = False
         self._stopped = False
+        self._last_state_key = ""  # 같은 보류 이유를 반복해서 찍지 않기 위한 직전 상태 key
 
     # ── 공개 API ──────────────────────────────────────────────────────
 
@@ -346,14 +392,72 @@ class InitiativeEngine:
             self._last_spoke = 0.0  # 방금 켰으면 첫 발화까지 idle_min_sec 만 기다림
 
     def notify_engaged(self) -> None:
-        """사용자가 능동 발화 풍선을 받아 대화로 이어갔다 — 무시 백오프를 리셋한다."""
-        self._ignore_streak = 0
+        """사용자가 능동 발화를 받아 실제로 답장까지 했다 — 백오프를 리셋한다."""
+        self._resolve(ENGAGED)
 
-    def take_pending_engage(self) -> Optional[str]:
-        """마지막 발화의 engage_prompt(있으면) 를 한 번 꺼내 간다 — main 이 nudge 클릭 시
-        입력창을 열면서 이 프롬프트로 대화를 시작할 수 있게."""
-        p, self._pending_engage = self._pending_engage, None
-        return p
+    def notify_acknowledged(self) -> None:
+        """풍선을 열어보긴 했으나 응답 없이 닫았다 — 중간 신호(백오프 절반 스텝)."""
+        self._resolve(ACKNOWLEDGED)
+
+    def notify_ignored(self) -> None:
+        """dwell 이 만료돼 페이드됐거나 사용자가 "나중에"로 물렸다 — 백오프 한 스텝."""
+        self._resolve(IGNORED)
+
+    def notify_late_engaged(self) -> None:
+        """판정이 끝난 지난 발화에 사용자가 뒤늦게 답했다.
+
+        이미 기록된 결과(대개 ignored)는 고치지 않는다 — 그 시점의 관측은 사실이었다.
+        대신 별도 신호로 남기고 백오프는 리셋한다: 결국 응했다는 건 그 소재가 쓸모
+        있었다는 뜻이고, 그걸 무시 취급해 발화 간격을 계속 벌리면 안 된다."""
+        nudge, self._last_nudge = self._last_nudge, None
+        text, self._last_nudge_text = self._last_nudge_text, ""
+        if nudge is None:
+            return
+        self._ignore_streak = 0.0
+        if self._on_outcome is not None:
+            try:
+                self._on_outcome(nudge, LATE_ENGAGED, text, 0.0)
+            except Exception:
+                logger.exception("[initiative] 늦은 참여 후처리 실패")
+
+    def has_pending_outcome(self) -> bool:
+        """지금 결과 판정을 기다리는 발화가 있는지 — 호출부가 "이 사용자 입력이 자율발화에
+        대한 답인가, 그냥 평소 대화인가"를 구분하는 데 쓴다."""
+        return self._active_nudge is not None
+
+    def _resolve(self, outcome: str) -> None:
+        """발화 하나의 결과를 확정한다 — 백오프를 조정하고 on_outcome 을 1회 호출한다.
+
+        대기 중인 발화가 없으면 조용히 무시한다. 평범한 대화(자율발화와 무관)가
+        백오프를 리셋해버리던 문제를 여기서 막는다 — 호출부는 마음 놓고 부를 수 있고,
+        "자율발화에 대한 반응일 때만" 실제로 반영된다."""
+        nudge, self._active_nudge = self._active_nudge, None
+        if nudge is None:
+            return
+        text, self._active_text = self._active_text, ""
+        latency = max(0.0, time.monotonic() - self._active_since) if self._active_since else 0.0
+        self._active_since = 0.0
+        self._rollback = None  # 결과가 나온 이상 되돌릴 일은 없다
+        if outcome == ENGAGED:
+            self._ignore_streak = 0.0
+            # 이미 답장까지 갔으면 "되살려서 답할" 대상이 없다.
+            self._last_nudge, self._last_nudge_text = None, ""
+        else:
+            # 답하지 않은 발화는 슬롯에 남긴다 — 나중에 캐릭터를 눌러 답할 수 있어야 한다.
+            self._ignore_streak += _BACKOFF_WEIGHT.get(outcome, 1.0)
+        if self._on_outcome is not None:
+            try:
+                self._on_outcome(nudge, outcome, text, latency)
+            except Exception:
+                logger.exception("[initiative] 결과 후처리 실패 outcome=%s", outcome)
+
+    def active_nudge_text(self) -> str:
+        """대화를 이을 때 첫 프롬프트에 얹을 발화 문구 — 프레이징을 거쳤다면 템플릿이
+        아니라 화면에 실제로 보인 그 문장이다.
+
+        결과가 확정된 뒤에도 마지막 발화 문구를 돌려준다. 안 그러면 "지난 발화를 보고
+        뒤늦게 답하는" 경로에서 연속성(prepend)이 통째로 빠진다."""
+        return self._active_text or self._last_nudge_text
 
     # ── 내부 루프 ──────────────────────────────────────────────────────
 
@@ -366,37 +470,75 @@ class InitiativeEngine:
     def _tick(self) -> None:
         self._after_id = None
         try:
-            if self._should_speak():
+            key, detail = self._blocking_reason()
+            if key is None:
                 nudge = self._select_nudge()
-                if nudge is not None:
+                if nudge is None:
+                    key, detail = "dry", "소재 없음(모든 소스가 None 또는 쿨다운)"
+                else:
+                    self._log_state("spoke", f"발화 → source={nudge.source_key} topic={nudge.topic or '-'}")
                     self._speak(nudge)
+                    return
+            self._log_state(key, f"보류 — {detail}")
         except Exception:
             logger.exception("[initiative] tick 처리 실패")
         finally:
             self._schedule_next()
 
+    def _log_state(self, key: str, msg: str) -> None:
+        """상태가 **바뀔 때만** 한 줄 남긴다.
+
+        tick 이 45초마다 도는데 매번 찍으면 로그가 쓸려나가고, 아무것도 안 찍으면
+        "왜 안 뜨는지"를 밖에서 알 방법이 없다(이 침묵 때문에 실제로 디버깅이 막혔다).
+
+        중복 판정은 **key** 로만 한다 — 메시지에 경과 초 같은 값이 들어가면 매 tick
+        문자열이 달라져서 "상태 변화 시 1회"가 무력화된다(실제로 그렇게 도배됐다)."""
+        if key == self._last_state_key:
+            return
+        self._last_state_key = key
+        logger.info("[initiative] %s", msg)
+
     def _should_speak(self) -> bool:
+        """게이트를 전부 통과했는지 — 이유가 필요하면 _blocking_reason() 을 쓴다."""
+        return self._blocking_reason()[0] is None
+
+    def _blocking_reason(self) -> tuple[Optional[str], str]:
+        """발화를 막고 있는 첫 조건을 (중복판정 key, 사람이 읽을 문구)로. 통과하면 (None, "").
+
+        key 는 조건의 종류만 나타낸다 — 문구에 든 경과 초는 매 tick 바뀌므로
+        중복 판정에 쓰면 로그가 도배된다."""
         if not self._cfg.get("enabled"):
-            return False
+            return "disabled", "enabled=false"
         if self._phrasing_inflight:
-            return False
+            return "phrasing", "직전 프레이징이 아직 진행 중"
         if self._in_quiet_hours():
-            return False
+            return "quiet", (f"조용한 시간대 {self._cfg.get('quiet_start_hour')}~"
+                             f"{self._cfg.get('quiet_end_hour')}시")
         try:
             if not self._is_screen_clear():
-                return False
-            if self._seconds_since_activity() < float(self._cfg.get("idle_min_sec", 600)):
-                return False
+                return "screen", "화면이 비어있지 않음(입력창/턴 진행/떠 있는 풍선)"
+            idle = self._seconds_since_activity()
+            idle_min = float(self._cfg.get("idle_min_sec", 600))
+            if idle < idle_min:
+                return "idle", f"유휴 부족 {idle:.0f}s < {idle_min:.0f}s"
         except Exception:
             logger.debug("[initiative] 유휴 판정 콜백 실패", exc_info=True)
-            return False
-        return self._seconds_since_activity_ok_gap()
+            return "callback", "유휴 판정 콜백 실패"
+        gap, need = self._gap_status()
+        if gap < need:
+            return "gap", f"발화 간격 부족 {gap:.0f}s < {need:.0f}s (streak={self._ignore_streak:g})"
+        return None, ""
+
+    def _gap_status(self) -> tuple[float, float]:
+        """(마지막 발화 후 경과초, 필요한 간격초) — 무시가 쌓이면 필요 간격이 늘어난다."""
+        need = float(self._cfg.get("min_gap_sec", 1800))
+        streak = min(self._ignore_streak, int(self._cfg.get("ignore_backoff_max", 4)))
+        need *= (1 + streak)
+        return (time.monotonic() - self._last_spoke), need
 
     def _seconds_since_activity_ok_gap(self) -> bool:
-        gap = float(self._cfg.get("min_gap_sec", 1800))
-        streak = min(self._ignore_streak, int(self._cfg.get("ignore_backoff_max", 4)))
-        gap *= (1 + streak)  # 무시가 쌓일수록 발화 간격을 늘린다
-        return (time.monotonic() - self._last_spoke) >= gap
+        gap, need = self._gap_status()
+        return gap >= need
 
     def _in_quiet_hours(self) -> bool:
         start = int(self._cfg.get("quiet_start_hour", 22)) % 24
@@ -431,15 +573,22 @@ class InitiativeEngine:
         return None
 
     def _speak(self, nudge: Nudge) -> None:
-        # 이 시점에 이미 무시로 간주할 준비 — 실제로 사용자가 클릭/응답하면 notify_engaged 가
-        # 리셋한다. 발화하는 순간 간격/쿨다운/백오프를 먼저 기록해 중복 발화를 막는다.
-        self._last_spoke = time.monotonic()
-        self._source_state.setdefault(nudge.source_key, _SourceState()).last_fired = time.monotonic()
-        self._ignore_streak += 1
-        self._pending_engage = nudge.engage_prompt
+        # 간격/쿨다운은 여기서 선지불한다 — 프레이징이 도는 몇 초 사이에 다음 tick 이
+        # 또 발화하는 걸 막으려면 렌더를 기다릴 수 없다. 다만 결국 렌더되지 못하면
+        # _discard() 가 이 값들을 되돌린다.
+        #
+        # 백오프(ignore_streak)는 선지불하지 않는다. 예전에는 여기서 미리 +1 하고
+        # 참여 시 리셋하는 방식이었는데, 그러면 (1) 화면에 뜨지도 않고 폐기된 발화가
+        # 무시로 집계되고 (2) 실제 결과를 관측할 필요 자체가 없어져서 학습 신호가
+        # 생기지 않는다. 이제는 결과가 확정될 때(_resolve) 한 번만 움직인다.
+        st = self._source_state.setdefault(nudge.source_key, _SourceState())
+        self._rollback = (self._last_spoke, nudge.source_key, st.last_fired)
+        now = time.monotonic()
+        self._last_spoke = now
+        st.last_fired = now
 
         if self._phrase is None or not self._cfg.get("phrasing", True):
-            self._render(nudge.fallback_text)
+            self._render(nudge, nudge.fallback_text)
             return
 
         # 프레이징은 격리 워커 스레드에서(call_claude_resumable 이 자체 스레드+타임아웃),
@@ -454,27 +603,55 @@ class InitiativeEngine:
             except Exception:
                 logger.debug("[initiative] 프레이징 실패", exc_info=True)
             text = (phrased or "").strip() or nudge.fallback_text
-            self._root.after(0, lambda: self._finish_phrasing(text))
+            self._root.after(0, lambda: self._finish_phrasing(nudge, text))
 
         threading.Thread(target=_worker, daemon=True, name="initiative-phrase").start()
 
-    def _finish_phrasing(self, text: str) -> None:
+    def _finish_phrasing(self, nudge: Nudge, text: str) -> None:
         self._phrasing_inflight = False
         # 프레이징(수 초)이 도는 사이 사용자가 입력창을 열거나 대화를 시작했을 수 있다 —
-        # 그러면 뒤늦게 뜨는 nudge 가 방해가 되므로 조용히 버린다(간격/쿨다운은 이미
-        # 소비됐으니 다음 발화는 정상적으로 min_gap 뒤).
+        # 그러면 뒤늦게 뜨는 nudge 가 방해가 되므로 조용히 버린다.
         try:
             if not self._is_screen_clear():
+                self._discard()
                 return
         except Exception:
             pass
-        self._render(text)
+        self._render(nudge, text)
 
-    def _render(self, text: str) -> None:
+    def _discard(self) -> None:
+        """렌더되지 못한 발화의 선지불을 환불한다.
+
+        예전에는 그냥 return 해서 간격·쿨다운이 소비된 채로 남았다 — 사용자 눈에는
+        아무 일도 없었는데 다음 발화는 30분 밀리고, 그 소재는 쿨다운에 걸려 한동안
+        다시 안 나왔다. 보이지 않은 발화는 없던 일로 되돌리는 게 맞다."""
+        if self._rollback is None:
+            return
+        last_spoke, source_key, last_fired = self._rollback
+        self._rollback = None
+        self._last_spoke = last_spoke
+        st = self._source_state.get(source_key)
+        if st is not None:
+            st.last_fired = last_fired
+        self._log_state("discard", f"폐기 — 프레이징 완료 시점에 화면이 바빠짐 (source={source_key}, 간격·쿨다운 환불)")
+
+    def _render(self, nudge: Nudge, text: str) -> None:
         try:
             self._show_nudge(text, self._on_nudge_click)
         except Exception:
             logger.exception("[initiative] nudge 렌더 실패")
+            self._discard()  # 화면에 못 띄웠으면 폐기와 같은 취급
+            return
+        # 여기부터가 "결과를 기다리는" 상태 — 렌더에 성공한 발화만 판정 대상이 된다.
+        self._active_nudge = nudge
+        self._active_text = text
+        self._active_since = time.monotonic()
+        self._rollback = None
+        # 판정이 끝난 뒤에도 남는 슬롯 — 다음 발화가 오면 덮인다.
+        self._last_nudge = nudge
+        self._last_nudge_text = text
 
     def _on_nudge_click(self) -> None:
-        self.notify_engaged()
+        """풍선/답장 버튼 클릭 — 아직 engaged 가 아니다. 입력창이 열렸을 뿐이고,
+        실제로 답장을 보냈는지(engaged) 그냥 닫았는지(acknowledged)는 main 이 판정한다."""
+        return

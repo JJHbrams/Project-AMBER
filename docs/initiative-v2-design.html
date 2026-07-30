@@ -1,0 +1,675 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>자율발화(Initiative) v2 — 동작 설계</title>
+<style>
+:root{
+  --bg:#ffffff; --panel:#f7f8fa; --fg:#1b1f24; --muted:#5b6672;
+  --line:#c3cbd4; --line-strong:#6b7684;
+  --box:#ffffff; --box-b:#9aa5b1;
+  --guard-bg:#fff8e6; --guard-b:#e0a800;
+  --new-bg:#fff1e6; --new-b:#e8722c; --new:#c9551a;
+  --teal-bg:#e6f7f4; --teal-b:#1c9c8b; --teal:#0f7a6c;
+  --bad-bg:#fdecec; --bad-b:#d64545;
+  --ok:#1c8c4a;
+  --code:#f0f2f5;
+}
+@media (prefers-color-scheme: dark){
+  :root{
+    --bg:#12161b; --panel:#1a1f26; --fg:#e6eaef; --muted:#98a3b0;
+    --line:#3a434f; --line-strong:#8b97a5;
+    --box:#1e242c; --box-b:#4a5563;
+    --guard-bg:#33290f; --guard-b:#c99a1a;
+    --new-bg:#3a2213; --new-b:#e8823c; --new:#ff9d5c;
+    --teal-bg:#123430; --teal-b:#2bbfa9; --teal:#5fd8c4;
+    --bad-bg:#3a1c1c; --bad-b:#e06666;
+    --ok:#4fc47c;
+    --code:#232a33;
+  }
+}
+*{box-sizing:border-box}
+body{
+  margin:0; background:var(--bg); color:var(--fg);
+  font-family:"Pretendard","Malgun Gothic","Segoe UI",system-ui,sans-serif;
+  font-size:15px; line-height:1.65;
+}
+.wrap{max-width:1120px;margin:0 auto;padding:36px 24px 96px}
+h1{font-size:26px;margin:0 0 6px;letter-spacing:-.01em}
+h2{font-size:19px;margin:52px 0 6px;padding-top:18px;border-top:1px solid var(--line)}
+h3{font-size:15px;margin:26px 0 6px;color:var(--muted);font-weight:600}
+p{margin:8px 0}
+.sub{color:var(--muted);font-size:13.5px;margin:0 0 4px}
+code,kbd{background:var(--code);padding:1px 5px;border-radius:4px;font-family:"Cascadia Mono",Consolas,monospace;font-size:12.5px}
+.legend{display:flex;flex-wrap:wrap;gap:14px;margin:18px 0 4px;font-size:12.5px;color:var(--muted)}
+.legend span{display:inline-flex;align-items:center;gap:6px}
+.sw{width:14px;height:14px;border-radius:3px;border:1.5px solid var(--box-b);background:var(--box);display:inline-block}
+.sw.new{border-color:var(--new-b);background:var(--new-bg);border-style:dashed}
+.sw.guard{border-color:var(--guard-b);background:var(--guard-bg)}
+.sw.teal{border-color:var(--teal-b);background:var(--teal-bg)}
+.sw.bad{border-color:var(--bad-b);background:var(--bad-bg)}
+figure{margin:18px 0 8px;background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px;overflow-x:auto}
+figcaption{font-size:12.5px;color:var(--muted);margin-top:8px}
+svg{display:block;min-width:760px;width:100%;height:auto}
+/* SVG shared */
+.n{fill:var(--box);stroke:var(--box-b);stroke-width:1.4}
+.n-guard{fill:var(--guard-bg);stroke:var(--guard-b);stroke-width:1.4}
+.n-new{fill:var(--new-bg);stroke:var(--new-b);stroke-width:1.5;stroke-dasharray:5 3}
+.n-teal{fill:var(--teal-bg);stroke:var(--teal-b);stroke-width:1.5}
+.n-bad{fill:var(--bad-bg);stroke:var(--bad-b);stroke-width:1.4}
+.n-ghost{fill:none;stroke:var(--line);stroke-width:1.2;stroke-dasharray:3 3}
+.t{fill:var(--fg);font-size:12px;font-family:inherit}
+.t-b{fill:var(--fg);font-size:12.5px;font-weight:650;font-family:inherit}
+.t-s{fill:var(--muted);font-size:10.5px;font-family:inherit}
+.t-n{fill:var(--new);font-size:10.5px;font-weight:650;font-family:inherit}
+.t-mono{fill:var(--fg);font-size:11px;font-family:"Cascadia Mono",Consolas,monospace}
+.t-mono-s{fill:var(--muted);font-size:10px;font-family:"Cascadia Mono",Consolas,monospace}
+.e{stroke:var(--line-strong);stroke-width:1.4;fill:none}
+.e-new{stroke:var(--new-b);stroke-width:1.5;fill:none;stroke-dasharray:5 3}
+.e-mute{stroke:var(--line);stroke-width:1.2;fill:none;stroke-dasharray:4 4}
+.ahf{fill:var(--line-strong)}
+.ahf-n{fill:var(--new-b)}
+.axis{stroke:var(--line-strong);stroke-width:1.2}
+.grid{stroke:var(--line);stroke-width:1;stroke-dasharray:2 4}
+.bar-open{fill:var(--teal-bg);stroke:var(--teal-b);stroke-width:1.2}
+.bar-closed{fill:none;stroke:var(--line);stroke-width:1.2;stroke-dasharray:3 3}
+.ramp{fill:none;stroke:var(--line-strong);stroke-width:1.8}
+.step{fill:none;stroke:var(--new-b);stroke-width:1.8}
+table{border-collapse:collapse;width:100%;margin:14px 0;font-size:13.5px}
+th,td{border:1px solid var(--line);padding:8px 10px;text-align:left;vertical-align:top}
+th{background:var(--panel);font-weight:650}
+td.ok{color:var(--ok);font-weight:600;white-space:nowrap}
+td.no{color:var(--new);font-weight:600;white-space:nowrap}
+.wrapt{overflow-x:auto}
+ol,ul{margin:8px 0 8px 22px;padding:0}
+li{margin:4px 0}
+.tag{display:inline-block;font-size:10.5px;font-weight:700;padding:1px 6px;border-radius:4px;vertical-align:1px}
+.tag.new{background:var(--new-bg);color:var(--new);border:1px solid var(--new-b)}
+.tag.keep{background:var(--panel);color:var(--muted);border:1px solid var(--line)}
+.tag.fix{background:var(--bad-bg);color:var(--bad-b);border:1px solid var(--bad-b)}
+.note{border-left:3px solid var(--new-b);background:var(--panel);padding:10px 14px;margin:14px 0;border-radius:0 8px 8px 0}
+.f{display:grid;grid-template-columns:58px 1fr;gap:4px 12px;margin:10px 0;font-size:13.5px}
+.f dt{font-weight:700;color:var(--bad-b)}
+.f dd{margin:0}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>자율발화(Initiative) v2 — 동작 설계</h1>
+<p class="sub">ProjectIntelContunuum · 기준 커밋 <code>2e85625</code> (v0.2.1) · <code>overlay/bubble/initiative.py</code>, <code>overlay/main.py</code>, <code>overlay/bubble/bubble_manager.py</code></p>
+
+<p>이 문서는 "유휴 시 말을 건다"까지만 구현된 현재 상태에, <strong>발화 이후의 결과가 어디에 어떻게 쌓이는가</strong>를 붙이는 설계다.
+세 장의 그림 — <em>플로우차트</em>(제어 흐름) · <em>타이밍 그래프</em>(시간 축 실동작) · <em>액션 그래프</em>(결과 → 부작용 → 학습 루프) — 로 나눠 그렸다.</p>
+
+<div class="legend">
+  <span><i class="sw"></i> 구현됨 (v0.2.1)</span>
+  <span><i class="sw guard"></i> 게이트 / 조건</span>
+  <span><i class="sw teal"></i> 사용자에게 보이는 것</span>
+  <span><i class="sw new"></i> 신설 (v2 제안)</span>
+  <span><i class="sw bad"></i> 현재 결함</span>
+</div>
+
+
+<h2>1. 플로우차트 — 5단계 라이프사이클</h2>
+<p class="sub">한 번의 <code>_tick()</code>이 통과해야 하는 게이트부터, 발화 후 결과 판정과 피드백 버스까지.</p>
+
+<figure>
+<svg viewBox="0 0 900 1300" role="img" aria-label="자율발화 라이프사이클 플로우차트">
+<defs>
+  <marker id="ahA" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="ahf"/></marker>
+  <marker id="ahAn" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="ahf-n"/></marker>
+</defs>
+
+<!-- stage badges -->
+<text class="t-s" x="18" y="52">① 트리거 판단</text>
+<text class="t-s" x="18" y="60" opacity=".0">.</text>
+<text class="t-mono-s" x="18" y="68">InitiativeEngine</text>
+<text class="t-mono-s" x="18" y="82">._tick()</text>
+
+<text class="t-s" x="18" y="498">② 소재 선택</text>
+<text class="t-mono-s" x="18" y="514">_select_nudge()</text>
+
+<text class="t-s" x="18" y="640">③ 문구 생성 · 제시</text>
+<text class="t-mono-s" x="18" y="656">_speak()</text>
+
+<!-- start -->
+<rect class="n-teal" x="200" y="30" width="320" height="34" rx="17"/>
+<text class="t-b" x="360" y="52" text-anchor="middle">root.after( tick_sec = 45s ) → _tick()</text>
+
+<!-- guards -->
+<rect class="n-guard" x="200" y="84" width="320" height="44" rx="8"/>
+<text class="t" x="360" y="103" text-anchor="middle">enabled == true ?</text>
+<text class="t-s" x="360" y="118" text-anchor="middle">마스터 토글 — 기본 false</text>
+
+<rect class="n-guard" x="200" y="148" width="320" height="44" rx="8"/>
+<text class="t" x="360" y="167" text-anchor="middle">phrasing_inflight == false ?</text>
+<text class="t-s" x="360" y="182" text-anchor="middle">직전 프레이징이 아직 도는 중이면 스킵</text>
+
+<rect class="n-guard" x="200" y="212" width="320" height="44" rx="8"/>
+<text class="t" x="360" y="231" text-anchor="middle">quiet_hours(22시–08시) 밖인가 ?</text>
+<text class="t-s" x="360" y="246" text-anchor="middle">start == end 이면 조용시간 없음</text>
+
+<rect class="n-guard" x="200" y="276" width="320" height="52" rx="8"/>
+<text class="t" x="360" y="294" text-anchor="middle">screen_clear ?</text>
+<text class="t-s" x="360" y="309" text-anchor="middle">bubble 모드 ∧ ¬turn_active ∧ 입력창 닫힘</text>
+<text class="t-s" x="360" y="322" text-anchor="middle">∧ 떠 있는 풍선 없음</text>
+
+<rect class="n-guard" x="200" y="348" width="320" height="44" rx="8"/>
+<text class="t" x="360" y="367" text-anchor="middle">idle ≥ idle_min_sec (600s) ?</text>
+<text class="t-s" x="360" y="382" text-anchor="middle">마지막 상호작용 이후 경과</text>
+
+<rect class="n-guard" x="200" y="412" width="320" height="48" rx="8"/>
+<text class="t" x="360" y="431" text-anchor="middle">now − last_spoke ≥ min_gap × (1 + streak) ?</text>
+<text class="t-s" x="360" y="448" text-anchor="middle">1800s × (1 + min(ignore_streak, 4))</text>
+
+<!-- reject rail -->
+<path class="e-mute" d="M520,106 H575"/>
+<path class="e-mute" d="M520,170 H575"/>
+<path class="e-mute" d="M520,234 H575"/>
+<path class="e-mute" d="M520,302 H575"/>
+<path class="e-mute" d="M520,370 H575"/>
+<path class="e-mute" d="M520,436 H575"/>
+<path class="e-mute" d="M520,536 H575"/>
+<path class="e-mute" d="M575,106 V560 H616" marker-end="url(#ahA)"/>
+<text class="t-s" x="530" y="100">no</text>
+<rect class="n" x="620" y="540" width="250" height="40" rx="8"/>
+<text class="t" x="745" y="565" text-anchor="middle">아무것도 안 함 → 45초 뒤 재판정</text>
+
+<!-- main flow arrows stage1 -->
+<path class="e" d="M360,64 V84" marker-end="url(#ahA)"/>
+<path class="e" d="M360,128 V148" marker-end="url(#ahA)"/>
+<path class="e" d="M360,192 V212" marker-end="url(#ahA)"/>
+<path class="e" d="M360,256 V276" marker-end="url(#ahA)"/>
+<path class="e" d="M360,328 V348" marker-end="url(#ahA)"/>
+<path class="e" d="M360,392 V412" marker-end="url(#ahA)"/>
+<path class="e" d="M360,460 V478" marker-end="url(#ahA)"/>
+
+<!-- stage 2 -->
+<rect class="n" x="200" y="478" width="320" height="116" rx="8"/>
+<text class="t-b" x="360" y="498" text-anchor="middle">우선순위 순회 — 첫 히트 채택</text>
+<rect class="n-teal" x="215" y="510" width="68" height="26" rx="5"/>
+<text class="t-s" x="249" y="523" text-anchor="middle">unfinished</text>
+<text class="t-s" x="249" y="533" text-anchor="middle">cd 2h</text>
+<rect class="n-teal" x="289" y="510" width="68" height="26" rx="5"/>
+<text class="t-s" x="323" y="523" text-anchor="middle">curiosity</text>
+<text class="t-s" x="323" y="533" text-anchor="middle">cd 1h</text>
+<rect class="n-teal" x="363" y="510" width="68" height="26" rx="5"/>
+<text class="t-s" x="397" y="523" text-anchor="middle">git</text>
+<text class="t-s" x="397" y="533" text-anchor="middle">cd 1.5h</text>
+<rect class="n-teal" x="437" y="510" width="68" height="26" rx="5"/>
+<text class="t-s" x="471" y="523" text-anchor="middle">persona</text>
+<text class="t-s" x="471" y="533" text-anchor="middle">cd 3h</text>
+<text class="t-s" x="360" y="555" text-anchor="middle">각 소스: enabled ∧ (now − last_fired ≥ cooldown) → poll()</text>
+<text class="t-s" x="360" y="570" text-anchor="middle">Nudge(source_key, fallback_text, context, engage_prompt)</text>
+<text class="t-n" x="360" y="585" text-anchor="middle">+ topic, ref_id 신설 — 결과 판정까지 메타를 들고 가야 함</text>
+<text class="t-s" x="527" y="532">전부 None</text>
+
+<path class="e" d="M360,594 V620" marker-end="url(#ahA)"/>
+
+<!-- stage 3: speak -->
+<rect class="n-bad" x="200" y="620" width="320" height="84" rx="8"/>
+<text class="t-b" x="360" y="639" text-anchor="middle">_speak(nudge) — 비용 선지불</text>
+<text class="t-mono-s" x="360" y="655" text-anchor="middle">last_spoke = now ; source.last_fired = now</text>
+<text class="t-mono-s" x="360" y="669" text-anchor="middle">ignore_streak += 1 ; pending_engage = engage_prompt</text>
+<text class="t-s" x="360" y="686" text-anchor="middle">⚠ 아직 보여주지도 않았는데 "무시"로 미리 집계 (F1·F3)</text>
+<text class="t-s" x="360" y="699" text-anchor="middle">⚠ source_key / topic 은 여기서 버려짐 (F4)</text>
+
+<path class="e" d="M360,704 V730" marker-end="url(#ahA)"/>
+
+<rect class="n-guard" x="200" y="730" width="320" height="40" rx="8"/>
+<text class="t" x="360" y="755" text-anchor="middle">phrasing == true ∧ phraser 존재 ?</text>
+<text class="t-s" x="150" y="745" text-anchor="end">no →</text>
+<path class="e" d="M200,750 H140 V978 H196" marker-end="url(#ahA)"/>
+<text class="t-s" x="132" y="866" text-anchor="end">fallback_text</text>
+<text class="t-s" x="132" y="879" text-anchor="end">그대로</text>
+
+<path class="e" d="M360,770 V794" marker-end="url(#ahA)"/>
+
+<rect class="n" x="200" y="794" width="320" height="62" rx="8"/>
+<text class="t-b" x="360" y="813" text-anchor="middle">워커 스레드 — 격리 1회성 프레이징</text>
+<text class="t-mono-s" x="360" y="829" text-anchor="middle">call_claude_resumable(prompt, session_id=None, 25s)</text>
+<text class="t-s" x="360" y="846" text-anchor="middle">상주 세션의 STM / resume / 렌더를 건드리지 않음</text>
+
+<path class="e" d="M360,856 V880" marker-end="url(#ahA)"/>
+
+<rect class="n" x="200" y="880" width="320" height="56" rx="8"/>
+<text class="t-b" x="360" y="899" text-anchor="middle">_finish_phrasing — screen_clear 재확인</text>
+<text class="t-s" x="360" y="916" text-anchor="middle">프레이징 도는 수 초 사이 사용자가 먼저 말을 걸었을 수 있음</text>
+<text class="t-s" x="360" y="929" text-anchor="middle">첫 비어있지 않은 줄만 채택 · 감싼 따옴표 제거</text>
+
+<path class="e-mute" d="M520,908 H596" marker-end="url(#ahA)"/>
+<rect class="n-bad" x="600" y="880" width="270" height="56" rx="8"/>
+<text class="t" x="735" y="900" text-anchor="middle">폐기 — 렌더 안 함</text>
+<text class="t-s" x="735" y="916" text-anchor="middle">그런데 간격 · 쿨다운 · streak 은</text>
+<text class="t-s" x="735" y="929" text-anchor="middle">이미 소비됨 (F3)</text>
+
+<path class="e" d="M360,936 V958" marker-end="url(#ahA)"/>
+
+<rect class="n-teal" x="196" y="958" width="328" height="40" rx="8"/>
+<text class="t-b" x="360" y="977" text-anchor="middle">show_nudge(text, on_click, dwell = 25s)</text>
+<text class="t-s" x="360" y="991" text-anchor="middle">teal 말풍선 · speech 슬롯 · hover 하면 페이드 유예</text>
+
+<!-- stage 4 -->
+<text class="t-s" x="40" y="1024">④ 참여 판정</text>
+<text class="t-n" x="122" y="1024">— 현재는 클릭/무클릭 이분법. 3분화 필요</text>
+
+<path class="e" d="M360,998 V1014"/>
+<path class="e" d="M160,1014 H730"/>
+<path class="e" d="M160,1014 V1040" marker-end="url(#ahA)"/>
+<path class="e" d="M435,1014 V1040" marker-end="url(#ahAn)"/>
+<path class="e" d="M730,1014 V1040" marker-end="url(#ahA)"/>
+
+<rect class="n-teal" x="40" y="1040" width="240" height="64" rx="8"/>
+<text class="t-b" x="160" y="1059" text-anchor="middle">engaged</text>
+<text class="t-s" x="160" y="1075" text-anchor="middle">답장 버튼 → 실제 응답까지 감</text>
+<text class="t-n" x="160" y="1092" text-anchor="middle">답장 버튼 신설 (승인 풍선과 동일 패턴)</text>
+
+<rect class="n-new" x="310" y="1040" width="250" height="64" rx="8"/>
+<text class="t-b" x="435" y="1059" text-anchor="middle">acknowledged_no_reply</text>
+<text class="t-s" x="435" y="1075" text-anchor="middle">풍선은 열었으나 입력 취소 · 무응답</text>
+<text class="t-n" x="435" y="1092" text-anchor="middle">현재 관측 경로 자체가 없음</text>
+
+<rect class="n" x="600" y="1040" width="260" height="64" rx="8"/>
+<text class="t-b" x="730" y="1059" text-anchor="middle">ignored</text>
+<text class="t-s" x="730" y="1075" text-anchor="middle">dwell 25s 경과 → 페이드</text>
+<text class="t-n" x="730" y="1092" text-anchor="middle">페이드 시 엔진에 통지 없음 (F1)</text>
+
+<!-- stage 5 -->
+<text class="t-s" x="40" y="1130">⑤ 후처리</text>
+<text class="t-n" x="98" y="1130">— 전체 신설. 액션 그래프(3장) 참조</text>
+
+<path class="e-new" d="M160,1104 V1146" marker-end="url(#ahAn)"/>
+<path class="e-new" d="M435,1104 V1146" marker-end="url(#ahAn)"/>
+<path class="e-new" d="M730,1104 V1146" marker-end="url(#ahAn)"/>
+
+<rect class="n-new" x="40" y="1146" width="820" height="112" rx="8"/>
+<text class="t-b" x="450" y="1168" text-anchor="middle">피드백 버스 — on_outcome(source_key, topic, ref_id, outcome, latency)</text>
+<text class="t" x="450" y="1189" text-anchor="middle">즉시: nudge_text prepend · STM 페어 기록 · address_curiosity · streak 확정 · log_activity</text>
+<text class="t" x="450" y="1208" text-anchor="middle">누적: activity_log → 소스별 × 시간대별 engaged율 집계</text>
+<text class="t" x="450" y="1227" text-anchor="middle">되먹임: reflection 파이프라인 → 소스 가중치 · quiet_hours · min_gap 자동 조정</text>
+<text class="t-s" x="450" y="1246" text-anchor="middle">→ update_cfg() 로 다음 tick 부터 반영 (①로 순환)</text>
+
+<path class="e-new" d="M40,1202 H16 V106 H196" marker-end="url(#ahAn)"/>
+<text class="t-n" x="26" y="700" transform="rotate(-90 26 700)" text-anchor="middle">학습된 설정 되먹임</text>
+</svg>
+<figcaption>실선 상자 = 구현됨 · 노란 = 게이트 · 청록 = 사용자에게 보이는 것 · 주황 점선 = 신설 · 붉은 = 현재 결함 지점(F1·F3·F4는 아래 §4 참조).</figcaption>
+</figure>
+
+
+<h2>2. 타이밍 그래프 — 시간 축 실동작</h2>
+<p class="sub">기본 설정값(<code>idle_min 600s</code> · <code>min_gap 1800s</code> · <code>dwell 25s</code> · <code>backoff_max 4</code>) 그대로일 때 4시간 창에서 실제로 몇 번, 언제 말하는가.</p>
+
+<figure>
+<svg viewBox="0 0 900 470" role="img" aria-label="4시간 창의 자율발화 타이밍 그래프">
+<defs>
+  <marker id="ahB" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="ahf"/></marker>
+</defs>
+
+<!-- grid + axis -->
+<g>
+  <line class="grid" x1="70" y1="40" x2="70" y2="410"/>
+  <line class="grid" x1="170.5" y1="40" x2="170.5" y2="410"/>
+  <line class="grid" x1="271" y1="40" x2="271" y2="410"/>
+  <line class="grid" x1="371.5" y1="40" x2="371.5" y2="410"/>
+  <line class="grid" x1="472" y1="40" x2="472" y2="410"/>
+  <line class="grid" x1="572.5" y1="40" x2="572.5" y2="410"/>
+  <line class="grid" x1="673" y1="40" x2="673" y2="410"/>
+  <line class="grid" x1="773.5" y1="40" x2="773.5" y2="410"/>
+  <line class="grid" x1="874" y1="40" x2="874" y2="410"/>
+  <line class="axis" x1="70" y1="410" x2="884" y2="410" marker-end="url(#ahB)"/>
+  <text class="t-s" x="70" y="426" text-anchor="middle">0</text>
+  <text class="t-s" x="170.5" y="426" text-anchor="middle">30분</text>
+  <text class="t-s" x="271" y="426" text-anchor="middle">60</text>
+  <text class="t-s" x="371.5" y="426" text-anchor="middle">90</text>
+  <text class="t-s" x="472" y="426" text-anchor="middle">120</text>
+  <text class="t-s" x="572.5" y="426" text-anchor="middle">150</text>
+  <text class="t-s" x="673" y="426" text-anchor="middle">180</text>
+  <text class="t-s" x="773.5" y="426" text-anchor="middle">210</text>
+  <text class="t-s" x="874" y="426" text-anchor="middle">240분</text>
+</g>
+
+<!-- lane 1: user activity -->
+<text class="t-s" x="62" y="62" text-anchor="end">사용자 활동</text>
+<line class="e" x1="70" y1="70" x2="874" y2="70" stroke="var(--line)"/>
+<g>
+  <line class="e" x1="70" y1="70" x2="70" y2="48"/>
+  <circle cx="70" cy="48" r="3.5" fill="var(--line-strong)"/>
+  <text class="t-s" x="74" y="44">마지막 입력</text>
+  <line class="e" x1="606" y1="70" x2="606" y2="48" stroke="var(--teal-b)"/>
+  <circle cx="606" cy="48" r="3.5" fill="var(--teal-b)"/>
+  <line class="e" x1="620" y1="70" x2="620" y2="52" stroke="var(--teal-b)"/>
+  <circle cx="620" cy="52" r="3" fill="var(--teal-b)"/>
+  <line class="e" x1="640" y1="70" x2="640" y2="52" stroke="var(--teal-b)"/>
+  <circle cx="640" cy="52" r="3" fill="var(--teal-b)"/>
+  <text class="t-s" x="610" y="42">답장 → 대화 재개</text>
+</g>
+
+<!-- lane 2: idle ramp -->
+<text class="t-s" x="62" y="112" text-anchor="end">idle 누적</text>
+<line class="grid" x1="70" y1="118" x2="874" y2="118"/>
+<text class="t-s" x="872" y="113" text-anchor="end">idle_min 600s</text>
+<polyline class="ramp" points="70,150 103,118 606,105 606,150 656,150 690,118 874,110"/>
+<text class="t-s" x="106" y="164">10분에 임계 통과 후 계속 누적</text>
+<text class="t-s" x="610" y="164">리셋</text>
+
+<!-- lane 3: gate -->
+<text class="t-s" x="62" y="196" text-anchor="end">발화 게이트</text>
+<rect class="bar-open" x="70" y="184" width="33" height="18" rx="3"/>
+<rect class="bar-closed" x="103" y="184" width="201" height="18" rx="3"/>
+<text class="t-s" x="203" y="197" text-anchor="middle">닫힘 — 60분 (×2)</text>
+<rect class="bar-closed" x="304" y="184" width="302" height="18" rx="3"/>
+<text class="t-s" x="455" y="197" text-anchor="middle">닫힘 — 90분 (×3)</text>
+<rect class="bar-closed" x="606" y="184" width="100" height="18" rx="3"/>
+<text class="t-s" x="656" y="197" text-anchor="middle">30분 (×1)</text>
+<rect class="bar-open" x="706" y="184" width="168" height="18" rx="3"/>
+<text class="t-s" x="790" y="197" text-anchor="middle">열림</text>
+<text class="t-s" x="86" y="216" text-anchor="middle">열림</text>
+
+<!-- lane 4: nudges -->
+<text class="t-s" x="62" y="252" text-anchor="end">발화</text>
+<line class="e" x1="70" y1="262" x2="874" y2="262" stroke="var(--line)"/>
+<g>
+  <line class="e" x1="103" y1="262" x2="103" y2="234" stroke="var(--teal-b)"/>
+  <rect class="n-teal" x="76" y="222" width="56" height="16" rx="4"/>
+  <text class="t-s" x="104" y="234" text-anchor="middle">N1</text>
+  <text class="t-s" x="104" y="278" text-anchor="middle">unfinished</text>
+  <line class="e" x1="304" y1="262" x2="304" y2="234" stroke="var(--teal-b)"/>
+  <rect class="n-teal" x="277" y="222" width="56" height="16" rx="4"/>
+  <text class="t-s" x="305" y="234" text-anchor="middle">N2</text>
+  <text class="t-s" x="305" y="278" text-anchor="middle">curiosity</text>
+  <line class="e" x1="606" y1="262" x2="606" y2="234" stroke="var(--teal-b)"/>
+  <rect class="n-teal" x="579" y="222" width="56" height="16" rx="4"/>
+  <text class="t-s" x="607" y="234" text-anchor="middle">N3</text>
+  <text class="t-s" x="607" y="278" text-anchor="middle">unfinished 재적격</text>
+  <text class="t-s" x="607" y="290" text-anchor="middle">(쿨다운 120분 경과)</text>
+</g>
+
+<!-- lane 5: outcome -->
+<text class="t-s" x="62" y="322" text-anchor="end">결과</text>
+<rect class="n" x="76" y="310" width="86" height="20" rx="4"/>
+<text class="t-s" x="119" y="324" text-anchor="middle">ignored</text>
+<rect class="n" x="277" y="310" width="86" height="20" rx="4"/>
+<text class="t-s" x="320" y="324" text-anchor="middle">ignored</text>
+<rect class="n-teal" x="579" y="310" width="86" height="20" rx="4"/>
+<text class="t-s" x="622" y="324" text-anchor="middle">engaged</text>
+
+<!-- lane 6: streak -->
+<text class="t-s" x="62" y="360" text-anchor="end">간격 배수</text>
+<polyline class="step" points="70,392 103,392 103,380 304,380 304,368 606,368 606,392 874,392"/>
+<text class="t-n" x="86" y="404" text-anchor="middle">×1</text>
+<text class="t-n" x="203" y="376" text-anchor="middle">×2 — streak 1</text>
+<text class="t-n" x="455" y="364" text-anchor="middle">×3 — streak 2</text>
+<text class="t-n" x="740" y="404" text-anchor="middle">×1 — engaged 로 리셋</text>
+</svg>
+<figcaption>4시간 동안 발화는 <strong>3회</strong>. 무시가 쌓일수록 간격이 30 → 60 → 90분으로 벌어지고, 참여하면 즉시 ×1로 복귀한다. 소스 쿨다운(unfinished 120분)이 별도로 걸려 같은 소재가 연달아 나오지 않는다.</figcaption>
+</figure>
+
+<h3>2-b. 발화 한 건의 확대 타이밍 (초 단위)</h3>
+<figure>
+<svg viewBox="0 0 900 250" role="img" aria-label="발화 한 건의 초 단위 타이밍">
+<defs>
+  <marker id="ahC" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="ahf"/></marker>
+  <marker id="ahCn" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="ahf-n"/></marker>
+</defs>
+<g>
+  <line class="axis" x1="90" y1="215" x2="884" y2="215" marker-end="url(#ahC)"/>
+  <g>
+    <line class="grid" x1="90" y1="40" x2="90" y2="215"/><text class="t-s" x="90" y="231" text-anchor="middle">0s</text>
+    <line class="grid" x1="200" y1="40" x2="200" y2="215"/><text class="t-s" x="200" y="231" text-anchor="middle">5</text>
+    <line class="grid" x1="310" y1="40" x2="310" y2="215"/><text class="t-s" x="310" y="231" text-anchor="middle">10</text>
+    <line class="grid" x1="420" y1="40" x2="420" y2="215"/><text class="t-s" x="420" y="231" text-anchor="middle">15</text>
+    <line class="grid" x1="530" y1="40" x2="530" y2="215"/><text class="t-s" x="530" y="231" text-anchor="middle">20</text>
+    <line class="grid" x1="640" y1="40" x2="640" y2="215"/><text class="t-s" x="640" y="231" text-anchor="middle">25</text>
+    <line class="grid" x1="750" y1="40" x2="750" y2="215"/><text class="t-s" x="750" y="231" text-anchor="middle">30</text>
+    <line class="grid" x1="860" y1="40" x2="860" y2="215"/><text class="t-s" x="860" y="231" text-anchor="middle">35s</text>
+  </g>
+</g>
+
+<text class="t-s" x="82" y="60" text-anchor="end">엔진 (메인스레드)</text>
+<rect class="n" x="90" y="48" width="14" height="18" rx="3"/>
+<text class="t-s" x="110" y="44">_speak — 비용 선지불 · streak +1</text>
+
+<text class="t-s" x="82" y="104" text-anchor="end">프레이징 워커</text>
+<rect class="n" x="90" y="92" width="94" height="20" rx="4"/>
+<text class="t-s" x="137" y="106" text-anchor="middle">call_claude</text>
+<text class="t-s" x="190" y="106">≈4.3s (타임아웃 25s · 초과 시 fallback_text)</text>
+
+<text class="t-s" x="82" y="150" text-anchor="end">화면 (teal 풍선)</text>
+<rect class="n-teal" x="184" y="138" width="550" height="20" rx="4"/>
+<text class="t-s" x="459" y="152" text-anchor="middle">dwell 25s — hover 하면 연장</text>
+
+<text class="t-s" x="82" y="192" text-anchor="end">결과 신호</text>
+<line class="e-new" x1="734" y1="158" x2="734" y2="184" marker-end="url(#ahCn)"/>
+<rect class="n-new" x="640" y="184" width="190" height="20" rx="4"/>
+<text class="t-n" x="735" y="198" text-anchor="middle">on_outcome(ignored) — 신설</text>
+<text class="t-s" x="380" y="198">현재는 _on_speech_faded 가 색 오버라이드만 정리하고 끝 (F1)</text>
+</svg>
+<figcaption>선지불(0s)과 실제 노출(≈4.3s) 사이에 지연이 있고, 그 사이 사용자가 먼저 말을 걸면 풍선은 폐기되지만 비용은 환불되지 않는다(F3).</figcaption>
+</figure>
+
+
+<h2>3. 액션 그래프 — 결과 → 부작용 → 학습 루프</h2>
+<p class="sub">"자율발화하고 그 뒤는 모르겠고"를 끊는 부분. 결과 3종이 각각 어느 저장소에 무엇을 남기고, 그게 어떻게 설정으로 되돌아오는가.</p>
+
+<figure>
+<svg viewBox="0 0 1040 660" role="img" aria-label="결과별 부작용과 학습 루프 그래프">
+<defs>
+  <marker id="ahD" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5.5" markerHeight="5.5" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="ahf"/></marker>
+  <marker id="ahDn" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5.5" markerHeight="5.5" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="ahf-n"/></marker>
+</defs>
+
+<text class="t-s" x="20" y="24">결과</text>
+<text class="t-s" x="250" y="24">즉시 효과</text>
+<text class="t-s" x="540" y="24">저장소</text>
+<text class="t-s" x="770" y="24">학습 루프 <tspan class="t-n">(전부 신설)</tspan></text>
+
+<!-- outcomes -->
+<rect class="n-teal" x="20" y="120" width="170" height="46" rx="8"/>
+<text class="t-b" x="105" y="140" text-anchor="middle">engaged</text>
+<text class="t-s" x="105" y="156" text-anchor="middle">답장까지 도달</text>
+
+<rect class="n-new" x="20" y="330" width="170" height="46" rx="8"/>
+<text class="t-b" x="105" y="350" text-anchor="middle">acknowledged</text>
+<text class="t-s" x="105" y="366" text-anchor="middle">열었지만 무응답</text>
+
+<rect class="n" x="20" y="470" width="170" height="46" rx="8"/>
+<text class="t-b" x="105" y="490" text-anchor="middle">ignored</text>
+<text class="t-s" x="105" y="506" text-anchor="middle">dwell 경과 페이드</text>
+
+<!-- effects: engaged -->
+<rect class="n-new" x="250" y="36" width="240" height="34" rx="7"/>
+<text class="t" x="370" y="52" text-anchor="middle">nudge_text 를 첫 프롬프트에 prepend</text>
+<text class="t-s" x="370" y="65" text-anchor="middle">"방금 내가 이렇게 말 걸었다" 를 세션이 앎</text>
+
+<rect class="n-new" x="250" y="80" width="240" height="30" rx="7"/>
+<text class="t" x="370" y="99" text-anchor="middle">STM 에 nudge ↔ 응답 페어 기록</text>
+
+<rect class="n-new" x="250" y="120" width="240" height="34" rx="7"/>
+<text class="t" x="370" y="136" text-anchor="middle">address_curiosity(ref_id)</text>
+<text class="t-s" x="370" y="149" text-anchor="middle">source == curiosity 일 때만</text>
+
+<rect class="n" x="250" y="164" width="240" height="30" rx="7"/>
+<text class="t" x="370" y="183" text-anchor="middle">ignore_streak = 0 <tspan class="t-s">(기존)</tspan></text>
+
+<rect class="n-new" x="250" y="204" width="240" height="34" rx="7"/>
+<text class="t" x="370" y="220" text-anchor="middle">log_activity("initiative.engaged")</text>
+<text class="t-s" x="370" y="233" text-anchor="middle">detail: source · topic · latency</text>
+
+<!-- effects: acknowledged -->
+<rect class="n-new" x="250" y="300" width="240" height="30" rx="7"/>
+<text class="t" x="370" y="319" text-anchor="middle">streak 약한 증가 (중간 신호)</text>
+
+<rect class="n-new" x="250" y="340" width="240" height="30" rx="7"/>
+<text class="t" x="370" y="359" text-anchor="middle">log_activity("initiative.acknowledged")</text>
+
+<!-- effects: ignored -->
+<rect class="n-new" x="250" y="420" width="240" height="44" rx="7"/>
+<text class="t" x="370" y="437" text-anchor="middle">streak += 1 — 발화 시점이 아니라</text>
+<text class="t" x="370" y="452" text-anchor="middle">페이드 확정 시점에 <tspan class="t-n">(F1·F3 수정)</tspan></text>
+
+<rect class="n-new" x="250" y="474" width="240" height="30" rx="7"/>
+<text class="t" x="370" y="493" text-anchor="middle">log_activity("initiative.ignored")</text>
+
+<rect class="n-new" x="250" y="514" width="240" height="34" rx="7"/>
+<text class="t" x="370" y="530" text-anchor="middle">동일 소스 3연속 무시 →</text>
+<text class="t" x="370" y="543" text-anchor="middle">KG 에 "관심 낮음" 약한 시그널</text>
+
+<!-- outcome → effect edges -->
+<path class="e-new" d="M190,138 C218,138 222,53 246,53" marker-end="url(#ahDn)"/>
+<path class="e-new" d="M190,140 C218,140 222,95 246,95" marker-end="url(#ahDn)"/>
+<path class="e-new" d="M190,143 H246" marker-end="url(#ahDn)"/>
+<path class="e" d="M190,146 C218,146 222,179 246,179" marker-end="url(#ahD)"/>
+<path class="e-new" d="M190,150 C218,150 222,221 246,221" marker-end="url(#ahDn)"/>
+<path class="e-new" d="M190,348 C218,348 222,315 246,315" marker-end="url(#ahDn)"/>
+<path class="e-new" d="M190,353 H246" marker-end="url(#ahDn)"/>
+<path class="e-new" d="M190,488 C218,488 222,442 246,442" marker-end="url(#ahDn)"/>
+<path class="e-new" d="M190,492 H246" marker-end="url(#ahDn)"/>
+<path class="e-new" d="M190,496 C218,496 222,531 246,531" marker-end="url(#ahDn)"/>
+
+<!-- stores -->
+<rect class="n" x="540" y="76" width="170" height="40" rx="7"/>
+<text class="t-b" x="625" y="94" text-anchor="middle">세션 · STM</text>
+<text class="t-mono-s" x="625" y="108" text-anchor="middle">BubbleSessionManager</text>
+
+<rect class="n" x="540" y="126" width="170" height="40" rx="7"/>
+<text class="t-b" x="625" y="144" text-anchor="middle">curiosities</text>
+<text class="t-mono-s" x="625" y="158" text-anchor="middle">status = addressed</text>
+
+<rect class="n" x="540" y="290" width="170" height="44" rx="7"/>
+<text class="t-b" x="625" y="308" text-anchor="middle">activity_log</text>
+<text class="t-s" x="625" y="323" text-anchor="middle">기존 테이블 — 스키마 변경 없음</text>
+
+<rect class="n" x="540" y="510" width="170" height="40" rx="7"/>
+<text class="t-b" x="625" y="528" text-anchor="middle">Knowledge Graph</text>
+<text class="t-mono-s" x="625" y="542" text-anchor="middle">kg_add_note</text>
+
+<path class="e-new" d="M490,53 C516,53 520,88 536,88" marker-end="url(#ahDn)"/>
+<path class="e-new" d="M490,95 H536" marker-end="url(#ahDn)"/>
+<path class="e-new" d="M490,137 C516,137 520,144 536,144" marker-end="url(#ahDn)"/>
+<path class="e-new" d="M490,221 C516,221 520,300 536,300" marker-end="url(#ahDn)"/>
+<path class="e-new" d="M490,355 C516,355 520,312 536,312" marker-end="url(#ahDn)"/>
+<path class="e-new" d="M490,489 C516,489 520,324 536,324" marker-end="url(#ahDn)"/>
+<path class="e-new" d="M490,531 H536" marker-end="url(#ahDn)"/>
+
+<!-- learning loop -->
+<rect class="n-new" x="760" y="230" width="240" height="56" rx="8"/>
+<text class="t-b" x="880" y="250" text-anchor="middle">주기적 집계</text>
+<text class="t-s" x="880" y="266" text-anchor="middle">소스별 × 시간대별 engaged 율</text>
+<text class="t-s" x="880" y="279" text-anchor="middle">N개 이벤트 또는 세션 종료 시</text>
+
+<rect class="n-new" x="760" y="316" width="240" height="56" rx="8"/>
+<text class="t-b" x="880" y="336" text-anchor="middle">reflection 파이프라인</text>
+<text class="t-mono-s" x="880" y="352" text-anchor="middle">prepare_reflection / apply_reflection</text>
+<text class="t-s" x="880" y="365" text-anchor="middle">기존 인프라 재사용 — 신규 없음</text>
+
+<rect class="n-new" x="760" y="402" width="240" height="70" rx="8"/>
+<text class="t-b" x="880" y="422" text-anchor="middle">설정 자동 조정</text>
+<text class="t-s" x="880" y="438" text-anchor="middle">소스 가중치 · 우선순위 재정렬</text>
+<text class="t-s" x="880" y="451" text-anchor="middle">quiet_hours 학습 · min_gap 보정</text>
+<text class="t-s" x="880" y="464" text-anchor="middle">persona 표현 방식 조정</text>
+
+<path class="e-new" d="M710,306 C736,306 740,258 756,258" marker-end="url(#ahDn)"/>
+<path class="e-new" d="M710,528 C736,528 740,272 756,272" marker-end="url(#ahDn)"/>
+<path class="e-new" d="M880,286 V312" marker-end="url(#ahDn)"/>
+<path class="e-new" d="M880,372 V398" marker-end="url(#ahDn)"/>
+
+<!-- feedback to engine -->
+<rect class="n-new" x="540" y="590" width="460" height="40" rx="8"/>
+<text class="t-b" x="770" y="608" text-anchor="middle">InitiativeEngine.update_cfg()</text>
+<text class="t-s" x="770" y="622" text-anchor="middle">저장 즉시 반영 — 다음 tick 부터 새 값으로 판정 (① 로 순환)</text>
+<path class="e-new" d="M880,472 V586" marker-end="url(#ahDn)"/>
+<path class="e-new" d="M540,610 H105 V520" marker-end="url(#ahDn)"/>
+</svg>
+<figcaption>주황 점선 = 전부 신설. 저장소 4곳 중 <code>activity_log</code>·<code>curiosities</code>·KG 는 이미 존재하므로 <strong>스키마 신설 없이 배관만</strong> 깔면 된다. 학습 루프도 기존 reflection 파이프라인에 얹는다.</figcaption>
+</figure>
+
+
+<h2>4. 현재 구현에서 발견된 결함</h2>
+<p class="sub">위 그림의 붉은 지점. 전부 실제 코드 확인 결과이며, v2 설계는 이걸 고치는 것을 전제로 한다.</p>
+
+<dl class="f">
+<dt>F1</dt><dd><strong>ignored 가 신호되지 않는다.</strong> <code>bubble_manager._on_speech_faded()</code> 는 <code>_clear_nudge_state()</code> 로 색·클릭 오버라이드만 정리하고 엔진에 아무것도 알리지 않는다. 대신 <code>_speak()</code> 가 발화 시점에 <code>ignore_streak += 1</code> 로 낙관적 선증가한다. → <em>결과가 관측된 적이 없다.</em></dd>
+
+<dt>F2</dt><dd><strong>모든 사용자 입력이 백오프를 리셋한다.</strong> <code>main.py:1078</code> 의 <code>_on_bubble_submit()</code> 이 무조건 <code>notify_engaged()</code> 를 부른다. nudge 와 무관한 평범한 대화도 streak 을 0 으로 만든다 → 활발히 쓰는 사용자에게는 무시 백오프가 사실상 작동하지 않는다.</dd>
+
+<dt>F3</dt><dd><strong>폐기된 발화도 비용을 전액 지불한다.</strong> <code>_finish_phrasing()</code> 에서 화면이 더 이상 clear 하지 않으면 렌더를 건너뛰는데, <code>last_spoke</code>·<code>source.last_fired</code>·<code>ignore_streak</code> 은 이미 <code>_speak()</code> 에서 소비됐다. 보이지도 않은 발화가 "무시"로 집계된다.</dd>
+
+<dt>F4</dt><dd><strong>메타가 소실된다.</strong> <code>Nudge.source_key</code> 와 topic, curiosity id 는 <code>_speak()</code> 이후 어디에도 안 남는다. 생존하는 건 <code>_pending_engage</code> 문자열 하나뿐 → 결과 판정 시점에 "어느 소스였나"를 알 수 없어 후처리 자체가 불가능하다.</dd>
+
+<dt>F5</dt><dd><strong>대화 연속성이 끊긴다.</strong> 클릭 시 <code>engage_prompt</code> 만 세션에 전송되고, 방금 화면에 떠 있던 nudge 문구(프레이징된 실제 대사)는 세션이 모른다. 사용자 눈엔 "캐릭터가 A 라고 말 걸어서 답했는데 A 를 기억 못 함"으로 보인다.</dd>
+
+<dt>F6</dt><dd><strong>취소 경로가 없다.</strong> 풍선을 클릭하면 <code>engage_prompt</code> 가 있으면 즉시 전송, 없으면 입력창이 열린다. "클릭했지만 답은 안 함"이라는 중간 상태가 관측되지 않는다.</dd>
+</dl>
+
+
+<h2>5. 구현 델타</h2>
+<div class="wrapt">
+<table>
+<thead><tr><th style="width:22%">지점</th><th style="width:13%">상태</th><th>내용</th><th style="width:12%">난이도</th></tr></thead>
+<tbody>
+<tr><td><code>Nudge</code> 데이터클래스</td><td class="ok">완료</td><td><code>topic</code>, <code>ref_id</code> 추가. 렌더에 성공한 발화만 <code>_active_nudge</code> 로 보관 — 결과 확정 시 해제되며, 이게 한 발화당 1회 집계를 보장하는 유일한 장치</td><td>소</td></tr>
+<tr><td>답장 버튼</td><td class="ok">완료</td><td>풍선 <b>꼬리 반대쪽 아래 모서리</b>에 SNS 식 REPLY 화살표 배지가 반쯤 걸쳐 붙는다. 캔버스 도형으로 그려 폰트 글리프에 비의존. 누르면 <b>입력창이 열린다(자동 전송 안 함)</b> — <code>engage_prompt</code> 는 전체 선택된 편집 가능 초안으로만 채운다. 별도 dismiss 버튼은 두지 않았다 — 안 누르고 두면 그게 곧 무시다</td><td>소</td></tr>
+<tr><td>페이드 → ignored 통지</td><td class="ok">완료</td><td><code>_settle_nudge_outcome()</code> — 페이드·"나중에"·무관한 새 턴·오류 풍선·<code>clear_all</code>·발화 교체까지 반응 없이 끝나는 모든 경로가 여기로 모인다</td><td>소</td></tr>
+<tr><td>streak 회계</td><td class="ok">완료</td><td><code>_speak()</code> 의 선증가 제거. 간격·쿨다운만 선지불하고, 렌더 실패 시 <code>_discard()</code> 가 환불</td><td>소</td></tr>
+<tr><td>notify_engaged 오염</td><td class="ok">완료</td><td><code>_nudge_awaiting_reply</code> 가 True 일 때만 engaged. 엔진 쪽도 <code>_active_nudge</code> 가 없으면 모든 <code>notify_*</code> 를 무시해 이중으로 막는다</td><td>소</td></tr>
+<tr><td>nudge_text prepend</td><td class="ok">완료</td><td><code>_with_nudge_context()</code> — 첫 프롬프트 앞에 <code>[방금 내가 사용자에게 먼저 건넨 말] …</code></td><td>소</td></tr>
+<tr><td>결과 로깅</td><td class="ok">완료</td><td><code>log_activity("initiative.&lt;outcome&gt;", source·topic·문구)</code>. 3연속 무시 시 <code>initiative.low_interest</code> 추가</td><td>소</td></tr>
+<tr><td>curiosity 자동 해소</td><td class="ok">완료</td><td>engaged ∧ source==curiosity 일 때 <code>address_curiosity(ref_id)</code></td><td>소</td></tr>
+<tr><td>패턴 집계 → reflection</td><td class="no">미착수</td><td>집계 시점(세션 종료? N 이벤트?)과 결과 보관 위치(<code>activity_log</code> 재쿼리 vs 요약 테이블)를 먼저 정해야 함. 유일하게 설계 결정이 남은 항목 — 아래 "왜 미뤄도 되는가" 참조</td><td>대</td></tr>
+</tbody>
+</table>
+</div>
+
+<div class="note">
+<p style="margin:0"><strong>구현 상태:</strong> 아홉 항목 중 여덟(<em>소</em> 전부)이 한 번의 배관 작업으로 반영됐다 — <code>Nudge</code> 에 메타를 붙이고 <code>_speak()</code> ↔ 결과 확정 사이에 상태를 살려두는 것. 결함 <strong>F1~F6 전부 해소</strong>. 남은 건 마지막 항목(패턴 집계)뿐이고, 그건 스키마 결정이 선행돼야 한다.</p>
+</div>
+
+<h3>집계를 미뤄도 되는가 — 무엇이 lossy한지</h3>
+<p><strong>결정(집계 시점·보관 위치)은 미뤄도 된다.</strong> 근거는 셋:</p>
+<ul>
+<li><code>activity_log.created_at</code> 이 <code>datetime('now','localtime')</code> — 초 단위라 시간대별 집계가 가능하다.</li>
+<li><strong>이 테이블에는 purge/retention 로직이 없다.</strong> <code>curiosities</code> 는 <code>purge_processed_curiosities</code> 로 정리되지만 <code>activity_log</code> 는 삭제 코드가 아예 없어 쌓인 게 사라지지 않는다.</li>
+<li>후보 두 안(재쿼리 / 요약 테이블) 모두 같은 원장에서 백필된다 — 나중에 정해도 과거 데이터를 그대로 쓴다.</li>
+</ul>
+<p><strong>하지만 "무엇을 적재할지"는 미루면 안 된다.</strong> 안 남긴 값은 소급 복원이 불가능하기 때문. 그래서 두 가지를 결정과 분리해 먼저 확정했다:</p>
+<div class="wrapt">
+<table>
+<thead><tr><th style="width:16%">항목</th><th>없으면 생기는 일</th></tr></thead>
+<tbody>
+<tr><td><code>latency</code></td><td>같은 <code>ignored</code> 인데 <b>3초 만에 "나중에"</b>(봤고 관심 없음 — 강한 부정)와 <b>25초 dwell 을 다 채우고 페이드</b>(자리에 없었을 가능성 — 신호 아님)가 한 줄로 뭉개진다. 백오프를 둘에 똑같이 먹이는 건 틀렸고, 과거 로그에서는 되살릴 수 없다. <code>engaged</code> 도 즉답과 장고가 안 갈린다.</td></tr>
+<tr><td><code>detail</code> 형식</td><td>topic 은 자유 텍스트라 구분자·<code>key=</code> 가 섞일 수 있다. 첫 <code>" | "</code> 앞을 기계 판독 구간(값에 공백 없는 <code>source</code>/<code>outcome</code>/<code>latency</code> 만)으로 고정하고 자유 텍스트를 뒤로 뺐다 — topic 에 <code>outcome=fake | source=evil</code> 을 넣어도 파서가 안 깨지는 것으로 확인. 뒤에 필드를 더해도 기존 파서는 그대로 동작한다.</td></tr>
+</tbody>
+</table>
+</div>
+
+<h3>결과 판정 창 ≠ 답할 수 있는 창</h3>
+<p>초기 구현은 dwell(25초) 안에서만 답장이 가능했다. 그게 틀렸다 — 데스크톱 상주 캐릭터의 기본 사용법은
+<strong>아무 때나 캐릭터를 눌러 "마지막에 뭐라고 했더라"를 확인하고, 자율발화였으면 그때 답하는 것</strong>이다.
+dwell 은 <em>결과를 관측하는</em> 창일 뿐이다.</p>
+<ul>
+<li>복원된 풍선이 자율발화면(<code>_last_was_nudge</code>) 답장 아이콘과 문구 prepend가 살아난다. 마지막이 평범한 응답이면 아이콘 없이 그냥 새 대화를 시작한다.</li>
+<li>아이콘 표시 조건을 "판정 대기 중"에서 <strong>"답장 콜백이 살아있는지"</strong>(<code>_nudge_reply_cb</code>)로 바꿨다. 이 콜백은 새 발화나 새 대화 턴이 올 때만 해제된다.</li>
+<li>뒤늦은 답장은 <code>late_engaged</code> 로 <strong>별도 기록</strong> — 이미 남긴 <code>ignored</code> 를 소급 수정하지 않아 "발화 1건 = 결과 1건"이 유지된다. 백오프는 리셋되고 curiosity 해소도 이 경로에서 걸린다.</li>
+<li>답장까지 간 발화(<code>engaged</code>)는 되살릴 대상이 없으므로 슬롯을 비운다.</li>
+</ul>
+
+<h3>구현하며 추가로 드러난 것</h3>
+<p>설계 단계에선 안 보였다가 배선하면서 나온 두 가지 — 둘 다 결과가 잘못 귀속되는 문제라 같이 고쳤다.</p>
+<ul>
+<li><strong>발화 교체 경로</strong> — 결과 미확정 상태에서 새 발화가 화면을 덮으면 이전 발화는 영영 판정될 기회가 없다. <code>show_nudge()</code> 진입 시 직전 발화를 먼저 무시로 마감한다.</li>
+<li><strong>입력창 닫힘 콜백의 순서 함정</strong> — 이미 열려 있던 입력창을 닫으면 그 <code>on_close</code> 가 발화하는데, <code>_nudge_awaiting_reply</code> 를 먼저 세워두면 <em>방금 뜬</em> 발화가 무응답으로 마감된다. 반드시 <code>hide()</code> 를 모두 끝낸 뒤 플래그를 세운다.</li>
+</ul>
+
+<h3>테스트</h3>
+<p><code>test/test_initiative.py</code> — 18 → <strong>26 케이스</strong>, 전부 통과. 추가된 것:</p>
+<ul>
+<li><code>OutcomeTests</code> — 3분화 전이, 메타(<code>topic</code>/<code>ref_id</code>)와 화면 문구 전달, <strong>한 발화당 1회만 집계</strong>(페이드와 클릭이 겹쳐 들어와도), F2 회귀(대기 중인 발화가 없으면 <code>notify_*</code> 가 무시되는지).</li>
+<li><code>DiscardTests</code> — 프레이징 완료 시점에 화면이 바쁜 경우 간격·쿨다운이 환불되고 무시로 집계되지 않는지 / 정상 렌더된 경우엔 선지불이 유지되고 결과 대기 상태로 들어가는지.</li>
+<li>실제 tkinter 스모크 — 페이드 · "나중에" · 클릭 · 무관한 새 턴 네 경로가 각각 정확히 한 번씩 올바른 결과를 내는지 확인.</li>
+</ul>
+
+</div>
+</body>
+</html>

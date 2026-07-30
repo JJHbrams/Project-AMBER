@@ -1,5 +1,5 @@
 """
-callgraph.py — ARONA 프로젝트 Python 호출 그래프 시각화
+callgraph.py — engram 프로젝트 Python 호출 그래프 시각화
 AST 정적 분석 + pyvis 인터랙티브 HTML
 
 Usage:
@@ -236,7 +236,7 @@ def render_html(all_defs: dict, all_edges: list, output: Path):
     html = output.read_text(encoding="utf-8")
     legend_html = """
 <div style="position:fixed;top:10px;right:10px;background:#16213e;border:1px solid #444;border-radius:8px;padding:12px;font-family:monospace;font-size:12px;color:#ccc;z-index:9999;">
-  <b style="color:#fff">ARONA Call Graph</b><br><br>
+  <b style="color:#fff">engram Call Graph</b><br><br>
 """
     for mod, color in MODULE_COLORS.items():
         if mod == "__other__":
@@ -252,7 +252,7 @@ def render_html(all_defs: dict, all_edges: list, output: Path):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="ARONA call graph visualizer")
+    parser = argparse.ArgumentParser(description="engram Call Graph visualizer")
     parser.add_argument("--root", default=".", help="프로젝트 루트 경로")
     parser.add_argument("--output", default="docs/callgraph.html", help="출력 HTML 경로")
     args = parser.parse_args()

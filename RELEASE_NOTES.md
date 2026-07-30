@@ -1,5 +1,60 @@
 # Release Notes
 
+## 2026-07-30 - v0.2.2: Initiative Feedback Loop, Reply Affordance, and a Rename
+
+### Highlights
+
+- **Initiative now closes the loop.** In v0.2.1 the character could speak on its own, but what
+  happened next went nowhere — engagement was never observed, so no knowledge or preference could
+  accumulate. Outcomes are now classified and recorded: `engaged` / `acknowledged_no_reply`
+  (opened but never answered) / `ignored` (faded, or an unrelated new turn) / `late_engaged`.
+  Each resolution writes to `activity_log`, auto-resolves the originating curiosity, and feeds
+  the ignore-backoff.
+- **Reply affordance** — an SNS-style REPLY arrow badge sits on the bubble's bottom corner
+  (opposite the tail). Pressing it opens an **empty** input; nothing is ever sent automatically.
+  The remark itself is prepended to the session prompt, so a two-word answer still carries context.
+- **Answer whenever you like.** The 25-second dwell is only the window for *observing* an
+  outcome, not for replying. Click the character at any time to see what it last said — if that
+  was an autonomous remark, the reply path is still there. If it was an ordinary response, you
+  just start a new conversation.
+- **The continuum is now named Mnema** (formerly Arona) — Greek μνῆμα, "memory" and also "that
+  which remains", the same idea as *engram* in another language.
+
+### What Changed
+
+- `Nudge` carries `topic` / `ref_id`, and the engine keeps the rendered remark in `_active_nudge`
+  until its outcome is fixed — this is the single lock that guarantees one outcome per remark.
+- Backoff accounting split from spacing: the gap and per-source cooldown are still paid upfront
+  (so a second remark cannot fire while phrasing runs), but a remark that never reaches the screen
+  is now refunded instead of being counted as ignored.
+- `activity_log.detail` has a parse contract — everything before the first `" | "` is
+  machine-readable (`source` / `outcome` / `latency`, no spaces in values), everything after is
+  free text. `latency` is recorded because it cannot be reconstructed later: a remark dismissed in
+  three seconds and one that sat through a 25-second fade are opposite signals.
+- Diagnostic logging — the engine now reports *why* it stayed silent, once per state change
+  (`enabled` / phrasing in flight / quiet hours / screen busy / not idle enough / gap not met).
+- Fixes: every user message used to reset the ignore-backoff, so it never actually accumulated;
+  fade completion was never reported to the engine, so "ignored" was never observed; STM promotion
+  on session close raised a `TypeError` on a stale `session_id` argument and failed silently.
+
+### Impact
+
+- Autonomous remarks stop being one-off events. The ledger (`activity_log`) now accumulates
+  per-source and per-hour engagement, which a later pass can feed into the reflection pipeline.
+- Replying no longer puts words in your mouth — the input opens empty, and nothing leaves until
+  you press Enter.
+- Existing installs upgrade in place via the new `setup.exe` (config/DB preserved). The rename
+  applies to new identity output only; past conversation records keep the old name, because they
+  are records of what actually happened.
+
+### Known Issue
+
+- With `bubble.speech_fade: false`, a response bubble never leaves the screen, so the initiative
+  gate (which requires an empty screen) stays closed and **autonomous remarks never appear**.
+  This setting is not exposed in Settings, and editing `overlay.user.yaml` by hand requires an
+  overlay restart. Keep fade on and tune `speech_dwell_ms` instead — clicking the character
+  restores the last exchange anyway.
+
 ## 2026-07-28 - v0.2.1: Proactive Presence (Initiative), Interest/Memory Quality, and Bubble UX
 
 > Folds in v0.2.0 (bubble max-height/scroll, grip resize, global engram bootstrap hook),

@@ -39,6 +39,7 @@ class InputBar:
         self._bubble.set_on_move_end(self._on_move_end)
         self._entry: Optional[tk.Entry] = None
         self._on_submit: Optional[Callable[[str], None]] = None
+        self._on_close: Optional[Callable[[], None]] = None
         self._width_override: "int | None" = None  # 사용자가 grip으로 드래그한 폭 — 다음에 열 때도 유지
         self._body_h = 0
         # 사용자가 통짜로 드래그해서 옮긴 뒤 "꼬리가 붙은 하단 코너"의 비율 오프셋 —
@@ -80,11 +81,22 @@ class InputBar:
     def is_showing(self) -> bool:
         return self._entry is not None
 
-    def show(self, on_submit: Callable[[str], None]) -> None:
+    def show(
+        self,
+        on_submit: Callable[[str], None],
+        on_close: "Optional[Callable[[], None]]" = None,
+    ) -> None:
+        """on_close: 아무것도 보내지 않고 입력창이 닫힌 순간 1회 호출(Escape·재클릭 등).
+        제출로 닫히는 경우에는 부르지 않는다 — 호출부가 "열어보고 그냥 닫았다"와
+        "실제로 답장했다"를 구분해야 하기 때문.
+
+        입력창은 항상 **비어서** 열린다. 자율발화 답장 경로에서 문구를 미리 채워봤지만,
+        그것도 "내 의견 없이 문장이 자동 생성되는" 것이어서 되돌렸다."""
         if self.is_showing():
             self.hide()
             return
         self._on_submit = on_submit
+        self._on_close = on_close
         char_x, char_y, char_w, _char_h = self._get_char_rect()
         canvas = self._bubble.ensure()
 
@@ -209,6 +221,7 @@ class InputBar:
         # 말풍선을 남기는 데 쓴다(BubbleManager.show_echo). 반드시 hide() 전에 읽어야 함.
         self._last_rect = self.current_rect()
         callback = self._on_submit
+        self._on_close = None  # 제출로 닫히는 건 "그냥 닫음"이 아니다
         self.hide()
         if callback is not None:
             callback(text)
@@ -228,6 +241,7 @@ class InputBar:
         return getattr(self, "_last_rect", None)
 
     def hide(self) -> None:
+        was_showing = self._entry is not None
         if self._entry is not None:
             try:
                 self._entry.destroy()
@@ -235,4 +249,10 @@ class InputBar:
                 pass
             self._entry = None
         self._on_submit = None
+        on_close, self._on_close = self._on_close, None
         self._bubble.hide()
+        if was_showing and on_close is not None:
+            try:
+                on_close()
+            except Exception:
+                pass

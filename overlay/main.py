@@ -349,6 +349,12 @@ class OverlayApp:
         # 활동 추적: 마지막 상호작용 시각 + 현재 턴 진행 여부(발화 가능 판정용).
         self._bubble_last_activity = time.monotonic()
         self._bubble_turn_active = False
+        # 자율발화를 클릭해 입력창을 연 상태 — 여기서 제출하면 engaged, 그냥 닫으면
+        # acknowledged_no_reply 로 갈린다. 클릭 시점엔 아직 결과를 모른다.
+        self._nudge_awaiting_reply = False
+        self._nudge_engage_live = False  # 살아있는 발화에 답하는 중인가(vs 지난 발화 되살림)
+        self._pending_nudge_text = ""   # 답장 첫 마디에 얹을 직전 발화 문구
+        self._ignored_streaks: dict[str, int] = {}  # 소스별 연속 무시 횟수(세션 수명)
         init_cfg = bubble_cfg.get("initiative") if isinstance(bubble_cfg, dict) else None
         init_cfg = init_cfg if isinstance(init_cfg, dict) else {}
         self._initiative = InitiativeEngine(
@@ -359,6 +365,7 @@ class OverlayApp:
             show_nudge=self._initiative_show_nudge,
             phrase=make_persona_phraser(float(init_cfg.get("phrasing_timeout_sec", 25))),
             sources=default_sources(lambda: str(get_workdir()), scope_key="overlay"),
+            on_outcome=self._on_initiative_outcome,
         )
         if self._chat_mode == "bubble":
             self._initiative.start()
@@ -1075,7 +1082,15 @@ class OverlayApp:
         # 상단 기본)에 별도로 뜬다 — 내 입력이 응답으로 출력되는 것처럼 보이던 문제 해결.
         self._bubble_last_activity = time.monotonic()
         self._bubble_turn_active = True  # 턴 시작 — 응답이 끝날(turn_end/error/result) 때까지 발화 억제
-        self._initiative.notify_engaged()  # 사용자가 직접 말을 걸었으니 무시 백오프 리셋
+        # 자율발화에 대한 답장일 때만 engaged 로 친다. 예전엔 모든 입력에서 무조건
+        # notify_engaged 를 불렀는데, 그러면 자율발화와 무관한 평소 대화가 백오프를
+        # 계속 0 으로 되돌려서 "무시가 쌓이면 뜸해진다"는 규칙이 사실상 죽어 있었다.
+        if self._nudge_awaiting_reply:
+            self._nudge_awaiting_reply = False
+            if self._nudge_engage_live:
+                self._initiative.notify_engaged()
+            else:
+                self._initiative.notify_late_engaged()
         self._bubble_manager.show_echo(text, self._bubble_input.get_last_rect())
         self._bubble_manager.show_user_message(text)
         if self._bubble_session is not None:
@@ -1092,19 +1107,31 @@ class OverlayApp:
 
     def _bubble_screen_clear(self) -> bool:
         """지금 능동 발화를 띄워도 되는가 — bubble 모드 · 입력창 닫힘 · 턴 진행 안 함 ·
-        떠 있는 풍선 없음일 때만 True."""
+        떠 있는 풍선 없음일 때만 True.
+
+        막힌 이유가 바뀔 때만 로그로 남긴다 — 엔진 쪽 메시지는 "화면이 비어있지 않음"
+        까지만 알 수 있어서, 넷 중 무엇인지는 여기서만 구분된다.
+        (speech_fade:false 로 응답 풍선이 계속 떠 있으면 영구히 막히는데, 그게
+        로그에 안 남으면 밖에서는 원인을 알 수 없다.)"""
         if self._chat_mode != "bubble":
-            return False
-        if self._bubble_turn_active:
-            return False
-        if self._bubble_input.is_showing():
-            return False
-        return self._bubble_manager.is_idle()
+            reason = f"chat_mode={self._chat_mode}"
+        elif self._bubble_turn_active:
+            reason = "턴 진행 중"
+        elif self._bubble_input.is_showing():
+            reason = "입력창 열림"
+        elif not self._bubble_manager.is_idle():
+            reason = "떠 있는 풍선 있음(speech_fade 설정 확인)"
+        else:
+            reason = ""
+        if reason != getattr(self, "_screen_block_reason", None):
+            self._screen_block_reason = reason
+            if reason:
+                log.info("[overlay] 자율발화 화면 조건 미충족: %s", reason)
+        return not reason
 
     def _initiative_show_nudge(self, text: str, engine_on_click) -> None:
         """엔진이 만든 능동 발화를 말풍선으로 렌더한다. 클릭하면 엔진에 알린 뒤(백오프
-        리셋) 입력창을 열어 대화로 잇는다 — 발화에 engage_prompt 가 딸려 있으면 그
-        프롬프트로 바로 대화를 시작한다."""
+        리셋) 입력창을 열어 대화로 잇는다."""
         dwell = None
         cfg_init = getattr(self._initiative, "_cfg", {}) or {}
         try:
@@ -1118,19 +1145,148 @@ class OverlayApp:
             finally:
                 self._engage_nudge()
 
-        self._bubble_manager.show_nudge(text, _click, dwell_ms=dwell)
+        self._bubble_manager.show_nudge(
+            text, _click, dwell_ms=dwell, on_ignored=self._initiative.notify_ignored,
+        )
 
     def _engage_nudge(self) -> None:
+        """자율발화 풍선(또는 답장 아이콘)을 눌렀다 — **입력창을 연다.**
+
+        예전에는 소재별 `engage_prompt` 를 그대로 제출했고(1차), 그다음엔 입력창에
+        초안으로 채웠다(2차). 둘 다 "내 의견 없이 문장이 자동 생성된다"는 같은 문제라
+        결국 그 필드를 없앴다. 답장 버튼의 계약은 "눌러서 **빈** 입력창이 뜨는 것"이다.
+
+        입력창은 **비워서** 연다. 문구를 미리 채워두는 것도 결국 "내 의견 없이 문장이
+        자동 생성되는" 것이라 답장의 의미가 없다. 발화 문구는 세션에 보낼 때 앞에
+        prepend 되므로(_with_nudge_context) 짧게 "응 해줘"만 써도 맥락이 통한다.
+
+        여기서 결과를 engaged 로 확정하지 않는다. 입력창을 열어준 것뿐이고, 실제로
+        보냈는지(_on_bubble_submit)와 그냥 닫았는지(_on_nudge_input_closed)를 구분해야
+        "열어는 봤는데 할 말이 없더라"가 참여로 둔갑하지 않는다."""
         self._bubble_last_activity = time.monotonic()
-        prompt = self._initiative.take_pending_engage()
+        # 화면에 실제로 떠 있던 문구 — 프레이징을 거쳤으면 템플릿이 아니라 그 문장이다.
+        nudge_text = self._initiative.active_nudge_text()
         self._ensure_bubble_session()
-        if prompt:
+        self._bubble_manager.refresh_positions()
+        # 열려 있던 입력창부터 닫는다. 이 hide() 는 직전 발화의 닫힘 콜백을 소비하므로
+        # 반드시 _nudge_awaiting_reply 를 새 값으로 세우기 **전에** 끝나야 한다 —
+        # 순서가 뒤집히면 이전 입력창이 닫히면서 방금 뜬 발화를 무응답으로 마감해버린다.
+        if self._bubble_input.is_showing():
             self._bubble_input.hide()
-            self._on_bubble_submit(prompt)
-        else:
-            self._bubble_manager.refresh_positions()
-            if not self._bubble_input.is_showing():
-                self._bubble_input.show(on_submit=self._on_bubble_submit)
+        # 살아있는 발화(판정 대기)에 답하는 건지, 이미 판정이 끝난 지난 발화를 되살려
+        # 뒤늦게 답하는 건지 구분해둔다 — 전자는 engaged, 후자는 late_engaged 로
+        # 기록이 갈린다(이미 기록된 ignored 를 소급 수정하지 않기 위함).
+        self._nudge_engage_live = self._initiative.has_pending_outcome()
+        self._nudge_awaiting_reply = True
+        self._pending_nudge_text = nudge_text
+        self._bubble_input.show(
+            on_submit=self._on_nudge_reply_submit,
+            on_close=self._on_nudge_input_closed,
+        )
+
+    @staticmethod
+    def _with_nudge_context(nudge_text: str, user_text: str) -> str:
+        """세션에 보낼 첫 프롬프트 앞에 방금 건넨 말을 얹는다.
+
+        이게 없으면 캐릭터가 A 라고 말을 걸어 사용자가 거기에 답했는데 세션은 A 를
+        본 적이 없어서 맥락 없는 답을 한다 — 사용자 눈엔 "자기가 한 말을 기억 못 하는"
+        것으로 보인다. 상주 세션의 첫 프롬프트에만 붙으면 되고, 이후 턴은 세션이
+        스스로 이어간다."""
+        nudge_text = (nudge_text or "").strip()
+        if not nudge_text:
+            return user_text
+        return f"[방금 내가 사용자에게 먼저 건넨 말] {nudge_text}\n\n{user_text}"
+
+    def _on_nudge_reply_submit(self, text: str) -> None:
+        """자율발화를 보고 연 입력창에서 제출 — 첫 마디에만 nudge 문구를 얹는다."""
+        nudge_text, self._pending_nudge_text = getattr(self, "_pending_nudge_text", ""), ""
+        self._on_bubble_submit(self._with_nudge_context(nudge_text, text))
+
+    def _on_nudge_input_closed(self) -> None:
+        """자율발화를 보고 연 입력창을 아무것도 안 보내고 닫았다 — 중간 신호.
+        완전한 무시보다는 약한 부정 신호로 기록된다."""
+        self._pending_nudge_text = ""
+        if not self._nudge_awaiting_reply:
+            return
+        self._nudge_awaiting_reply = False
+        # 살아있는 발화만 "열어보고 무응답"으로 판정한다. 지난 발화를 되살려 봤다가
+        # 그냥 닫은 경우는 이미 결과가 확정된 건이라 다시 집계하지 않는다.
+        if self._nudge_engage_live:
+            self._initiative.notify_acknowledged()
+
+    def _on_initiative_outcome(self, nudge, outcome: str, shown_text: str, latency_sec: float = 0.0) -> None:
+        """자율발화 하나의 결과가 확정됐다 — 여기가 "발화하고 끝"을 끊는 지점이다.
+
+        엔진은 백오프까지만 알고, 무엇을 남길지는 전부 여기서 결정한다:
+        활동 로그(집계 원장) · 참여한 호기심 해소 · 반복 무시 기록.
+        어느 하나가 실패해도 나머지는 진행한다 — 부가 기록 때문에 UI 흐름이 끊기면 안 된다."""
+        from overlay.bubble.initiative import ENGAGED, IGNORED, LATE_ENGAGED
+
+        source = getattr(nudge, "source_key", "?")
+        topic = getattr(nudge, "topic", "") or ""
+        try:
+            from core.observability.activity import log_activity
+
+            # 형식 계약: 첫 " | " 앞은 기계 판독용 key=value 구간이고, 값에는 공백이
+            # 들어가지 않는 것들만 둔다(source/outcome 은 고정 enum, latency 는 숫자).
+            # topic·문구는 자유 텍스트라 구분자가 섞일 수 있으므로 반드시 뒤로 뺀다 —
+            # 앞 구간에 섞으면 나중에 집계할 때 파싱이 조용히 깨진다. 뒤에 필드를
+            # 추가해도 앞 구간 파서는 그대로 동작한다.
+            detail = f"source={source} outcome={outcome} latency={latency_sec:.1f}"
+            tail = " / ".join(p for p in (topic, shown_text[:200] if shown_text else "") if p)
+            if tail:
+                detail += f" | {tail}"
+            log_activity(
+                action=f"initiative.{outcome}",
+                detail=detail,
+                project="overlay",
+                actor="engram-overlay",
+            )
+        except Exception:
+            log.debug("[overlay] 자율발화 결과 로깅 실패", exc_info=True)
+
+        # 참여한 호기심은 해소 처리 — 안 하면 이미 같이 파본 주제로 계속 다시 말을 건다.
+        ref_id = getattr(nudge, "ref_id", None)
+        if outcome in (ENGAGED, LATE_ENGAGED) and source == "curiosity" and ref_id is not None:
+            try:
+                from core.identity import address_curiosity
+
+                address_curiosity(int(ref_id))
+                log.info("[overlay] 자율발화 참여로 호기심 해소 id=%s", ref_id)
+            except Exception:
+                log.debug("[overlay] 호기심 해소 실패 id=%s", ref_id, exc_info=True)
+
+        log.info("[overlay] 자율발화 결과 source=%s outcome=%s latency=%.1fs topic=%s",
+                 source, outcome, latency_sec, topic)
+        if outcome == IGNORED:
+            self._note_ignored_source(source)
+        elif outcome == LATE_ENGAGED:
+            # 결국 응했으므로 "관심 낮음" 누적을 되돌린다 — 그 소재는 쓸모가 있었다.
+            self._ignored_streaks.pop(source, None)
+
+    def _note_ignored_source(self, source: str) -> None:
+        """같은 소재를 연속으로 무시하면 "관심 낮음"을 약한 신호로 남긴다.
+
+        한 번의 무시는 그냥 바빴던 것일 수 있어서 아무 의미가 없다 — 연속 3회부터
+        신호로 친다. 카운터는 세션 수명만큼만 유지한다(영속화까지 할 만한 확신이 없음)."""
+        streaks = getattr(self, "_ignored_streaks", None)
+        if streaks is None:
+            streaks = self._ignored_streaks = {}
+        streaks[source] = streaks.get(source, 0) + 1
+        if streaks[source] < 3:
+            return
+        streaks[source] = 0
+        try:
+            from core.observability.activity import log_activity
+
+            log_activity(
+                action="initiative.low_interest",
+                detail=f"source={source} — 연속 3회 무시",
+                project="overlay",
+                actor="engram-overlay",
+            )
+        except Exception:
+            log.debug("[overlay] 관심 낮음 신호 기록 실패", exc_info=True)
 
     def show_bubble_history(self) -> None:
         self._bubble_history.show()

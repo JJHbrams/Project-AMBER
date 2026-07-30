@@ -233,6 +233,78 @@ LLM 클라이언트별 지침 구조는 3계층으로 나뉜다.
   - Copilot CLI에 `--append-system-prompt` 플래그가 없어 파일 경유 방식 사용
 - **Copilot Skill**: `.github/skills/engram/SKILL.md` → `~/.copilot/skills/engram/SKILL.md` 로 복사 (`/engram` 슬래시 커맨드 활성화)
 
+## 10. Rebuild and Deploy — 이미 설치된 환경에 개발 변경 적용
+
+이미 설치가 끝난 상태에서 코드만 바뀌었을 때 무엇을 돌려야 하는가.
+운영 시점 판단 규칙은 `.claude/skills/engram-rebuild/SKILL.md` 에도 같은 내용이 있다.
+
+### 10.1 왜 exe 하나만 갈아끼우면 되는가 — 멀티콜 바이너리
+
+frozen 빌드에서는 **같은 exe 가 `--role` 인자에 따라 백엔드까지 겸한다**
+(`engram_overlay_entry.py::_dispatch_backend_role`). conda python 없이 백엔드가 자립하는 구조.
+
+| 역할      | frozen 실행                                 | 소스(dev) 실행                    |
+| --------- | ------------------------------------------- | --------------------------------- |
+| overlay   | `engram-overlay.exe`                        | `python engram_overlay_entry.py`  |
+| MCP 서버  | `sys.executable --role mcp-server`          | `<conda python> mcp_server.py`    |
+| kg-watcher| `sys.executable --role kg-watcher`          | `<conda python>` 스크립트 실행    |
+
+따라서 `overlay/` 든 `core/` 든 **모든 Python 소스가 이 exe 하나에 번들된다.**
+exe 를 교체하면 overlay·MCP·kg-watcher 가 한 번에 갱신된다.
+
+> `overlay.user.yaml` 의 `mcp.python_exe` 는 **소스 모드에서만** 쓰인다.
+> frozen 설치본에서 이 값을 바꿔도 MCP 동작에 영향이 없다.
+
+### 10.2 판단 — dev-rebuild vs 전체 install
+
+**Python 소스만 바뀌었으면 `dev-rebuild.ps1` 로 충분하다.**
+
+전체 `INSTALL.ps1` 이 필요한 경우:
+
+| 변경 대상                            | 이유                                                                          |
+| ------------------------------------ | ----------------------------------------------------------------------------- |
+| `requirements.txt` / `environment.yml` | PyInstaller 는 conda env 에서 패키지를 수집한다. 새 의존성이 env 에 없으면 번들에도 안 들어감 (모듈 03/04) |
+| shim(`~/.engram/*.cmd`) · PATH · 바로가기 | 모듈 07/08/10                                                                 |
+| MCP 클라이언트 등록 정보 · 클라이언트 지침(`config/clients/*.md`) | 모듈 05, §9.3                                             |
+
+DB 스키마는 대개 예외다 — `core/storage/db.py` 가 연결 시 `CREATE TABLE IF NOT EXISTS`
+마이그레이션을 수행한다(`activity_log` 도 이 경로로 생성됨). 별도 마이그레이션 스크립트가
+필요한 변경일 때만 모듈 06 이 필요하다.
+
+### 10.3 두 경로의 빌드 안전성 차이
+
+| | `dev-rebuild.ps1` | `INSTALL.ps1` (모듈 09) |
+| --- | --- | --- |
+| PyInstaller 플래그 | `--noconfirm` (증분) | `--noconfirm --clean` |
+| 빌드 대상 | **`dist/` 에 직접** | 임시 distpath → 성공 시 교체 |
+| 실패 시 | dist 가 손상된 채 남을 수 있음 | 기존 dist 보존, 증분 실패 시 clean 으로 1회 자동 재시도 |
+| 범위 | 빌드 + 재기동 | 10개 모듈 전체 |
+
+평상시엔 `dev-rebuild.ps1`, 빌드가 꼬이면 `.\INSTALL.ps1 -OverlayBuildMode clean` 으로 정리한다.
+
+### 10.4 `-OverlayBuildMode` 의미
+
+`INSTALL.ps1` 기본값은 `auto` 이며, `common.ps1::Test-OverlayBuildRequired` 가
+**dist exe 와 소스의 mtime 을 비교**해 빌드 여부를 정한다.
+비교 대상: `engram-overlay.spec`, `engram_overlay_entry.py`, `overlay/`, `core/`,
+`discord_bot/`, `resource/`, `config/overlay.yaml`, `config/overlay.user.yaml`.
+
+| 값        | 동작                                        |
+| --------- | ------------------------------------------- |
+| `auto`    | mtime 비교 후 필요할 때만 빌드 (기본값)     |
+| `rebuild` | 항상 증분 빌드                              |
+| `clean`   | 항상 clean 빌드                             |
+| `skip`    | 빌드 생략 (설치의 나머지 단계만)            |
+
+### 10.5 절차상 주의
+
+- `dev-rebuild.ps1` 은 **실행 중인 overlay 를 전부 종료**한 뒤 첫 인스턴스의 경로를
+  deploy 대상으로 기억한다. dist 와 다르면 `robocopy /MIR` 로 미러링한다 —
+  `/MIR` 이므로 deploy 디렉토리에 수동으로 넣어둔 파일은 삭제된다.
+- overlay 종료는 STM 브로커·MCP·kg-watcher 동반 종료를 의미한다. 다른 CLI 세션이
+  engram MCP 를 쓰는 중이면 그 세션의 MCP 호출이 실패한다.
+- 사용자 설정은 보존된다. 모듈 09 는 `overlay.user.yaml` 이 **없을 때만** 템플릿을 만든다.
+
 ### 9.4 Layer 3 런타임 지시문
 
 `core/context_builder.py`의 `build_system_prompt()` 가 모든 클라이언트에 공통으로 주입한다:

@@ -76,7 +76,7 @@ class EngramBackend:
         if self._session is not None:
             try:
                 from core.graph.semantic import maybe_promote
-                maybe_promote(scope_key=self._session.scope_key, session_id=self._session.session_id)
+                maybe_promote(scope_key=self._session.scope_key)
             except Exception as e:
                 logger.debug("STM promote on close 실패: %s", e)
 
