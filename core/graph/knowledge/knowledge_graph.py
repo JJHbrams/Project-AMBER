@@ -522,10 +522,23 @@ class KnowledgeGraph:
     # ── 노트 파일 생성 ────────────────────────────────────
 
     def create_note_file(self, title: str, content: str, note_type: str,
-                         tags: list, links: list, vault_path: Path) -> Path:
-        """마크다운 파일 생성 후 DB 동기화. 파일 경로 반환"""
-        subdir = NODE_TYPE_DIRS.get(note_type, note_type)
-        target_dir = vault_path / "docs" / subdir
+                         tags: list, links: list, vault_path: Path,
+                         subdir: str = "") -> Path:
+        """마크다운 파일 생성 후 DB 동기화. 파일 경로 반환
+
+        subdir: note_type 기본 디렉토리(NODE_TYPE_DIRS) 아래에 붙는 추가 하위 경로.
+        예: note_type="project", subdir="001_TruviewCADMOM/log" →
+            docs/projects/001_TruviewCADMOM/log/<슬러그>.md
+        title/note_type에 경로를 욱여넣는 옛 트릭과 달리, note_type은 그대로
+        DB type으로 기록되므로 타입 분류가 깨지지 않는다.
+        """
+        base_dir = NODE_TYPE_DIRS.get(note_type, note_type)
+        docs_root = (vault_path / "docs").resolve()
+        target_dir = docs_root / base_dir
+        if subdir:
+            target_dir = (target_dir / subdir.strip("/\\")).resolve()
+            if not target_dir.is_relative_to(docs_root):
+                raise ValueError(f"subdir가 vault 밖을 가리킴: {subdir!r}")
         target_dir.mkdir(parents=True, exist_ok=True)
 
         slug = _slugify(title)
@@ -620,6 +633,74 @@ class KnowledgeGraph:
             md_path.write_text(text, encoding="utf-8")
         except Exception:
             pass
+
+    # ── 임의 섹션 patch (summary/Progress 외 본문) ─────────
+
+    def patch_section(
+        self,
+        node_id: str,
+        heading: str,
+        content: str,
+        create_if_missing: bool = True,
+    ) -> dict:
+        """노드 파일의 특정 헤딩 섹션 본문을 교체(또는 없으면 추가)한다.
+
+        update_node_progress/_patch_md_progress(summary·Progress·open_intents 전용)와는
+        별개 경로 — 그쪽 hot path(engram_close_session에서도 호출됨)는 건드리지 않는다.
+
+        - heading: 정확한 헤딩 라인 (예: '## 목표'). '#' 개수로 레벨을 판별해
+          다음 동급 이상 헤딩 직전까지를 교체 범위로 삼는다(하위 헤딩은 섹션에 포함 유지).
+        - content: 헤딩 아래 들어갈 본문 (헤딩 라인 자체는 제외)
+        - create_if_missing: True면 헤딩이 없을 때 파일 끝에 새로 추가.
+          False면 조용히 append하는 대신 에러 + 기존 헤딩 목록을 반환한다
+          (오타로 인한 중복 헤딩 생성을 막기 위함).
+        """
+        node = self.get_node(node_id)
+        if not node:
+            return {"error": f"노드를 찾을 수 없음: {node_id}"}
+
+        vault_root = node.get("vault_path", "")
+        rel_path = node.get("path", "")
+        if not (vault_root and rel_path):
+            return {"error": "노드에 연결된 파일 경로가 없음"}
+
+        md_path = Path(vault_root) / rel_path
+        if not md_path.exists():
+            return {"error": f"파일 없음: {md_path}"}
+
+        heading = heading.strip()
+        level_match = re.match(r"^(#{1,6})[ \t]+\S", heading)
+        if not level_match:
+            return {"error": "heading은 '#'로 시작하는 마크다운 헤딩 라인이어야 함 (예: '## 목표')"}
+        level = len(level_match.group(1))
+
+        try:
+            text = md_path.read_text(encoding="utf-8", errors="ignore")
+        except Exception as exc:
+            return {"error": f"파일 읽기 실패: {exc}"}
+
+        escaped = re.escape(heading)
+        section_pattern = re.compile(
+            rf"\n{escaped}[ \t]*\n.*?(?=\n#{{1,{level}}}[ \t]|\Z)", re.DOTALL
+        )
+
+        body = content.strip("\n")
+        new_block = f"\n{heading}\n\n{body}\n"
+
+        if section_pattern.search(text):
+            text = section_pattern.sub(lambda _m: new_block, text, count=1)
+        elif create_if_missing:
+            text = text.rstrip("\n") + "\n" + new_block
+        else:
+            existing_headings = re.findall(r"^#{1,6}[ \t].+$", text, re.MULTILINE)
+            return {"error": f"헤딩을 찾을 수 없음: {heading}", "existing_headings": existing_headings}
+
+        try:
+            md_path.write_text(text, encoding="utf-8")
+        except Exception as exc:
+            return {"error": f"파일 쓰기 실패: {exc}"}
+
+        return {"status": "ok", "node_id": node_id, "heading": heading, "path": str(md_path)}
 
     # ── 내부 헬퍼 ─────────────────────────────────────────
 

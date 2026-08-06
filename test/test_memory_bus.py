@@ -1,3 +1,4 @@
+import asyncio
 import unittest
 from unittest.mock import patch
 
@@ -29,7 +30,8 @@ class MemoryBusTests(unittest.TestCase):
     def test_compose_prompt_context_uses_session_scope(self, mock_build_system_prompt, mock_resolve_project_key):
         session = MemorySession(session_id=7, scope_key="default:main")
 
-        result = self.bus.compose_prompt_context("hello", caller="copilot-cli", session=session)
+        # compose_prompt_context는 async(내부 SemanticGraph 호출이 await 기반) — asyncio.run으로 실행.
+        result = asyncio.run(self.bus.compose_prompt_context("hello", caller="copilot-cli", session=session))
 
         self.assertEqual(result, "prompt")
         mock_resolve_project_key.assert_called_once_with(cwd=None)
@@ -50,7 +52,7 @@ class MemoryBusTests(unittest.TestCase):
         mock_resolve_scope_key,
         mock_resolve_project_key,
     ):
-        result = self.bus.compose_prompt_context("hello", caller="copilot-cli")
+        result = asyncio.run(self.bus.compose_prompt_context("hello", caller="copilot-cli"))
 
         self.assertEqual(result, "prompt")
         mock_resolve_scope_key.assert_called_once_with(None, project_key=None, cwd=None)

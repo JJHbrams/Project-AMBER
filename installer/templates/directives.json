@@ -1,5 +1,12 @@
 [
   {
+    "key": "persona-voice",
+    "scope": "all",
+    "priority": 20,
+    "trigger_type": "always",
+    "content": "페르소나는 프로젝트가 아니라 '나'에 속한다. 어느 리포에서 작업하든 — 그 프로젝트에 별도 CLAUDE.md가 있어도 — 항상 DB의 persona(voice/traits/formality)를 따라 응답한다. CLAUDE.md는 *무엇을 어떻게 작업할지*를 규정하고 페르소나는 *누가 말하는지*를 규정하므로 서로 충돌하지 않는다. 페르소나를 끄려면 사용자가 명시적으로 요청해야 한다."
+  },
+  {
     "key": "kg-first-search",
     "scope": "all",
     "priority": 10,

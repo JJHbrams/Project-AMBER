@@ -41,6 +41,8 @@ updated: __DATE__
 - 최대 3계층 깊이
 - 디렉토리명: **소문자 kebab-case** (예: `projects/karpathy/`, `research/medical-imaging/`)
 - 새 디렉토리: `kg_add_note(note_type="projects/my-project")` 트릭 사용 후 frontmatter `type`을 `moc`으로 수정
+  (이건 moc 타입을 표준 위치가 아닌 곳에 강제 배치하는 좁은 용도 전용 — 일반적으로
+  기존 디렉토리 하위에 노트를 넣을 때는 아래 `subdir` 파라미터를 쓸 것, note_type은 안 건드림)
 
 | 디렉토리 | 용도 |
 |----------|------|
@@ -83,6 +85,10 @@ updated: __DATE__
   - 한국어·공백 금지, kebab-case 영문, 핵심 키워드 2~4개
   - 사람이 읽는 노트 제목은 본문 frontmatter `title:` 필드로 별도 지정
   - 좋은 예: `title="dashboard-visjs-graph-ui"` (frontmatter: `title: Dashboard vis.js Graph UI`)
+  - **title에 슬래시로 서브디렉토리 지정 불가** — 슬러그화 과정에서 제거되어 항상
+    flat한 파일명이 됨. 기존 프로젝트 하위에 배치하려면 `subdir` 파라미터를 쓸 것
+    (예: `note_type="project", subdir="001_TruviewCADMOM/log"`) — note_type은 그대로
+    유지되므로 DB type이 오염되지 않음
 - 관련 노트는 항상 [[위키링크]] 형식으로 연결
 
 ---
@@ -145,9 +151,11 @@ GPT-4는 2023년 3월 공개되었다. (출처: [OpenAI blog](https://openai.com
 
 노트 생성·수정·이동 후:
 1. kg_sync() — vault .md → SQLite DB 동기화
-2. kg_update_node(node_id, summary) — 프로젝트 노드 상태 갱신
-3. HOME 파일 변경 시 → KG 노드 000-home summary도 업데이트
-4. kg_lint() — 품질 점검 (고립 노드, _inbox 체류, summary 누락 등)
+2. kg_update_node(node_id, summary) — 프로젝트 노드 상태 갱신 (summary/Progress/open_intents 전용)
+3. kg_patch_section(node_id, heading, content) — 그 외 본문 섹션(헤딩 단위) 수정. 헤딩 텍스트는
+   kg_read_note로 원문 확인 후 정확히 일치시킬 것 — 다르면 새 섹션이 추가된다.
+4. HOME 파일 변경 시 → KG 노드 000-home summary도 업데이트
+5. kg_lint() — 품질 점검 (고립 노드, _inbox 체류, summary 누락 등)
 
 ---
 

@@ -13,11 +13,11 @@ from core.context.context_builder import _wiki_reminder_snippet, build_system_pr
 print("=" * 50)
 print("1. SemanticGraph 상태")
 print("=" * 50)
-from core.graph.semantic import get_semantic_graph
+from core.graph.semantic import get_semantic_graph, run_sg_coro
 sg = get_semantic_graph()
 print(f"  enabled: {sg.enabled}")
 if sg.enabled:
-    sg._ensure_cache()
+    run_sg_coro(sg._ensure_cache())
     print(f"  KGNode 캐시: {len(sg._cache_ids)}개")
 
 print()
@@ -31,7 +31,7 @@ queries = [
     "메모리 저장 경험 회상",
 ]
 for q in queries:
-    result = _wiki_reminder_snippet(q, top_k=3, threshold=0.35)
+    result = run_sg_coro(_wiki_reminder_snippet(q, top_k=3, threshold=0.35))
     print(f"  [{q}]")
     if result:
         for line in result.split("\n"):
@@ -43,7 +43,7 @@ for q in queries:
 print("=" * 50)
 print("3. build_system_prompt wiki_reminder 섹션 확인")
 print("=" * 50)
-prompt = build_system_prompt(user_query="Tauri GUI 창 구현")
+prompt = run_sg_coro(build_system_prompt(user_query="Tauri GUI 창 구현"))
 if "wiki_reminder" in prompt:
     start = prompt.index("<ctx:wiki_reminder>")
     end = prompt.index("</ctx:wiki_reminder>") + len("</ctx:wiki_reminder>")

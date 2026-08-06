@@ -169,9 +169,9 @@ def _do_sync(vault_path: Path) -> None:
 
         # 시맨틱 싱크: MCP 서버가 살아있으면 위임, 아니면 직접 처리
         if not _try_semantic_sync_via_mcp():
-            from core.graph.semantic import get_semantic_graph
+            from core.graph.semantic import get_semantic_graph, run_sg_coro
             sg = get_semantic_graph()
-            sem = sg.sync_from_kg()
+            sem = run_sg_coro(sg.sync_from_kg())
             logger.info(
                 "직접 시맨틱 싱크 완료 — 노드 %d개 (재임베딩 %d개), 엣지 %d개",
                 sem.get("nodes", 0),
@@ -239,7 +239,7 @@ def _sync_project_file(src_path: Path, project_name: str, vault_path: Path) -> b
 
     try:
         from core.graph.knowledge import get_kg
-        from core.graph.semantic import get_semantic_graph
+        from core.graph.semantic import get_semantic_graph, run_sg_coro
 
         docs_dir = vault_path / "docs"
         kg = get_kg()
@@ -248,7 +248,7 @@ def _sync_project_file(src_path: Path, project_name: str, vault_path: Path) -> b
         if nid:
             # 시맨틱 싱크: MCP 서버가 살아있으면 위임, 아니면 직접 처리
             if not _try_semantic_sync_via_mcp():
-                get_semantic_graph().sync_from_kg()
+                run_sg_coro(get_semantic_graph().sync_from_kg())
             logger.info("✅ [%s] %s → wiki 동기화", project_name, src_path.name)
         return bool(nid)
     except Exception as exc:

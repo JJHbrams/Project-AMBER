@@ -1,5 +1,88 @@
 # Release Notes
 
+## 2026-08-06 - v1.1.0: Remote Access, and the Embedding Call That Froze the Server
+
+> Folds in v1.0.0 (authenticated remote listener, SSH reverse tunnel access), which was built
+> but never separately released on this distribution repo.
+>
+> From this release on, **only major/minor bumps get their own release**. Patches (1.1.x) are
+> published as additional installers attached to this same release — check **Assets** for the
+> newest one.
+
+### Highlights
+
+- **engram is reachable from a remote machine.** Memory and the wiki still live in exactly one
+  place — your local machine — and a remote session shares that one over an SSH reverse tunnel.
+  The security model used to be entirely "bound to loopback = authenticated", which holds only
+  because reaching `127.0.0.1:17385` already implies local execution rights. A tunnel breaks that
+  equation: the machine on the far end has no local rights but does reach the port. **Reachable ≠
+  authorized.** So the listener was split in two — port 17385 stays as it was (local, no auth),
+  and 17386 requires a bearer token, enforces a per-principal tool deny-list, pins a scope, serves
+  only MCP paths, and writes an audit line per call.
+
+- **Embedding-backed calls no longer freeze the whole server.** The symptom was not "sometimes
+  slow" — it was "these specific calls die every time", after hanging 120 seconds and dropping the
+  transport. Two causes stacked. FastMCP invokes synchronous (`def`) tool functions directly on the
+  event loop rather than handing them to a thread pool, and nearly every semantic tool —
+  `kg_semantic_search`, `kg_add_note`, `kg_update_node`, and `engram_get_context`, which almost
+  every session calls at startup — was declared `def`. **One slow call stalled the entire server**,
+  including any other client attached at that moment. Underneath that, `SemanticGraph` shared a
+  single `kuzu.Connection`; KuzuDB itself uses `AsyncConnection` with a connection *pool* when it
+  needs concurrency, so sharing one connection was never a supported pattern.
+
+- **The wiki is editable beyond three fixed slots.** `kg_update_node` only ever rewrote
+  summary / Progress / open_intents. Anything else in the body — a stale URL in a header, an
+  architecture description — had no path, and a remote session cannot touch vault files directly
+  (WAL SQLite and embedded KuzuDB mean the *server* is shared, never the files). `kg_patch_section`
+  replaces body content by heading.
+
+### What Changed
+
+- `SemanticGraph` moved to `kuzu.AsyncConnection` and the whole call path became async.
+  `threading.RLock` → `asyncio.Lock` loses reentrancy, so every place that took the lock while
+  already holding it was split into a `_locked` internal method.
+- The real culprit was likely the embedding, not KuzuDB. `compute_embedding` / `_get_encoder`
+  never touch KuzuDB — `SentenceTransformer` loading and `encode()` block the loop synchronously,
+  and there is a quiet fallback path that downloads from the Hub when the local load fails. Both
+  moved to `asyncio.to_thread`. Without this the `AsyncConnection` migration would have been
+  correct on paper and still hung in practice.
+- Read paths (`semantic_search` and friends) previously took no lock at all. Nothing had broken
+  yet only because FastMCP happened to serialize every call onto one thread — the moment real
+  parallelism arrived, mismatched cache indices could have returned quietly wrong search results.
+  Reads are now covered by the same lock. Nine concurrency tests were added.
+- `kg_add_note(subdir=...)` — a slash in `title` was stripped during slugification, so notes
+  landed flat in `projects/` (lint caught it as a rule violation). The workaround,
+  `note_type="projects/my-project"`, wrote that string into the DB `type`, which then failed the
+  `NODE_TYPES` check on the next `kg_sync` and was demoted to `concept`. Location and type were
+  sharing one parameter; they are now separate. Path traversal is guarded.
+- Persona no longer stops at a project boundary. The directive read "always respond in the
+  **engram persona** (Mnema)…", and in a project with its own CLAUDE.md the model read that as an
+  identity belonging to the engram project and **explicitly declined to adopt it** — not a
+  violation, a faithful reading of what was written. Naming a project inside an identity rule
+  turns into a scope qualifier. Rewritten, and added to the install seed (`directives.json`), where
+  it had been missing entirely.
+- Removing a tunnel from the list no longer resurrects it — `stop()` left a `STATE_DOWN` entry in
+  the dictionary, which the periodic refresh mistook for a live orphan and re-added.
+- Character sprite can be mirrored horizontally, from Settings or the right-click menu (the menu
+  toggle redraws immediately).
+
+### Impact
+
+- Working from a remote machine keeps one continuous memory instead of forking a second store.
+  Share the server, never the files.
+- The calls that used to hang — semantic search, note creation, section edits, and session
+  bootstrap — return promptly, and one slow call can no longer take the server down with it.
+- Existing installs upgrade in place via the new `setup.exe` (config/DB preserved).
+
+### Notes
+
+- Remote access is deliberately server-only. Do **not** share `D:/intel_engram` over SMB or sshfs —
+  `engram.db` is in WAL mode and the semantic graph is embedded KuzuDB; both corrupt on a network
+  filesystem. See `docs/remote-access.md`.
+- kg_watcher still has a cross-process fallback that opens KuzuDB directly when the MCP server is
+  unreachable. `AsyncConnection` pools connections within one process and does nothing for that
+  case — a pre-existing risk, unchanged by this release.
+
 ## 2026-07-30 - v0.2.2: Initiative Feedback Loop, Reply Affordance, and a Rename
 
 ### Highlights

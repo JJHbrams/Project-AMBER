@@ -22,7 +22,7 @@ import requests
 
 from core.storage.db import get_connection
 from core.memory.store import save_memory, upsert_working_memory
-from .semantic_graph import get_semantic_graph
+from .semantic_graph import get_semantic_graph, run_sg_coro
 
 logger = logging.getLogger(__name__)
 
@@ -146,13 +146,17 @@ def _get_promotable_messages(scope_key: str, max_minutes: int = 240) -> list[dic
 
 
 def _compute_novelty(msgs: list[dict]) -> float:
-    """대화 centroid와 기존 기억 유사도 기반 novelty (0=기존과 유사, 1=새로움)."""
+    """대화 centroid와 기존 기억 유사도 기반 novelty (0=기존과 유사, 1=새로움).
+
+    호출부(maybe_promote)가 이벤트 루프 없는 스레드(overlay 메인 tkinter 스레드 —
+    bubble 세션 자체 루프는 이 시점엔 이미 join되어 종료된 상태)에서 실행되므로
+    run_sg_coro로 감싼다."""
     try:
         text = " ".join(m["content"][:150] for m in msgs[-8:])
         sg = get_semantic_graph()
-        conv_vec = sg.compute_embedding(text)
+        conv_vec = run_sg_coro(sg.compute_embedding(text))
         if sg.enabled:
-            results = sg.episode_semantic_search(query_vec=conv_vec, top_k=3)
+            results = run_sg_coro(sg.episode_semantic_search(query_vec=conv_vec, top_k=3))
             if results:
                 max_sim = max(r.get("score", 0.0) for r in results)
                 return _novelty_membership(1.0 - max_sim)

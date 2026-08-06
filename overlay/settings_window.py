@@ -233,11 +233,89 @@ def _nested_get(d: dict, keys: list[str], default=None):
     return d if d != {} else default
 
 
+def _is_port_listening(port: int) -> bool:
+    # Tk 메인 스레드에서 2초마다 호출되므로 타임아웃을 짧게 둔다.
+    # loopback 이라 닫힌 포트는 즉시 RST 가 오고, 이 값은 방화벽이 드롭할 때만 쓰인다.
+    import socket
+
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.settimeout(0.2)
+            return s.connect_ex(("127.0.0.1", port)) == 0
+    except Exception:
+        return False
+
+
+def _format_tunnel_state(st) -> str:
+    """TunnelStatus 를 사람이 읽는 한 줄로."""
+    if st is None:
+        return "○ 미시작"
+    from overlay.remote_tunnel import (
+        STATE_AUTH_FAILED,
+        STATE_CONNECTING,
+        STATE_DOWN,
+        STATE_FAILED,
+        STATE_UP,
+    )
+
+    if st.state == STATE_UP:
+        mins = int(st.uptime_secs() // 60)
+        tail = f", 재연결 {st.retries}" if st.retries else ""
+        return f"● 연결됨 ({mins}분{tail})"
+    if st.state == STATE_CONNECTING:
+        from overlay.remote_tunnel import sanitize_for_display
+
+        # 콘솔 로그인 대기처럼 "왜 안 끝나는지" 가 있으면 그대로 보여준다.
+        detail = sanitize_for_display(st.last_error, 60)
+        return f"◐ {detail}" if detail else "◐ 연결 중…"
+    if st.state == STATE_AUTH_FAILED:
+        return "✖ 키 인증 필요 — [키 등록]"
+    if st.state == STATE_FAILED:
+        from overlay.remote_tunnel import sanitize_for_display
+
+        return f"✖ 실패({st.retries}) {sanitize_for_display(st.last_error, 60)}"
+    if st.state == STATE_DOWN:
+        return "○ 끊김"
+    return st.state
+
+
+def _audit_tail(n: int) -> str:
+    """원격 감사 로그 꼬리. 토큰 값은 애초에 기록되지 않는다.
+
+    tool/path 는 원격 호출자가 정하는 값이다. 개행이 섞이면 가짜 행을 만들어
+    로그를 위조해 보이게 할 수 있으므로 표시 전에 살균한다.
+    """
+    import json
+
+    from overlay.remote_tunnel import sanitize_for_display
+
+    path = Path.home() / ".engram" / "logs" / "remote-audit.jsonl"
+    if not path.exists():
+        return "(기록 없음)"
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()[-n:]
+    except Exception as e:
+        return f"(읽기 실패: {e})"
+    out = []
+    for line in lines:
+        try:
+            d = json.loads(line)
+        except Exception:
+            continue
+        ts = sanitize_for_display(str(d.get("ts", ""))[11:19], 8)
+        action = sanitize_for_display(str(d.get("action", "?")), 12)
+        what = sanitize_for_display(str(d.get("tool") or d.get("path", "")), 40)
+        who = sanitize_for_display(str(d.get("principal", "-")), 24)
+        out.append(f"{ts} {action:<12} {what} ({who})")
+    return "\n".join(out) if out else "(기록 없음)"
+
+
 def open_settings(
     root: tk.Tk,
     on_saved: Callable[[], None] | None = None,
     on_get_ollama_models: Callable[[], list[str]] | None = None,
     on_reload_ollama_models: Callable[[], None] | None = None,
+    tunnels=None,
 ) -> None:
     """설정 창을 열거나 이미 열려 있으면 포커스를 줍니다."""
     for widget in root.winfo_children():
@@ -251,6 +329,7 @@ def open_settings(
         on_saved=on_saved,
         on_get_ollama_models=on_get_ollama_models,
         on_reload_ollama_models=on_reload_ollama_models,
+        tunnels=tunnels,
     )
     win.window.focus_force()
 
@@ -262,11 +341,14 @@ class _SettingsWindow:
         on_saved: Callable[[], None] | None = None,
         on_get_ollama_models: Callable[[], list[str]] | None = None,
         on_reload_ollama_models: Callable[[], None] | None = None,
+        tunnels=None,
     ):
         self._root = root
         self._on_saved = on_saved
         self._on_get_ollama_models = on_get_ollama_models
         self._on_reload_ollama_models = on_reload_ollama_models
+        self._tunnels = tunnels  # overlay.remote_tunnel.TunnelManager | None
+        self._remote_after_id: str | None = None
         self._toast_after_id: str | None = None
 
         self.window = tk.Toplevel(root)
@@ -327,6 +409,7 @@ class _SettingsWindow:
         self._tab_persona = ttk.Frame(notebook)
         self._tab_terminal = ttk.Frame(notebook)
         self._tab_bubble = ttk.Frame(notebook)
+        self._tab_remote = ttk.Frame(notebook)
         self._tab_global = ttk.Frame(notebook)
 
         notebook.add(self._tab_overlay, text="오버레이")
@@ -334,6 +417,7 @@ class _SettingsWindow:
         notebook.add(self._tab_persona, text="페르소나")
         notebook.add(self._tab_terminal, text="터미널")
         notebook.add(self._tab_bubble, text="말풍선")
+        notebook.add(self._tab_remote, text="원격")
         notebook.add(self._tab_global, text="전역")
 
         self._build_overlay_tab(PAD)
@@ -341,6 +425,7 @@ class _SettingsWindow:
         self._build_persona_tab(PAD)
         self._build_terminal_tab(PAD)
         self._build_bubble_theme_tab(PAD)
+        self._build_remote_tab(PAD)
         self._build_global_tab(PAD)
 
         self._save_feedback_var = tk.StringVar(value="")
@@ -350,7 +435,21 @@ class _SettingsWindow:
         btn_frame = ttk.Frame(self.window)
         btn_frame.pack(fill="x", padx=10, pady=(0, 10))
         ttk.Button(btn_frame, text="저장", command=self._save).pack(side="right", padx=(4, 0))
-        ttk.Button(btn_frame, text="취소", command=self.window.destroy).pack(side="right")
+        ttk.Button(btn_frame, text="취소", command=self._close).pack(side="right")
+        # 원격 탭이 after() 로 상태를 폴링하므로 닫을 때 반드시 취소한다.
+        self.window.protocol("WM_DELETE_WINDOW", self._close)
+
+    def _close(self):
+        if self._remote_after_id:
+            try:
+                self.window.after_cancel(self._remote_after_id)
+            except Exception:
+                pass
+            self._remote_after_id = None
+        try:
+            self.window.destroy()
+        except Exception:
+            pass
 
     def _build_overlay_tab(self, PAD: dict):
         f = self._tab_overlay
@@ -363,6 +462,8 @@ class _SettingsWindow:
         btn_frame_char.grid(row=0, column=2, sticky="w", padx=(0, 4), pady=4)
         ttk.Button(btn_frame_char, text="파일...", width=6, command=self._browse_char_file).pack(side="left", padx=(0, 2))
         ttk.Button(btn_frame_char, text="폴더...", width=6, command=self._browse_char_dir).pack(side="left")
+        self._flip_var = tk.BooleanVar()
+        ttk.Checkbutton(f, text="좌우 반전", variable=self._flip_var).grid(row=0, column=3, sticky="w", padx=(4, 8), pady=4)
         ttk.Label(
             f,
             text="(파일 선택 → 정적 이미지 / 폴더 선택 → 애니메이션)",
@@ -867,6 +968,403 @@ class _SettingsWindow:
         if key in ("speech_bg", "speech_fg"):
             self._update_font_preview()
 
+    # ── 원격 탭 ──────────────────────────────────────────────────────────────
+    def _build_remote_tab(self, PAD: dict):
+        f = self._tab_remote
+
+        # 리스너
+        lf = ttk.LabelFrame(f, text="인증 리스너")
+        lf.pack(fill="x", padx=8, pady=(8, 4))
+        self._remote_enabled_var = tk.BooleanVar()
+        ttk.Checkbutton(
+            lf, text="원격 인증 리스너 사용", variable=self._remote_enabled_var
+        ).grid(row=0, column=0, sticky="w", **PAD)
+        ttk.Label(lf, text="포트:").grid(row=0, column=1, sticky="e", **PAD)
+        self._remote_port_var = tk.IntVar(value=17386)
+        ttk.Spinbox(lf, textvariable=self._remote_port_var, from_=1024, to=65535, width=8).grid(
+            row=0, column=2, sticky="w", **PAD
+        )
+        self._remote_listener_var = tk.StringVar(value="확인 중…")
+        ttk.Label(lf, textvariable=self._remote_listener_var).grid(row=0, column=3, sticky="w", **PAD)
+        ttk.Label(
+            lf,
+            text="터널은 이 포트에만 연결한다. 로컬 포트는 무인증이므로 노출하면 안 된다.",
+            foreground="gray",
+        ).grid(row=1, column=0, columnspan=4, sticky="w", padx=6, pady=(0, 4))
+
+        # 토큰 (값은 표시하지 않는다)
+        tf = ttk.LabelFrame(f, text="토큰")
+        tf.pack(fill="x", padx=8, pady=4)
+        self._token_list_var = tk.StringVar(value="")
+        ttk.Label(tf, textvariable=self._token_list_var, justify="left").pack(
+            side="left", padx=8, pady=6
+        )
+        ttk.Button(tf, text="토큰 파일 열기", command=self._open_tokens_file).pack(
+            side="right", padx=6, pady=4
+        )
+
+        # 터널
+        nf = ttk.LabelFrame(f, text="터널")
+        nf.pack(fill="x", padx=8, pady=4)
+        ttk.Label(
+            nf,
+            text="목록은 오버레이를 재시작해도 유지된다. 연결은 [연결]을 눌러 그때 로그인한다.",
+            foreground="gray",
+        ).pack(anchor="w", padx=8, pady=(4, 0))
+
+        self._tunnel_tree = ttk.Treeview(
+            nf, columns=("state",), show="tree headings", height=6
+        )
+        self._tunnel_tree.heading("#0", text="호스트")
+        self._tunnel_tree.heading("state", text="상태")
+        self._tunnel_tree.column("#0", width=200)
+        self._tunnel_tree.column("state", width=340)
+        # expand 하지 않는다 — 늘어나면 빈 공간만 커지고 아래 패널이 밀린다.
+        self._tunnel_tree.pack(fill="x", padx=6, pady=(6, 2))
+
+        bar = ttk.Frame(nf)
+        bar.pack(fill="x", padx=6, pady=(0, 6))
+        self._tunnel_add_var = tk.StringVar()
+        self._tunnel_add_combo = ttk.Combobox(
+            bar, textvariable=self._tunnel_add_var, width=22, state="readonly"
+        )
+        self._tunnel_add_combo.pack(side="left")
+        ttk.Button(bar, text="추가", command=self._add_tunnel).pack(side="left", padx=(4, 8))
+        ttk.Button(bar, text="제거", command=self._remove_tunnel).pack(side="left")
+        ttk.Button(bar, text="연결", command=lambda: self._tunnel_action("start")).pack(
+            side="left", padx=(8, 0)
+        )
+        ttk.Button(bar, text="끊기", command=lambda: self._tunnel_action("stop")).pack(
+            side="left", padx=4
+        )
+        ttk.Button(bar, text="창 숨기기", command=self._hide_tunnel_console).pack(
+            side="left", padx=(8, 0)
+        )
+        ttk.Button(bar, text="키 등록", command=self._install_ssh_key).pack(side="left", padx=(8, 0))
+        self._tunnel_autoreconnect_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            bar,
+            text="끊기면 자동 재연결",
+            variable=self._tunnel_autoreconnect_var,
+        ).pack(side="right")
+
+        # 최근 원격 접근
+        af = ttk.LabelFrame(f, text="최근 원격 접근")
+        af.pack(fill="both", expand=True, padx=8, pady=(4, 8))
+        self._audit_var = tk.StringVar(value="(없음)")
+        ttk.Label(af, textvariable=self._audit_var, justify="left", foreground="#444").pack(
+            anchor="nw", padx=8, pady=6
+        )
+
+        self._tunnel_rows: list[str] = []
+        self._load_remote_tab()
+        self._refresh_remote_status()
+
+    # ── 원격 탭 데이터 ───────────────────────────────────────────────────────
+    def _load_remote_tab(self):
+        from overlay.remote_tunnel import ssh_host_aliases
+
+        mcp = _nested_get(self._cfg, ["mcp"], {}) or {}
+        self._remote_enabled_var.set(bool(mcp.get("remote_enabled", False)))
+        self._remote_port_var.set(int(mcp.get("remote_port", 17386) or 17386))
+
+        self._tunnel_add_combo["values"] = ssh_host_aliases()
+        self._tunnel_autoreconnect_var.set(bool(mcp.get("tunnel_auto_reconnect", False)))
+
+        self._tunnel_rows = []
+        for entry in mcp.get("tunnels") or []:
+            if isinstance(entry, dict) and entry.get("host"):
+                host = str(entry["host"])
+                if host not in self._tunnel_rows:
+                    self._tunnel_rows.append(host)
+        self._redraw_tunnel_tree()
+        self._token_list_var.set(self._token_summary())
+
+    def _token_summary(self) -> str:
+        """토큰 name/scope 만 보여준다. 값은 절대 UI 에 싣지 않는다."""
+        path = Path.home() / ".engram" / "mcp-tokens.yaml"
+        if not path.exists():
+            return "(토큰 파일 없음 — 리스너를 한 번 켜면 생성된다)"
+        try:
+            data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        except Exception as e:
+            return f"(읽기 실패: {e})"
+        rows = []
+        for t in data.get("tokens") or []:
+            if not isinstance(t, dict):
+                continue
+            rows.append(
+                f"{str(t.get('name') or '?'):<18} scope={t.get('scope') or '(미지정 — global 폴백)'}"
+            )
+        return "\n".join(rows) if rows else "(등록된 토큰 없음 — 원격 요청은 모두 401)"
+
+    def _open_tokens_file(self):
+        path = Path.home() / ".engram" / "mcp-tokens.yaml"
+        if not path.exists():
+            messagebox.showinfo(
+                "토큰 파일 없음",
+                "원격 리스너를 한 번 켜면 자동 생성됩니다.",
+                parent=self.window,
+            )
+            return
+        try:
+            os.startfile(str(path))
+        except Exception as e:
+            messagebox.showerror("열기 실패", str(e), parent=self.window)
+
+    def _redraw_tunnel_tree(self):
+        sel = self._selected_tunnel_host()
+        for item in self._tunnel_tree.get_children():
+            self._tunnel_tree.delete(item)
+        for host in self._tunnel_rows:
+            self._tunnel_tree.insert("", "end", iid=host, text=host, values=("",))
+        if sel and sel in self._tunnel_rows:
+            self._tunnel_tree.selection_set(sel)
+
+    def _selected_tunnel_host(self) -> str:
+        sel = self._tunnel_tree.selection()
+        return sel[0] if sel else ""
+
+    def _add_tunnel(self):
+        host = self._tunnel_add_var.get().strip()
+        if not host:
+            messagebox.showinfo("대상 선택", "~/.ssh/config 의 Host 를 고르세요.", parent=self.window)
+            return
+        if host in self._tunnel_rows:
+            return
+        self._tunnel_rows.append(host)
+        self._redraw_tunnel_tree()
+        self._show_toast(f"{host} 추가됨 — 저장해야 재시작 후에도 남습니다.")
+
+    def _remove_tunnel(self):
+        host = self._selected_tunnel_host()
+        if not host:
+            return
+        if host in self._tunnel_rows:
+            self._tunnel_rows.remove(host)
+        if self._tunnels:
+            try:
+                self._tunnels.remove(host)
+            except Exception:
+                pass
+        self._redraw_tunnel_tree()
+
+    def _tunnel_action(self, action: str):
+        host = self._selected_tunnel_host()
+        if not host:
+            messagebox.showinfo("대상 선택", "목록에서 호스트를 고르세요.", parent=self.window)
+            return
+        if not self._tunnels:
+            messagebox.showwarning(
+                "사용 불가", "터널 관리자를 쓸 수 없습니다(오버레이 외부 실행).", parent=self.window
+            )
+            return
+        try:
+            if action == "start":
+                self._tunnels.start(host)
+            else:
+                self._tunnels.stop(host)
+        except Exception as e:
+            messagebox.showerror("실패", str(e), parent=self.window)
+
+    def _hide_tunnel_console(self):
+        """콘솔 로그인을 마쳤다고 알려 창을 숨긴다.
+
+        인증이 끝난 시점을 프로그램이 알 수 없어(-f 는 비밀번호 인증에서 동작하지
+        않는다) 사용자가 알려주는 방식으로 둔다. 타이머로 숨기면 타이핑 도중에
+        창이 사라진다.
+        """
+        host = self._selected_tunnel_host()
+        if not host:
+            messagebox.showinfo("대상 선택", "목록에서 호스트를 고르세요.", parent=self.window)
+            return
+        if not self._tunnels:
+            return
+        if self._tunnels.hide_console(host):
+            self._show_toast(f"{host}: 콘솔 창을 숨겼습니다. 터널은 계속 유지됩니다.")
+        else:
+            messagebox.showinfo(
+                "숨길 창 없음",
+                f"'{host}' 에 열려 있는 콘솔 로그인 창이 없습니다.\n"
+                "키 인증으로 붙은 터널은 애초에 창이 없습니다.",
+                parent=self.window,
+            )
+
+    def _install_ssh_key(self):
+        """공개키를 원격 authorized_keys 에 심는다.
+
+        비밀번호가 필요하므로 CREATE_NEW_CONSOLE 로 실제 콘솔을 띄운다 —
+        ssh 는 비밀번호를 stdin 이 아니라 TTY 에서 읽기 때문에 파이프로는 안 된다.
+        """
+        from overlay.remote_tunnel import is_safe_host, ssh_host_aliases
+
+        host = self._selected_tunnel_host()
+        if not host:
+            messagebox.showinfo("대상 선택", "목록에서 호스트를 고르세요.", parent=self.window)
+            return
+
+        # 아래에서 cmd 문자열을 만든다 → 호스트를 신뢰하면 명령 주입이 된다.
+        # (호스트는 overlay.user.yaml 에서도 올 수 있다.)
+        # 화이트리스트(ssh_config 별칭) + 문자 검증을 모두 통과해야 한다.
+        if not is_safe_host(host) or host not in ssh_host_aliases():
+            messagebox.showerror(
+                "허용되지 않는 호스트",
+                f"'{host}' 는 ~/.ssh/config 의 Host 별칭이 아니거나 안전하지 않은 문자를 포함합니다.\n"
+                "ssh_config 에 Host 항목으로 먼저 등록하세요.",
+                parent=self.window,
+            )
+            return
+
+        pub = Path.home() / ".ssh" / "id_ed25519.pub"
+        if not pub.exists():
+            if not messagebox.askyesno(
+                "키 없음", "SSH 키가 없습니다. 지금 만들까요? (ed25519, 암호 없음)", parent=self.window
+            ):
+                return
+            try:
+                subprocess.run(
+                    ["ssh-keygen", "-t", "ed25519", "-N", "", "-f", str(pub.with_suffix(""))],
+                    check=True,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
+            except Exception as e:
+                messagebox.showerror("키 생성 실패", str(e), parent=self.window)
+                return
+
+        # POSIX 원격 기준. Windows 원격은 authorized_keys 위치와 ACL 요구가 달라 별도 처리가 필요하다.
+        #
+        # 반드시 커맨드라인을 "문자열"로 넘긴다. 리스트로 넘기면 Windows 에서
+        # subprocess.list2cmdline 이 인자를 다시 인용하며 안쪽 " 를 \" 로 이스케이프해,
+        # cmd 가 따옴표를 리터럴로 넘겨버린다(ssh 가 "host" 를 호스트명으로 인식).
+        # 호스트는 바로 위에서 화이트리스트 + 문자셋 검증을 통과한 값만 여기 온다.
+        # 원격 셸에 따라 명령이 완전히 다르다. POSIX 명령을 cmd.exe 에 보내면
+        # 'umask' 를 못 찾고 아무것도 안 쓰인 채 끝나 "인증 실패"로만 보인다.
+        # 한 줄로 양쪽을 처리하는 셸 폴리글롯은 검증이 어려워 쓰지 않고, 직접 묻는다.
+        is_posix = messagebox.askyesno(
+            "원격 OS",
+            f"'{host}' 의 원격 OS 가 Linux/macOS 입니까?\n\n"
+            "예 → Linux/macOS\n아니오 → Windows",
+            parent=self.window,
+        )
+        if is_posix:
+            inner = (
+                "umask 077; mkdir -p ~/.ssh; chmod 700 ~/.ssh; "
+                "cat >> ~/.ssh/authorized_keys; chmod 600 ~/.ssh/authorized_keys"
+            )
+        else:
+            # Windows 원격은 자동 설치하지 않는다.
+            #
+            # 원격 SSH 의 기본 셸이 cmd 인지 PowerShell 인지에 따라 같은 문자열이
+            # 전혀 다르게 동작한다. PowerShell 이면 '&' 는 호출 연산자, '2>nul' 은
+            # nul 이라는 파일로의 리다이렉트, '>>' 는 UTF-16LE 로 쓰기다.
+            # 그 결과 authorized_keys 에 UTF-16 쓰레기가 덧붙어 기존에 동작하던 키까지
+            # 깨질 수 있다(실제로 그렇게 만들어 원격 접속을 끊어먹었다).
+            # 여기에 더해 관리자 계정이면 Windows OpenSSH 는 이 파일을 아예 보지 않고
+            # C:\ProgramData\ssh\administrators_authorized_keys 만 참조한다.
+            #
+            # 검증할 수 없는 셸 추측을 원격에 실행하는 대신 정확한 절차를 안내한다.
+            key_line = ""
+            try:
+                key_line = pub.read_text(encoding="utf-8").strip()
+            except Exception:
+                pass
+            self._root.clipboard_clear()
+            self._root.clipboard_append(key_line)
+            messagebox.showinfo(
+                "Windows 원격 — 수동 등록",
+                "공개키를 클립보드에 복사했습니다.\n"
+                f"({pub})\n\n"
+                "원격 셸이 cmd 인지 PowerShell 인지에 따라 같은 명령이 다르게 동작해\n"
+                "(PowerShell 은 '>>' 를 UTF-16 으로 씁니다) 자동 설치는 하지 않습니다.\n\n"
+                "■ 먼저 관리자 계정인지 확인 — 원격에서\n"
+                "    whoami /groups | findstr S-1-5-32-544\n"
+                "  이 줄이 나오면 관리자입니다.\n\n"
+                "■ 관리자인 경우 (중요)\n"
+                "  Windows OpenSSH 는 관리자 계정의 ~/.ssh/authorized_keys 를\n"
+                "  아예 읽지 않습니다. 아래 파일에 넣어야 합니다.\n\n"
+                "    md C:\\ProgramData\\ssh 2>nul\n"
+                "    echo <붙여넣기>>> C:\\ProgramData\\ssh\\administrators_authorized_keys\n"
+                "    icacls C:\\ProgramData\\ssh\\administrators_authorized_keys "
+                "/inheritance:r /grant *S-1-5-18:F /grant *S-1-5-32-544:F\n\n"
+                "  ACL 을 좁히지 않으면 sshd 가 파일을 무시합니다.\n"
+                "  SID 로 지정한 것은 한글 Windows 에서 그룹명이 다르기 때문입니다.\n\n"
+                "■ 일반 계정인 경우\n"
+                "    md .ssh 2>nul\n"
+                "    echo <붙여넣기>>> .ssh\\authorized_keys\n\n"
+                "인코딩은 UTF-8(BOM 없음) 또는 ASCII 여야 합니다.",
+                parent=self.window,
+            )
+            return
+
+        # NumberOfPasswordPrompts=1: 오타로 3회까지 재시도하며 인증 미완료 연결을 쌓지 않는다.
+        # 반복 시도가 누적되면 원격 sshd 의 MaxStartups 가 포화돼 TCP 는 붙는데 배너가
+        # 오지 않는 상태가 되고, 다른 클라이언트(VS Code 등)까지 타임아웃한다. 실제로 겪었다.
+        pipeline = (
+            f'type "{pub}" | ssh -o StrictHostKeyChecking=accept-new'
+            f' -o NumberOfPasswordPrompts=1 -o ConnectTimeout=15 "{host}" "{inner}"'
+        )
+        # cmd 의 ( ) 그룹을 쓰지 않고, echo 문구에 호스트명을 넣지 않는다.
+        # 별칭에 괄호가 있으면(예: my-host(dev)) 그룹이 조기 종료돼
+        # "키 was unexpected at this time." 로 콘솔이 즉시 닫힌다.
+        # ssh 인자의 호스트는 따옴표 안이라 안전하다.
+        note = (
+            "" if is_posix else
+            " & echo. & echo [!] 원격 계정이 관리자면 Windows OpenSSH 는"
+            " C:\\ProgramData\\ssh\\administrators_authorized_keys 를 대신 봅니다."
+        )
+        cmdline = (
+            f'cmd /c {pipeline}'
+            f' && echo [OK] 키 등록 완료'
+            f' || echo [X] 실패'
+            f'{note}'
+            f' & echo. & pause'
+        )
+        try:
+            subprocess.Popen(
+                cmdline,
+                creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0),
+            )
+            self._show_toast(f"{host}: 콘솔에서 비밀번호를 입력하세요.")
+        except Exception as e:
+            messagebox.showerror("실행 실패", str(e), parent=self.window)
+
+    def _refresh_remote_status(self):
+        """2초 주기로 리스너·터널·감사 로그를 갱신한다."""
+        # 창이 이미 닫혔는데 콜백이 남아 실행되면 TclError 가 난다.
+        try:
+            if not self.window.winfo_exists():
+                return
+        except Exception:
+            return
+        try:
+            port = int(self._remote_port_var.get() or 0)
+        except Exception:
+            port = 0
+        self._remote_listener_var.set(
+            f"● :{port} LISTENING" if port and _is_port_listening(port) else "○ 미기동"
+        )
+
+        states = {}
+        if self._tunnels:
+            try:
+                states = self._tunnels.status()
+            except Exception:
+                states = {}
+        # 설정에 없어도 실제로 살아 있는 터널은 반드시 보여준다.
+        # 열려 있는데 화면에 없는 상태를 만들지 않는 것이 이 탭의 요점이다.
+        orphans = [h for h in states if h not in self._tunnel_rows]
+        if orphans:
+            self._tunnel_rows.extend(orphans)
+            self._redraw_tunnel_tree()
+
+        for host in self._tunnel_rows:
+            if not self._tunnel_tree.exists(host):
+                continue
+            self._tunnel_tree.set(host, "state", _format_tunnel_state(states.get(host)))
+
+        self._audit_var.set(_audit_tail(12))
+        self._remote_after_id = self.window.after(2000, self._refresh_remote_status)
+
     def _build_global_tab(self, PAD: dict):
         f = self._tab_global
 
@@ -947,6 +1445,7 @@ class _SettingsWindow:
         # 오버레이 탭
         char_name = _nested_get(cfg, ["overlay", "character", "name"], "")
         self._char_path_var.set(str(char_name or ""))
+        self._flip_var.set(bool(_nested_get(cfg, ["overlay", "flip_horizontal"], False)))
 
         height = _nested_get(cfg, ["overlay", "char_height_ratio"], 0.125)
         self._char_height_var.set(float(height))
@@ -1237,6 +1736,9 @@ class _SettingsWindow:
         char_path = self._char_path_var.get().strip()
         _nested_set(user, ["overlay", "character", "name"], char_path or None)
 
+        flip_on = bool(self._flip_var.get())
+        _nested_set(user, ["overlay", "flip_horizontal"], True if flip_on else None)
+
         height = round(self._char_height_var.get(), 3)
         default_height = _nested_get(self._cfg, ["overlay", "char_height_ratio"], 0.125)
         if abs(height - float(default_height)) > 0.001:
@@ -1351,6 +1853,19 @@ class _SettingsWindow:
                 continue  # UI 행이 없는 키 — 사용자 설정값도 없으므로 건드리지 않는다
             value = var.get().strip()
             _nested_set(user, ["bubble", "theme", key], None if (not value or value == default) else value)
+
+        # ── 원격 탭 ──
+        remote_on = bool(self._remote_enabled_var.get())
+        _nested_set(user, ["mcp", "remote_enabled"], True if remote_on else None)
+        try:
+            rport = int(self._remote_port_var.get())
+        except (tk.TclError, ValueError):
+            rport = 17386
+        _nested_set(user, ["mcp", "remote_port"], None if rport == 17386 else rport)
+        tunnels = [{"host": h} for h in self._tunnel_rows]
+        _nested_set(user, ["mcp", "tunnels"], tunnels or None)
+        auto_rc = bool(self._tunnel_autoreconnect_var.get())
+        _nested_set(user, ["mcp", "tunnel_auto_reconnect"], True if auto_rc else None)
 
         # 파일 쓰기 (overlay.user.yaml)
         _USER_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)

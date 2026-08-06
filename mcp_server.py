@@ -8,6 +8,7 @@ import os
 import re
 import json
 import asyncio
+import socket
 import threading
 import time
 import uvicorn
@@ -61,7 +62,7 @@ from core.context.directives import (
 from core.observability.activity import log_activity, get_recent_activities, render_activity_for_reflection
 from core.integrations.copilot_bridge import ask_copilot
 from core.memory.bus import memory_bus
-from core.context.project_scope import resolve_scope_key
+from core.context.project_scope import resolve_scope_key, cwd_is_foreign, get_global_scope_key
 
 # DB 초기화
 initialize_db()
@@ -502,7 +503,7 @@ def engram_status() -> dict:
 
 
 @engramMCP.tool()
-def engram_get_context(
+async def engram_get_context(
     user_query: str = "",
     caller: str = "all",
     scope_key: str = "",
@@ -517,7 +518,7 @@ def engram_get_context(
     cwd를 전달하면 현재 작업 디렉토리 기준으로 프로젝트 KG 상태가 자동 주입됩니다.
     scope_key가 비어 있으면 cwd에서 자동 파생한 스코프를 사용하고,
     project_key를 주면 해당 키로 프로젝트 스코프를 고정합니다."""
-    prompt_ctx = memory_bus.compose_prompt_context(
+    prompt_ctx = await memory_bus.compose_prompt_context(
         user_query,
         caller=caller,
         scope_key=scope_key or None,
@@ -528,6 +529,16 @@ def engram_get_context(
     # get_context 호출 = 오케스트레이터 세션 확인 → sync gate 개방
     _sync_gate.set()
     notices: list[str] = []
+
+    # 원격 클라이언트가 자기 쪽 경로를 cwd 로 보내면 이 서버엔 그런 경로가 없어
+    # 스코프가 조용히 global 로 폴백된다. 조용한 폴백을 시끄럽게 만든다.
+    if not scope_key and not project_key and cwd_is_foreign(cwd):
+        notices.append(
+            f"[⚠️ SCOPE_FALLBACK] cwd={cwd!r} 가 engram 서버 파일시스템에 없습니다. "
+            f"프로젝트를 판별하지 못해 전역 스코프({get_global_scope_key()})로 폴백했습니다. "
+            "원격에서 접속 중이라면 scope_key 또는 project_key 를 명시적으로 전달하세요 "
+            "— 그러지 않으면 모든 프로젝트의 기억이 한 스코프에 섞입니다."
+        )
 
     identity = get_identity()
     identity_name = str(identity.get("name", "")).strip()
@@ -653,7 +664,7 @@ def engram_get_context(
 
 
 @engramMCP.tool()
-def engram_get_context_once(
+async def engram_get_context_once(
     user_query: str = "",
     caller: str = "all",
     scope_key: str = "",
@@ -713,7 +724,7 @@ def engram_get_context_once(
 
         _logging.getLogger(__name__).warning("get_context_once STM 세션 생성 실패: %s", _e)
 
-    ctx_text = engram_get_context(
+    ctx_text = await engram_get_context(
         user_query=user_query,
         caller=caller,
         scope_key=scope_key,
@@ -1073,7 +1084,7 @@ def engram_verify_tutorial_wiki_advanced(
 
 
 @engramMCP.tool()
-def engram_verify_tutorial_session_continuity(
+async def engram_verify_tutorial_session_continuity(
     memory_query: str,
     user_confirmed: bool,
     continuity_summary: str,
@@ -1222,7 +1233,7 @@ def engram_verify_tutorial_session_continuity(
         )
         query = query or "tutorial-session-continuity"
     else:
-        hits = search_memories(query, limit=1)
+        hits = await search_memories(query, limit=1)
         memory_hit = bool(hits)
 
     result = verify_session_continuity_step(
@@ -1295,10 +1306,10 @@ def engram_update_themes(themes: list[str]) -> dict:
 
 
 @engramMCP.tool()
-def engram_search_memories(query: str, limit: int = 5) -> list:
+async def engram_search_memories(query: str, limit: int = 5) -> list:
     """키워드 기반으로 과거 기억을 검색합니다.
     관련 주제가 나올 때 과거 경험을 회상하기 위해 사용합니다."""
-    results = search_memories(query, limit)
+    results = await search_memories(query, limit)
     return results
 
 
@@ -1471,7 +1482,9 @@ def _schedule_vault_sync() -> None:
                 kg.sync_file(f, docs_dir)
             kg.resolve_links(docs_dir)
             kg.prune_missing(docs_dir)
-            get_semantic_graph().sync_from_kg()
+            from core.graph.semantic import run_sg_coro
+
+            run_sg_coro(get_semantic_graph().sync_from_kg())
         except Exception:
             pass
 
@@ -1538,13 +1551,19 @@ def _save_memories_sync_checkpoint(last_memory_id: int) -> None:
 
 
 def _sync_memories_incremental(cancel_event: threading.Event | None = None) -> tuple[int, int]:
-    """memories를 체크포인트 기반으로 증분 동기화한다."""
-    from core.graph.semantic import get_semantic_graph
+    """memories를 체크포인트 기반으로 증분 동기화한다.
+    SemanticGraph는 코루틴이라, 이벤트 루프 없는 이 호출부(백그라운드 스레드) 전체를
+    run_sg_coro로 한 번만 감싼다(행마다 asyncio.run을 반복하지 않도록)."""
+    from core.graph.semantic import get_semantic_graph, run_sg_coro
 
     sg = get_semantic_graph()
     if not sg.enabled:
         return 0, _load_memories_sync_checkpoint()
 
+    return run_sg_coro(_sync_memories_incremental_async(sg, cancel_event))
+
+
+async def _sync_memories_incremental_async(sg, cancel_event: threading.Event | None = None) -> tuple[int, int]:
     batch_size = max(50, int(get_cfg_value("sync.memories_batch_size", 300)))
     checkpoint_id = _load_memories_sync_checkpoint()
     last_synced_id = checkpoint_id
@@ -1567,7 +1586,7 @@ def _sync_memories_incremental(cancel_event: threading.Event | None = None) -> t
                 if cancel_event is not None and cancel_event.is_set():
                     break
                 row_id = int(row[0] or 0)
-                sg.upsert_episode(
+                await sg.upsert_episode(
                     episode_id=str(row_id),
                     content=row[2] or "",
                     keywords=row[3] or "",
@@ -1679,7 +1698,9 @@ def _schedule_post_session_sync() -> None:
                     if not _sync_cancel.is_set():
                         kg.resolve_links(docs_dir)
                         kg.prune_missing(docs_dir)
-                        get_semantic_graph().sync_from_kg()
+                        from core.graph.semantic import run_sg_coro
+
+                        run_sg_coro(get_semantic_graph().sync_from_kg())
             except Exception:
                 pass
 
@@ -1736,7 +1757,7 @@ def _apply_autonomous_reflection(new_narrative: str, persona_observations: str) 
 
 
 @engramMCP.tool()
-def engram_close_session(
+async def engram_close_session(
     summary: str,
     open_intents: str = "",
     progress: str = "",
@@ -1775,7 +1796,7 @@ def engram_close_session(
             if sg.enabled:
                 node = kg.get_node(kg_node_id)
                 if node:
-                    sg.upsert_node(
+                    await sg.upsert_node(
                         node_id=node["id"],
                         title=node["title"],
                         node_type=node["type"],
@@ -2227,19 +2248,32 @@ def kg_neighbors(identifier: str, hops: int = 1, direction: str = "both") -> lis
 
 
 @engramMCP.tool()
-def kg_add_note(title: str, content: str, note_type: str = "concept", tags: str = "[]", links: str = "[]") -> dict:
+async def kg_add_note(
+    title: str,
+    content: str,
+    note_type: str = "concept",
+    tags: str = "[]",
+    links: str = "[]",
+    subdir: str = "",
+) -> dict:
     """새 노트를 지식 그래프에 추가합니다.
     마크다운 파일을 vault에 생성하고 DB에 등록합니다.
 
     ⚠️ 위키 작성 전 반드시 작성 지침 확인:
-      kg_read_note("wiki-관리-지침") — 디렉토리 규칙, 파일명, frontmatter, 섹션 포맷 등
+      kg_read_note("wiki-management-guide") — 디렉토리 규칙, 파일명, frontmatter, 섹션 포맷 등
 
     파라미터:
-    - title: 노트 제목 (간결하게, 지침의 파일명 규칙 참조)
+    - title: 노트 제목 (간결하게, 지침의 파일명 규칙 참조). 슬래시로 서브디렉토리
+      지정 불가 — 슬러그화 과정에서 제거되어 항상 flat한 파일명이 됨. 서브디렉토리는
+      subdir 파라미터를 쓸 것.
     - content: 본문 마크다운 — 지침의 note_type별 섹션 구조 준수
     - note_type: concept | project | research | reference | fleeting | moc | person | tool
+      (DB에 기록되는 실제 분류 — subdir와 무관하게 항상 이 값 그대로 유지됨)
     - tags: JSON 배열 문자열 (예: '["ai", "memory"]') — 핵심 키워드 3개 이내
     - links: JSON 배열 문자열 — 연결할 다른 노드 제목 목록
+    - subdir: note_type 기본 디렉토리 아래 추가 하위 경로 (선택, 예: '001_TruviewCADMOM/log').
+      기존 프로젝트 하위에 배치할 때 이걸 쓸 것 — note_type에 경로를 넣으면
+      DB type이 깨짐(예: "concept"로 강등).
 
     주의:
     - 이미 KG에 있는 노드는 kg_update_node로 업데이트 (중복 생성 금지)
@@ -2257,14 +2291,14 @@ def kg_add_note(title: str, content: str, note_type: str = "concept", tags: str 
 
     kg = get_kg()
     vault = _vault()
-    filepath = kg.create_note_file(title, content, note_type, tag_list, link_list, vault)
+    filepath = kg.create_note_file(title, content, note_type, tag_list, link_list, vault, subdir=subdir)
     node_id = filepath.stem
 
     # KuzuDB 시맨틱 레이어에도 즉시 반영
     node = kg.get_node(node_id)
     if node:
         sg = get_semantic_graph()
-        sg.upsert_node(
+        await sg.upsert_node(
             node_id=node["id"],
             title=node["title"],
             node_type=node["type"],
@@ -2353,8 +2387,11 @@ def _kg_sync_impl(verbose: bool = False) -> dict:
     pruned = kg.prune_missing(docs_dir)
 
     # 시맨틱 레이어도 동기화 (자체적으로 content_hash 기반 증분 재임베딩)
+    # _kg_sync_impl은 asyncio.to_thread 워커 안에서 도니 이벤트 루프가 없다 — run_sg_coro로 실행.
+    from core.graph.semantic import run_sg_coro
+
     sg = get_semantic_graph()
-    semantic_result = sg.sync_from_kg()
+    semantic_result = run_sg_coro(sg.sync_from_kg())
 
     return {
         "status": "ok",
@@ -2376,7 +2413,7 @@ async def kg_sync(verbose: bool = False) -> dict:
 
 
 @engramMCP.tool()
-def kg_semantic_search(query: str, top_k: int = 5, threshold: float = 0.30) -> list:
+async def kg_semantic_search(query: str, top_k: int = 5, threshold: float = 0.30) -> list:
     """시맨틱 유사도 기반으로 지식 그래프 노드를 검색합니다.
     키워드가 없어도 의미적으로 유사한 노드를 찾습니다. (sentence-transformers, all-MiniLM-L6-v2)
     - query: 검색할 문장이나 개념
@@ -2385,11 +2422,11 @@ def kg_semantic_search(query: str, top_k: int = 5, threshold: float = 0.30) -> l
     sg = get_semantic_graph()
     if not sg.enabled:
         return [{"error": "SemanticGraph 비활성화 (kuzu 미설치 또는 초기화 실패)"}]
-    return sg.semantic_search(query, top_k=top_k, threshold=threshold)
+    return await sg.semantic_search(query, top_k=top_k, threshold=threshold)
 
 
 @engramMCP.tool()
-def kg_semantic_neighbors(node_id: str, top_k: int = 5) -> list:
+async def kg_semantic_neighbors(node_id: str, top_k: int = 5) -> list:
     """특정 노드와 의미적으로 가장 유사한 노드를 반환합니다.
     그래프 엣지에 관계없이 내용 유사성 기반으로 연관 개념을 발견할 때 사용하세요.
     - node_id: 기준 노드 id (슬러그)
@@ -2397,11 +2434,11 @@ def kg_semantic_neighbors(node_id: str, top_k: int = 5) -> list:
     sg = get_semantic_graph()
     if not sg.enabled:
         return [{"error": "SemanticGraph 비활성화"}]
-    return sg.semantic_neighbors(node_id, top_k=top_k)
+    return await sg.semantic_neighbors(node_id, top_k=top_k)
 
 
 @engramMCP.tool()
-def kg_wiki_reminder(
+async def kg_wiki_reminder(
     query: str,
     top_k: int = 5,
     threshold: float = 0.35,
@@ -2421,12 +2458,12 @@ def kg_wiki_reminder(
     if not sg.enabled:
         return {"status": "disabled", "wiki_hits": [], "episode_hits": []}
 
-    query_vec = sg.compute_embedding(query)
+    query_vec = await sg.compute_embedding(query)
     if not query_vec:
         return {"status": "embedding_failed", "wiki_hits": [], "episode_hits": []}
 
-    wiki_hits = sg.semantic_search(query, top_k=top_k, threshold=threshold, query_vec=query_vec)
-    episode_hits = sg.episode_semantic_search(query, top_k=top_k, threshold=threshold, query_vec=query_vec)
+    wiki_hits = await sg.semantic_search(query, top_k=top_k, threshold=threshold, query_vec=query_vec)
+    episode_hits = await sg.episode_semantic_search(query, top_k=top_k, threshold=threshold, query_vec=query_vec)
 
     return {
         "status": "ok",
@@ -2464,7 +2501,7 @@ def _is_dangerous_cypher(cypher: str) -> bool:
 
 
 @engramMCP.tool()
-def kg_cypher(cypher: str) -> list:
+async def kg_cypher(cypher: str) -> list:
     """KuzuDB에 직접 Cypher 쿼리를 실행합니다. (고급 그래프 탐색)
     예시: "MATCH (a:KGNode)-[e:KG_EDGE]->(b:KGNode) WHERE a.type='concept' RETURN a.title, e.rel_type, b.title LIMIT 10"
     DELETE는 WHERE 또는 {} 필터가 있을 때만 허용됩니다. DROP TABLE은 항상 차단됩니다.
@@ -2474,7 +2511,7 @@ def kg_cypher(cypher: str) -> list:
     sg = get_semantic_graph()
     if not sg.enabled:
         return [{"error": "SemanticGraph 비활성화"}]
-    return sg.cypher_query(cypher)
+    return await sg.cypher_query(cypher)
 
 
 @engramMCP.tool()
@@ -2513,7 +2550,7 @@ def kg_read_note(identifier: str) -> dict:
 
 
 @engramMCP.tool()
-def kg_update_node(node_id: str, summary: str, progress: str = "", open_intents: str = "") -> dict:
+async def kg_update_node(node_id: str, summary: str, progress: str = "", open_intents: str = "") -> dict:
     """KG 노드의 상태를 업데이트합니다. 새 노드 생성이 아니라 기존 노드 갱신 전용.
     SQLite kg_nodes와 vault .md 파일을 동시에 갱신하고 시맨틱 레이어를 재임베딩합니다.
     kg_add_note로 이미 생성한 노드를 수정할 때, 또는 세션 종료 시 프로젝트 진행 상태 기록에 사용.
@@ -2531,7 +2568,7 @@ def kg_update_node(node_id: str, summary: str, progress: str = "", open_intents:
     if sg.enabled:
         node = kg.get_node(node_id)
         if node:
-            sg.upsert_node(
+            await sg.upsert_node(
                 node_id=node["id"],
                 title=node["title"],
                 node_type=node["type"],
@@ -2541,6 +2578,40 @@ def kg_update_node(node_id: str, summary: str, progress: str = "", open_intents:
             )
 
     return {"status": "ok", "node_id": node_id, "summary": summary}
+
+
+@engramMCP.tool()
+async def kg_patch_section(node_id: str, heading: str, content: str, create_if_missing: bool = True) -> dict:
+    """KG 노드 파일의 임의 헤딩 섹션 본문을 교체합니다.
+    kg_update_node가 다루는 summary/Progress/open_intents 세 슬롯 밖 — frontmatter 아래
+    '목표' 헤더, 아키텍처 서술 등 본문 어디든 고칠 때 사용.
+
+    - node_id: KG 노드 슬러그 id
+    - heading: 정확한 헤딩 라인 (예: '## 목표'). 먼저 kg_read_note로 원문을 확인해
+      정확히 일치하는 텍스트를 넣을 것 — 다르면 새 섹션이 추가되어 중복이 생길 수 있음.
+    - content: 헤딩 아래 들어갈 본문 (헤딩 라인 자체는 제외)
+    - create_if_missing: True(기본)면 헤딩이 없을 때 파일 끝에 새로 추가.
+      False면 조용히 추가하는 대신 에러 + 기존 헤딩 목록을 반환."""
+    kg = get_kg()
+    result = kg.patch_section(node_id, heading=heading, content=content, create_if_missing=create_if_missing)
+    if result.get("status") != "ok":
+        return result
+
+    # 시맨틱 레이어 re-embed (본문 변경이 요약/유사도 검색에 영향 줄 수 있음)
+    sg = get_semantic_graph()
+    if sg.enabled:
+        node = kg.get_node(node_id)
+        if node:
+            await sg.upsert_node(
+                node_id=node["id"],
+                title=node["title"],
+                node_type=node["type"],
+                tags=node.get("tags", []),
+                summary=node["summary"],
+                force_reembed=True,
+            )
+
+    return result
 
 
 @engramMCP.tool()
@@ -2562,7 +2633,7 @@ def kg_lint() -> str:
 
 
 @engramMCP.tool()
-def memories_sync(threshold: float = 0.40, top_k: int = 3) -> dict:
+async def memories_sync(threshold: float = 0.40, top_k: int = 3) -> dict:
     """SQLite memories(LTM) 전체를 KuzuDB EpisodeNode로 동기화하고 KGNode와 시맨틱 연결합니다.
     memories 테이블의 내용을 임베딩하여 KGNode에 EP_TO_KG 릴레이션으로 연결합니다.
     - threshold: 시맨틱 유사도 임계값 (기본 0.40)
@@ -2581,7 +2652,7 @@ def memories_sync(threshold: float = 0.40, top_k: int = 3) -> dict:
     success = 0
     failed = 0
     for row in rows:
-        ok = sg.upsert_episode(
+        ok = await sg.upsert_episode(
             episode_id=str(row[0]),
             content=row[2] or "",
             keywords=row[3] or "",
@@ -2594,7 +2665,7 @@ def memories_sync(threshold: float = 0.40, top_k: int = 3) -> dict:
             failed += 1
 
     # 전체 EP_TO_KG 소급 연결 (upsert_episode 내부 연결 보완)
-    link_result = sg.sync_all_ep_to_kg(sem_threshold=threshold, top_k=top_k)
+    link_result = await sg.sync_all_ep_to_kg(sem_threshold=threshold, top_k=top_k)
 
     return {
         "status": "ok",
@@ -2620,7 +2691,9 @@ async def _http_kg_sync(request) -> "Response":
 async def _http_memories_sync(request) -> "Response":
     from starlette.responses import JSONResponse
 
-    result = await asyncio.to_thread(memories_sync)
+    # memories_sync는 이제 native async(내부 SemanticGraph 호출이 전부 await)이므로
+    # to_thread로 감싸면 코루틴 객체가 그대로 반환돼 JSON 직렬화에 실패한다 — 직접 await.
+    result = await memories_sync()
     return JSONResponse(result)
 
 
@@ -2645,17 +2718,17 @@ async def _http_sg_stats(request) -> "Response":
     if not sg.enabled:
         return JSONResponse({"enabled": False, "kg_nodes": 0, "episode_nodes": 0, "ep_to_kg": 0})
     try:
-        r1 = sg.conn.execute("MATCH (n:KGNode) RETURN count(n)").get_next()
-        r2 = sg.conn.execute("MATCH (e:EpisodeNode) RETURN count(e)").get_next()
-        r3 = sg.conn.execute("MATCH ()-[r:EP_TO_KG]->() RETURN count(r)").get_next()
-        r4 = sg.conn.execute("MATCH ()-[r:KG_EDGE]->() RETURN count(r)").get_next()
+        kg_nodes = await sg.count("MATCH (n:KGNode) RETURN count(n)")
+        episode_nodes = await sg.count("MATCH (e:EpisodeNode) RETURN count(e)")
+        ep_to_kg = await sg.count("MATCH ()-[r:EP_TO_KG]->() RETURN count(r)")
+        kg_edges = await sg.count("MATCH ()-[r:KG_EDGE]->() RETURN count(r)")
         return JSONResponse(
             {
                 "enabled": True,
-                "kg_nodes": r1[0] if r1 else 0,
-                "episode_nodes": r2[0] if r2 else 0,
-                "ep_to_kg": r3[0] if r3 else 0,
-                "kg_edges": r4[0] if r4 else 0,
+                "kg_nodes": kg_nodes,
+                "episode_nodes": episode_nodes,
+                "ep_to_kg": ep_to_kg,
+                "kg_edges": kg_edges,
             }
         )
     except Exception as exc:
@@ -2672,30 +2745,32 @@ async def _http_sg_graph(request) -> "Response":
     if not sg.enabled:
         return JSONResponse({"enabled": False, "kg_nodes": [], "kg_edges": [], "ep_nodes": [], "ep_edges": []})
     try:
-        # KGNode
-        res = sg.conn.execute("MATCH (n:KGNode) RETURN n.id, n.title, n.type, n.tags, n.summary")
-        kg_nodes = []
-        while res.has_next():
-            r = res.get_next()
-            kg_nodes.append({"id": r[0], "title": r[1], "type": r[2], "tags": r[3], "summary": r[4]})
-        # KG_EDGE
-        res = sg.conn.execute("MATCH (a:KGNode)-[r:KG_EDGE]->(b:KGNode) RETURN a.id, b.id, r.rel_type, r.weight")
-        kg_edges = []
-        while res.has_next():
-            r = res.get_next()
-            kg_edges.append({"from": r[0], "to": r[1], "rel_type": r[2], "weight": r[3]})
-        # EpisodeNode
-        res = sg.conn.execute("MATCH (e:EpisodeNode) RETURN e.id, e.content, e.keywords, e.session_id, e.created_at")
-        ep_nodes = []
-        while res.has_next():
-            r = res.get_next()
-            ep_nodes.append({"id": r[0], "content": r[1], "keywords": r[2], "session_id": r[3], "created_at": r[4]})
-        # EP_TO_KG
-        res = sg.conn.execute("MATCH (e:EpisodeNode)-[r:EP_TO_KG]->(k:KGNode) RETURN e.id, k.id, r.rel_type")
-        ep_edges = []
-        while res.has_next():
-            r = res.get_next()
-            ep_edges.append({"from": r[0], "to": r[1], "rel_type": r[2]})
+        # cypher_query는 컬럼명을 그대로 dict 키로 쓰므로 AS로 원하는 키 이름을 명시한다.
+        # from/to는 예약어 충돌 우려가 있어 별도 이름으로 받고 파이썬에서 리매핑한다.
+        kg_nodes = await sg.cypher_query(
+            "MATCH (n:KGNode) RETURN n.id AS id, n.title AS title, n.type AS type, "
+            "n.tags AS tags, n.summary AS summary"
+        )
+        kg_edges_raw = await sg.cypher_query(
+            "MATCH (a:KGNode)-[r:KG_EDGE]->(b:KGNode) "
+            "RETURN a.id AS from_id, b.id AS to_id, r.rel_type AS rel_type, r.weight AS weight"
+        )
+        kg_edges = [
+            {"from": r.get("from_id"), "to": r.get("to_id"), "rel_type": r.get("rel_type"), "weight": r.get("weight")}
+            for r in kg_edges_raw
+        ]
+        ep_nodes = await sg.cypher_query(
+            "MATCH (e:EpisodeNode) RETURN e.id AS id, e.content AS content, e.keywords AS keywords, "
+            "e.session_id AS session_id, e.created_at AS created_at"
+        )
+        ep_edges_raw = await sg.cypher_query(
+            "MATCH (e:EpisodeNode)-[r:EP_TO_KG]->(k:KGNode) "
+            "RETURN e.id AS from_id, k.id AS to_id, r.rel_type AS rel_type"
+        )
+        ep_edges = [
+            {"from": r.get("from_id"), "to": r.get("to_id"), "rel_type": r.get("rel_type")}
+            for r in ep_edges_raw
+        ]
         return JSONResponse(
             {
                 "enabled": True,
@@ -2726,7 +2801,7 @@ async def _http_sg_search(request) -> "Response":
     sg = get_semantic_graph()
     if not sg.enabled:
         return JSONResponse({"enabled": False, "results": []})
-    results = await asyncio.to_thread(sg.semantic_search, q, top_k=top_k, threshold=threshold)
+    results = await sg.semantic_search(q, top_k=top_k, threshold=threshold)
     return JSONResponse({"enabled": True, "results": results})
 
 
@@ -2746,7 +2821,7 @@ async def _http_sg_neighbors(request) -> "Response":
     sg = get_semantic_graph()
     if not sg.enabled:
         return JSONResponse({"enabled": False, "results": []})
-    results = await asyncio.to_thread(sg.semantic_neighbors, node_id, top_k=top_k)
+    results = await sg.semantic_neighbors(node_id, top_k=top_k)
     return JSONResponse({"enabled": True, "results": results})
 
 
@@ -2777,6 +2852,268 @@ def _build_hybrid_http_app():
     return app
 
 
+# ── 원격 리스너 가드 ──────────────────────────────────────────────────────────
+# engram MCP 의 보안 모델은 "loopback 바인딩 = 인증"이었다. 인증 코드가 없는 게
+# 아니라 필요가 없었다 — 17385 에 닿는다는 건 이미 로컬 실행 권한이 있다는 뜻이므로.
+# SSH 리버스 터널은 그 등식을 깬다(도달 ≠ 권한). 그래서 원격용 소켓을 따로 두고,
+# 그 소켓으로 들어온 요청에만 bearer 인증 + 도구 deny + 감사 로그를 적용한다.
+#
+# BaseHTTPMiddleware 가 아니라 순수 ASGI 미들웨어인 이유: BaseHTTPMiddleware 는
+# SSE 스트리밍(/sse)을 깨뜨리고, 본문을 읽으면 downstream 이 굶는다.
+
+_UNAUTHENTICATED_PATHS = frozenset({"/health"})
+
+
+def _remote_allowed_paths() -> frozenset[str]:
+    """원격 리스너가 노출할 경로. 여기 없는 것은 404 로 막는다.
+
+    원격 포트의 존재 이유는 MCP 를 제공하는 것뿐이다. 같은 앱에 붙어 있는
+    /api/sg/*, /kg_sync, /memories_sync 는 도구 계층을 거치지 않으므로
+    토큰별 deny 목록이 적용되지 않는다. 실제로 원격 토큰으로 /api/sg/graph 가
+    200 을 반환해 그래프 전체를 덤프할 수 있었고, tools.disabled 로 막아둔
+    memories_sync 도 HTTP 라우트로는 닿았다.
+
+    개별 차단(블랙리스트)은 라우트가 늘 때마다 새는 구조라 허용 목록으로 둔다.
+    이 경로들은 로컬 리스너에서는 그대로 쓸 수 있다.
+    """
+    paths = {"/health"}
+    for attr in ("streamable_http_path", "sse_path", "message_path"):
+        p = getattr(engramMCP.settings, attr, None)
+        if p:
+            paths.add(str(p))
+            paths.add(str(p).rstrip("/"))
+    return frozenset(p for p in paths if p)
+
+
+async def _asgi_send_json(send, status: int, payload: dict) -> None:
+    raw = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    await send(
+        {
+            "type": "http.response.start",
+            "status": status,
+            "headers": [
+                (b"content-type", b"application/json"),
+                (b"content-length", str(len(raw)).encode("ascii")),
+            ],
+        }
+    )
+    await send({"type": "http.response.body", "body": raw})
+
+
+def _denied_tool_in_body(body: bytes, principal) -> str:
+    """JSON-RPC 본문에서 deny 목록에 걸리는 tools/call 이름을 찾는다. 없으면 ""."""
+    if not body:
+        return ""
+    try:
+        parsed = json.loads(body)
+    except Exception:
+        return ""
+    items = parsed if isinstance(parsed, list) else [parsed]
+    for item in items:
+        if not isinstance(item, dict) or item.get("method") != "tools/call":
+            continue
+        name = str(((item.get("params") or {}) if isinstance(item.get("params"), dict) else {}).get("name") or "")
+        if name and principal.denies(name):
+            return name
+    return ""
+
+
+class RemoteGuardMiddleware:
+    """원격 소켓으로 들어온 요청만 인증/필터링하는 순수 ASGI 미들웨어."""
+
+    def __init__(self, app, remote_port: int):
+        self.app = app
+        self._remote_port = remote_port
+        self._allowed = _remote_allowed_paths()
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") != "http" or not self._remote_port:
+            return await self.app(scope, receive, send)
+
+        server = scope.get("server") or ()
+        local_port = server[1] if len(server) > 1 else None
+        if local_port != self._remote_port:
+            # 로컬 리스너 — 기존 동작 그대로 통과시킨다.
+            return await self.app(scope, receive, send)
+
+        path = scope.get("path", "")
+        # MCP 전송 경로 외에는 원격에 아예 노출하지 않는다(허용 목록).
+        if path not in self._allowed:
+            _call_log.audit_remote(
+                principal="-", action="blocked", path=path,
+                detail="원격 리스너에서 허용되지 않는 경로",
+            )
+            return await _asgi_send_json(send, 404, {"error": "not found"})
+
+        if path in _UNAUTHENTICATED_PATHS:
+            return await self.app(scope, receive, send)
+
+        # 1) bearer 인증
+        headers = {k.decode("latin-1").lower(): v.decode("latin-1") for k, v in scope.get("headers") or []}
+        auth = headers.get("authorization", "")
+        token = auth[7:].strip() if auth[:7].lower() == "bearer " else ""
+        principal = _REMOTE_PRINCIPALS.get(token) if token else None
+        if principal is None:
+            _call_log.audit_remote(
+                principal="-", action="unauthorized", path=path,
+                detail="missing or unknown bearer token",
+            )
+            return await _asgi_send_json(send, 401, {"error": "unauthorized"})
+
+        # 2) tools/call deny 검사 — 본문이 있는 요청만 버퍼링한다.
+        #    GET(SSE)은 receive 에 손대지 않는다.
+        if scope.get("method") == "POST":
+            chunks: list[bytes] = []
+            more = True
+            while more:
+                message = await receive()
+                if message.get("type") == "http.disconnect":
+                    return
+                chunks.append(message.get("body", b"") or b"")
+                more = bool(message.get("more_body"))
+            body = b"".join(chunks)
+
+            denied = _denied_tool_in_body(body, principal)
+            if denied:
+                _call_log.audit_remote(
+                    principal=principal.name, action="deny", tool=denied, path=path,
+                    detail="tool denied for this principal",
+                )
+                return await _asgi_send_json(
+                    send,
+                    403,
+                    {
+                        "jsonrpc": "2.0",
+                        "id": None,
+                        "error": {
+                            "code": -32001,
+                            "message": f"'{denied}' 은(는) 원격 접근에서 차단된 도구입니다.",
+                        },
+                    },
+                )
+
+            # 토큰에 scope 가 묶여 있으면 강제 주입한다.
+            downstream_scope = scope
+            pinned = _pin_scope_in_body(body, principal.scope)
+            if pinned is not None:
+                body = pinned
+                downstream_scope = _with_content_length(scope, len(body))
+
+            _call_log.audit_remote(
+                principal=principal.name, action="allow",
+                tool=_tool_name_in_body(body), path=path,
+                detail=f"scope pinned to {principal.scope}" if pinned is not None else "",
+            )
+
+            replayed = False
+
+            async def replay():
+                nonlocal replayed
+                if not replayed:
+                    replayed = True
+                    return {"type": "http.request", "body": body, "more_body": False}
+                return await receive()
+
+            return await self.app(downstream_scope, replay, send)
+
+        _call_log.audit_remote(principal=principal.name, action="allow", path=path)
+        return await self.app(scope, receive, send)
+
+
+# scope_key 파라미터를 실제로 받는 도구들. 여기에 없는 도구에 주입하면
+# 인자 검증에서 튕기므로 대상을 한정한다. 나머지 도구는 이들이 연 세션에
+# 붙어 스코프를 상속하므로, 이 목록만 고정하면 하위 기록이 전부 따라간다.
+_SCOPE_AWARE_TOOLS = frozenset(
+    {
+        "engram_get_context",
+        "engram_get_context_once",
+        "engram_start_session",
+        "engram_close_session",
+        "engram_save_message",
+        "engram_peek_stm",
+    }
+)
+
+
+def _pin_scope_in_body(body: bytes, scope: str) -> bytes | None:
+    """tools/call 인자에 scope_key 를 강제 주입한다. 바뀐 게 없으면 None."""
+    if not body or not scope:
+        return None
+    try:
+        parsed = json.loads(body)
+    except Exception:
+        return None
+
+    items = parsed if isinstance(parsed, list) else [parsed]
+    changed = False
+    for item in items:
+        if not isinstance(item, dict) or item.get("method") != "tools/call":
+            continue
+        params = item.get("params")
+        if not isinstance(params, dict):
+            continue
+        if str(params.get("name") or "") not in _SCOPE_AWARE_TOOLS:
+            continue
+        arguments = params.get("arguments")
+        if not isinstance(arguments, dict):
+            arguments = {}
+            params["arguments"] = arguments
+        if arguments.get("scope_key") != scope:
+            arguments["scope_key"] = scope
+            changed = True
+
+    if not changed:
+        return None
+    return json.dumps(parsed, ensure_ascii=False).encode("utf-8")
+
+
+def _with_content_length(scope: dict, length: int) -> dict:
+    """본문을 재작성했으므로 content-length 헤더를 맞춰준다."""
+    headers = [
+        (k, v) for k, v in scope.get("headers") or [] if k.lower() != b"content-length"
+    ]
+    headers.append((b"content-length", str(length).encode("ascii")))
+    new_scope = dict(scope)
+    new_scope["headers"] = headers
+    return new_scope
+
+
+def _tool_name_in_body(body: bytes) -> str:
+    """감사 로그용 — 본문의 tools/call 이름(없으면 method 명)."""
+    if not body:
+        return ""
+    try:
+        parsed = json.loads(body)
+    except Exception:
+        return ""
+    items = parsed if isinstance(parsed, list) else [parsed]
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        if item.get("method") == "tools/call":
+            params = item.get("params")
+            if isinstance(params, dict):
+                return str(params.get("name") or "")
+        if item.get("method"):
+            return str(item.get("method"))
+    return ""
+
+
+_REMOTE_PRINCIPALS: dict = {}
+
+
+def _bind_socket(host: str, port: int) -> socket.socket:
+    """uvicorn 에 넘길 리스닝 소켓을 미리 바인딩한다."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    # Windows 의 SO_REUSEADDR 은 이미 바인딩된 포트를 가로챌 수 있게 하므로 설정하지 않는다.
+    if sys.platform != "win32":
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind((host, port))
+    sock.listen(2048)
+    sock.set_inheritable(True)
+    return sock
+
+
 def main(argv=None):
     # 서버 시작 시 임베딩 모델 선로딩을 하지 않는다.
     # SentenceTransformer는 시맨틱 기능이 실제 호출될 때 1회 로드된다.
@@ -2800,6 +3137,16 @@ def main(argv=None):
         default="127.0.0.1",
         help="HTTP 호스트 (sse/streamable-http 전용, 기본: 127.0.0.1)",
     )
+    parser.add_argument(
+        "--remote-port",
+        type=int,
+        default=0,
+        help=(
+            "원격용 인증 리스너 포트 (0=비활성). 이 포트로 들어온 요청만 "
+            "bearer 인증 + 도구 deny + 감사 로그가 적용된다. SSH 리버스 터널은 "
+            "--port 가 아니라 이 포트에 연결한다."
+        ),
+    )
     args = parser.parse_args(argv)
 
     if sys.platform == "win32" and args.transport in {"sse", "streamable-http"}:
@@ -2815,8 +3162,37 @@ def main(argv=None):
         # streamable-http를 기본으로 사용하되, 기존 SSE 클라이언트 호환을 유지한다.
         engramMCP.settings.host = args.host
         engramMCP.settings.port = args.port
+        # 앱은 반드시 1회만 만든다. FastMCP.streamable_http_app() 은 _session_manager 를
+        # 재사용하지만 StreamableHTTPSessionManager.run() 은 인스턴스당 1회만 허용되므로
+        # 앱을 두 번 만들면 두 번째 lifespan 에서 터진다. 대신 소켓을 둘 바인딩한다.
         app = _build_hybrid_http_app()
-        uvicorn.run(app, host=args.host, port=args.port, log_level=engramMCP.settings.log_level.lower())
+        sockets = [_bind_socket(args.host, args.port)]
+
+        if args.remote_port:
+            # 지연 import — 원격 리스너를 켤 때만 필요하다.
+            from core.config.remote_tokens import ensure_tokens_file, load_principals
+
+            global _REMOTE_PRINCIPALS
+            tokens_path = ensure_tokens_file(args.remote_port)
+            _REMOTE_PRINCIPALS = load_principals()
+            app = RemoteGuardMiddleware(app, remote_port=args.remote_port)
+            sockets.append(_bind_socket(args.host, args.remote_port))
+            # 토큰 값은 출력하지 않는다 — 경로만.
+            print(
+                f"[engram] remote listener on :{args.remote_port} "
+                f"(principals={len(_REMOTE_PRINCIPALS)}, tokens={tokens_path})",
+                file=sys.stderr,
+            )
+            if not _REMOTE_PRINCIPALS:
+                print(
+                    "[engram] WARNING: 등록된 원격 토큰이 없습니다 — 원격 요청은 전부 401 입니다.",
+                    file=sys.stderr,
+                )
+
+        server = uvicorn.Server(
+            uvicorn.Config(app, log_level=engramMCP.settings.log_level.lower())
+        )
+        server.run(sockets=sockets)
     else:
         # FastMCP.run()은 host/port 인자 미지원 — 생성자로 재설정
         engramMCP.settings.host = args.host

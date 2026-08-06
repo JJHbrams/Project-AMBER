@@ -2,6 +2,166 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.1.0] — 2026-08-06
+
+임베딩을 타는 MCP 호출이 서버 전체를 멈춰 세우던 문제를 고쳤다. 곁들여 위키를
+고칠 수 있는 범위가 넓어졌고, 페르소나가 프로젝트를 넘어 따라오게 됐다.
+
+### Fixed
+
+- **임베딩 호출 120초 행 → transport 드롭** (#5). 증상은 "가끔 느리다"가 아니라
+  "특정 호출만 매번 죽는다"였다. 원인은 두 겹이었다.
+
+  첫째, FastMCP 는 동기(`def`) 툴 함수를 스레드풀로 넘기지 않고 이벤트 루프에서
+  그대로 호출한다(`func_metadata.py:93-96`). `kg_semantic_search`·`kg_add_note`·
+  `kg_update_node`·`kg_patch_section`, 그리고 거의 모든 세션이 시작할 때 부르는
+  `engram_get_context` 까지 전부 `def` 였다. **한 호출이 오래 걸리면 서버 전체가
+  선다** — 그 순간 붙어 있는 다른 클라이언트까지 같이.
+
+  둘째, `SemanticGraph` 가 `kuzu.Connection` **하나**를 공유하고 있었다. KuzuDB
+  자신은 동시성이 필요하면 `AsyncConnection` 으로 커넥션 **풀**을 만든다 —
+  단일 커넥션 공유는 애초에 지원 대상이 아니다.
+
+  둘 다 걷어냈다. `AsyncConnection` 으로 바꾸고 호출 경로 전체를 async 로 올렸다.
+  `threading.RLock` → `asyncio.Lock` 전환 과정에서 재진입이 불가능해지므로,
+  락을 쥔 채 다시 락을 잡던 자리는 `_locked` 내부 메서드로 분리했다.
+
+  진짜 범인은 KuzuDB 가 아니라 임베딩이었을 가능성이 크다. `compute_embedding`
+  /`_get_encoder` 는 KuzuDB 를 건드리지 않는다 — `SentenceTransformer` 로드와
+  `encode()` 가 동기로 루프를 잡는다(로컬 로드 실패 시 조용히 Hub 다운로드로
+  폴백하는 경로까지 있다). `asyncio.to_thread` 로 떼어냈다. 이걸 빼면
+  `AsyncConnection` 전환은 서류상으로만 끝나고 행은 그대로 재현된다.
+
+  읽기 경로(`semantic_search` 등)는 원래 락이 아예 없었다. 지금까지 안 터진 건
+  FastMCP 가 우연히 모든 호출을 한 스레드로 직렬화해준 덕이었다 — 진짜 병렬이
+  되는 순간 캐시 인덱스가 어긋난 검색 결과가 조용히 나올 수 있는 상태였다.
+  읽기도 같은 락으로 덮었다. 동시성 테스트 9개를 새로 붙였다.
+
+- **터널 목록에서 제거해도 되살아나던 문제** — `stop()` 만으로는 `STATE_DOWN`
+  엔트리가 딕셔너리에 남아, 주기 갱신이 "살아 있는 고아 터널"로 오인해 목록에
+  다시 넣었다. `remove()` 로 내부 상태까지 지운다.
+
+- **페르소나가 다른 프로젝트에서 무시되던 문제** — 지침 원문이
+  "항상 **engram 페르소나**(므네마)의 …" 였다. 별도 CLAUDE.md 가 있는 프로젝트
+  세션에서 모델은 이걸 "engram 프로젝트 전용 정체성"으로 읽고 **명시적으로
+  거부했다**. 지침을 어긴 게 아니라 쓰인 대로 읽은 것이다. 정체성 규칙에
+  프로젝트명을 수식어로 넣으면 스코프 한정자가 된다. 문구를 "페르소나는
+  프로젝트가 아니라 '나'에 속한다"로 다시 쓰고, 새 설치에도 반영되도록
+  `directives.json` seed 에 추가했다(기존에는 seed 에 아예 없어서 런타임에
+  추가된 환경에만 존재했다).
+
+### Added
+
+- **`kg_patch_section`** — `kg_update_node` 는 summary/Progress/open_intents
+  세 슬롯만 정규식으로 갈아끼운다. 그 밖의 본문(헤더의 구 URL, 아키텍처 서술)은
+  고칠 방법이 없었고, 원격 세션은 vault 파일에 직접 닿을 수도 없다(WAL SQLite 와
+  임베디드 KuzuDB 때문에 파일 공유는 금지다 — 서버를 공유하지 파일을 공유하지
+  않는다). 헤딩 단위로 본문을 교체하는 툴을 추가했다. `engram_close_session` 이
+  함께 쓰는 기존 경로는 건드리지 않았다.
+
+- **`kg_add_note(subdir=...)`** — `title` 에 슬래시를 넣어도 슬러그화 과정에서
+  지워져 `projects/` 루트에 평평하게 떨어졌다(lint 가 규칙 위반으로 잡아냈다).
+  우회로였던 `note_type="projects/my-project"` 트릭은 그 문자열이 그대로 DB
+  `type` 에 박혀, 다음 `kg_sync` 에서 `NODE_TYPES` 검사에 걸려 `concept` 으로
+  강등됐다. **위치와 타입이 한 파라미터에 뭉쳐 있던 게 원인**이라 분리했다.
+  경로 탈출 가드 포함.
+
+- **캐릭터 좌우 반전** — 설정창 체크박스와 우클릭 메뉴 양쪽. 우클릭 토글은 즉시
+  다시 그린다.
+
+## [1.0.0] — 2026-07-31
+
+원격에서 engram 을 쓸 수 있게 됐다. 기억과 위키는 여전히 로컬 한 곳에만 있고,
+원격 세션이 SSH 리버스 터널로 그 하나를 공유한다.
+
+### Added
+
+- **원격 접근용 인증 리스너 분리** — engram MCP 의 보안 모델은 통째로
+  "loopback 바인딩 = 인증"이었다. 인증 코드가 없는 게 아니라 필요가 없었다.
+  `127.0.0.1:17385` 에 닿을 수 있는 프로세스는 이미 로컬 실행 권한이 있으므로
+  인증을 걸어도 새로 막히는 게 없다. SSH 리버스 터널은 그 등식을 깬다 —
+  터널 너머 머신은 로컬 권한이 없는데 포트에는 닿는다. **도달 ≠ 권한.**
+
+  그래서 리스너를 둘로 나눴다. 같은 프로세스에서 소켓 둘을 바인딩하고
+  (`uvicorn.Server.serve(sockets=[...])`), 미들웨어가 요청이 들어온 로컬 포트로 분기한다.
+
+  | 포트 | 대상 | 인증 | 도구 제한 | 경로 | 감사 |
+  |---|---|---|---|---|---|
+  | 17385 | 로컬 | 없음(유지) | 없음 | 전체 | 없음 |
+  | 17386 | 원격 | bearer | principal 별 deny | MCP 만 | 건별 기록 |
+
+  기존 로컬 클라이언트(overlay bubble·VS Code·kg_watcher·claude-code)는 무변경이다.
+  미들웨어는 `BaseHTTPMiddleware` 가 아니라 순수 ASGI 다 — 전자는 SSE 스트리밍을
+  깨뜨리고 본문을 읽으면 downstream 이 굶는다.
+
+- **토큰별 도구 deny 와 scope 고정** (`~/.engram/mcp-tokens.yaml`, fail closed).
+  기본 deny 는 로컬 실행으로 이어지거나(`engram_consult_engram`), 이후 모든 세션에
+  영향을 남기거나(`engram_add_directive`), 외부로 발신하거나(`engram_discord_send`),
+  가드가 보안 경계가 아닌(`kg_cypher`) 도구들이다.
+
+  `scope` 를 지정하면 `tools/call` 인자에 강제 주입된다. 원격 `cwd` 는 서버에 없는
+  경로라 스코프가 조용히 global 로 폴백하는데, 그러면 연속체가 기억상실에 걸린다.
+  **원격 전용 스코프를 새로 파는 건 답이 아니다** — 격리는 되지만 같은 문제를
+  이름만 바꿔 반복하는 것이다. 연속성이 이미 쌓인 스코프를 그대로 쓴다.
+
+- **원격 접근 감사 로그** — `~/.engram/logs/remote-audit.jsonl` 에 건별 즉시 append.
+  기존 인메모리 링버퍼(maxlen=100, 종료 시에만 flush)는 감사용으로 쓸 수 없다.
+  17386 을 지나는 요청은 정의상 전부 원격이라 origin 구분이 공짜로 해결된다.
+
+- **설정에 "원격" 탭** — 리스너 상태, 토큰 목록(name/scope 만 — 값은 UI 에 싣지 않는다),
+  터널 목록, 키 등록, 최근 감사 로그. 목록은 오버레이 재시작(재빌드 등)을 넘어
+  유지되고, 연결은 [연결]을 눌러 그때 로그인한다. 설정에 없어도 **실제로 열려 있는
+  터널은 항상 목록에 띄운다** — 열려 있는데 화면에 없는 상태를 만들지 않는다.
+
+- **터널 관리자** (`overlay/remote_tunnel.py`) — 오버레이가 `ssh -N -R` 를 자식으로
+  소유한다. 설계의 축은 `ExitOnForwardFailure=yes` 다. 이게 없으면 ssh 는 살아 있는데
+  `-R` 바인딩만 실패한 좀비가 생겨 "프로세스 생존 ≠ 터널 생존"이 된다.
+
+  키 인증이 되면 창 없이 붙고, 안 되면 그때만 콘솔을 띄워 비밀번호를 받는다.
+  로그인이 끝나면 [창 숨기기]로 콘솔을 치운다(창은 conhost 소유라 `AttachConsole`
+  로 붙어 핸들을 얻는다). 자동 재연결은 토글이며 기본 꺼짐이다.
+
+  자식은 `KILL_ON_JOB_CLOSE` Job Object 에 묶인다. Windows 는 부모가 죽어도 자식을
+  죽이지 않아, 오버레이가 크래시하면 터널이 고아로 남아 원격 포트를 점유하고
+  이후 연결이 영영 실패한다.
+
+- **원격 등록 자동화** (`scripts/setup-remote.ps1`) — 토큰 선택 → 전송 → 원격
+  `~/.claude.json` 등록 → 실호출 검증까지. Linux/macOS/Windows 원격 모두 지원.
+  토큰 값은 화면·로그·argv 어디에도 노출되지 않는다(ssh stdin 전용).
+
+- **사용 매뉴얼** (`docs/remote-access.md`) — Windows/Ubuntu, SSH 터미널,
+  VS Code Remote-SSH, ORCA 각 경우. ORCA 는 시스템 ssh 가 아니라 ssh2(순수 JS)를 쓰고
+  `RemoteForward` 를 구현하지 않으므로 터널을 별도로 잡아야 한다.
+
+### Fixed
+
+- **`config/config.yaml` 이 소스·설치본 양쪽에서 무시되던 경로 리그레션** —
+  `423db3a`(core 패키지 재편)에서 `runtime_config.py` 가 `core/` → `core/config/` 로
+  이동했는데 루트 계산이 따라가지 않았다. 그 결과 `tools.disabled`(15개)가 통째로
+  무력화돼 있었고, `engram_consult_engram`(Copilot CLI 를 `--allow-all-tools` 로
+  로컬 spawn)이 노출된 상태였다. 노출 도구 57 → 42개.
+
+- **원격 리스너의 비-MCP 경로 우회** — 원격 리스너는 로컬과 같은 ASGI 앱을 공유하는데,
+  그 앱의 `/api/sg/*`·`/kg_sync`·`/memories_sync` 는 도구 계층을 거치지 않아
+  토큰별 deny 가 적용되지 않았다. `/api/sg/graph` 가 토큰만으로 그래프 전체를 덤프했고
+  `tools.disabled` 로 막아둔 도구도 HTTP 라우트로는 닿았다. 허용 목록으로 뒤집어
+  MCP 전송 경로와 `/health` 외에는 404 로 막는다.
+
+- **명령 주입** — 키 등록이 `cmd` 문자열을 조립하며 호스트를 그대로 삽입했다.
+  호스트는 `overlay.user.yaml` 에서도 오므로 신뢰할 수 없다. ssh_config 별칭
+  화이트리스트 + 문자셋 검증으로 차단하고, 선두 `-` 호스트(ssh 옵션 주입)도 막는다.
+
+- 감사 로그·ssh stderr 는 원격이 제어하는 값이라 개행을 제거해 UI 행 위조를 막는다.
+- 재빌드 시 `dist` 파일 잠금으로 실패하던 것을 재시도로 해결.
+
+### Notes
+
+- Windows 원격에서 키 인증이 안 되면 거의 항상 **관리자 계정** 문제다. OpenSSH 는
+  관리자의 `~/.ssh/authorized_keys` 를 읽지 않고
+  `C:\ProgramData\ssh\administrators_authorized_keys` 만 본다. ACL 을 좁히지 않으면
+  파일을 조용히 무시한다. 자세한 절차는 `docs/remote-access.md`.
+- 원격 리스너는 기본 꺼짐(`mcp.remote_enabled: false`)이다.
+
 ## [0.2.2] — 2026-07-30
 
 ### Changed

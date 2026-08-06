@@ -34,6 +34,38 @@ class _CallLog:
         with self._lock:
             self._buf.append(entry)
 
+    def audit_remote(
+        self,
+        *,
+        principal: str,
+        action: str,
+        tool: str = "",
+        path: str = "",
+        detail: str = "",
+    ) -> None:
+        """원격 리스너를 통과한 요청을 즉시 디스크에 append 한다.
+
+        인메모리 링버퍼(maxlen=100, 종료 시에만 flush)는 감사용으로 쓸 수 없다 —
+        롤오버되고, 크래시가 아니면 남지 않는다. 원격 호출은 건별로 바로 적는다.
+        토큰 값은 싣지 않는다. principal 은 이름만.
+        """
+        entry = {
+            "ts": datetime.utcnow().isoformat(),
+            "principal": principal,
+            "action": action,   # allow | deny | unauthorized
+            "tool": tool,
+            "path": path,
+            "detail": detail,
+        }
+        try:
+            line = json.dumps(entry, ensure_ascii=False) + "\n"
+            with self._lock:
+                with open(_get_log_dir() / "remote-audit.jsonl", "a", encoding="utf-8") as fh:
+                    fh.write(line)
+                    fh.flush()
+        except Exception:
+            pass
+
     def dump_crash_report(self, exc: BaseException | None = None) -> Path | None:
         try:
             log_dir = _get_log_dir()

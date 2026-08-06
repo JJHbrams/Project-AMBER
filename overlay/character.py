@@ -8,7 +8,7 @@ from typing import Callable
 
 from PIL import Image, ImageTk
 
-from overlay.config import resolve_path, load_cfg
+from overlay.config import resolve_path, load_cfg, set_flip_horizontal
 
 USER_CONFIG_DIR = Path.home() / ".engram"
 USER_OVERLAY_RESOURCE = USER_CONFIG_DIR / "overlay.png"
@@ -187,6 +187,7 @@ class CharacterOverlay:
         self._current_source = self._profile.default_frame
         self._sequence_queue: list[Path] = []
         self._context_menu_open = False
+        self._flip_h = bool(self._cfg["overlay"].get("flip_horizontal", False))
 
         self._load_image(source_path=self._current_source)
         self._place_default()
@@ -220,6 +221,8 @@ class CharacterOverlay:
         scale = target_h / img.height
         target_w = int(img.width * scale)
         img = img.resize((target_w, target_h), Image.LANCZOS)
+        if self._flip_h:
+            img = img.transpose(Image.FLIP_LEFT_RIGHT)
         self._img_w, self._img_h = target_w, target_h
 
         r, g, b, a = img.split()
@@ -269,6 +272,7 @@ class CharacterOverlay:
         self._provider_var = tk.StringVar(value=self._get_provider_value())
         self._claude_model_var = tk.StringVar()
         self._ollama_model_var = tk.StringVar()
+        self._flip_var = tk.BooleanVar(value=self._flip_h)
 
         self._context_menu = tk.Menu(self.root, tearoff=0)
         self._context_menu.add_command(label="채팅 열기/닫기", command=self._invoke_activate)
@@ -279,6 +283,7 @@ class CharacterOverlay:
         self._ollama_submenu = tk.Menu(self._provider_menu, tearoff=0)
 
         self._context_menu.add_cascade(label="CLI 공급자", menu=self._provider_menu)
+        self._context_menu.add_checkbutton(label="좌우 반전", variable=self._flip_var, command=self._toggle_flip)
         self._context_menu.add_separator()
         self._context_menu.add_command(label="설정", command=self._invoke_settings)
         self._context_menu.add_command(label="재시작", command=self._invoke_restart)
@@ -390,10 +395,23 @@ class CharacterOverlay:
         ollama_label = f"{'✓' if current_provider == 'ollama' else ' '} Ollama"
         self._provider_menu.add_cascade(label=ollama_label, menu=self._ollama_submenu)
 
+    def _toggle_flip(self):
+        self.set_flip(not self._flip_h)
+
+    def set_flip(self, value: bool):
+        """좌우 반전 상태를 갱신하고(영속화 포함) 즉시 재렌더링한다."""
+        value = bool(value)
+        if value == self._flip_h:
+            return
+        self._flip_h = value
+        set_flip_horizontal(value)
+        self._set_frame(self._current_source)
+
     def _show_context_menu(self, event):
         if self._context_menu_open:
             return
 
+        self._flip_var.set(self._flip_h)
         self._rebuild_provider_menu()
         was_topmost = bool(self.root.attributes("-topmost"))
         self._context_menu_open = True

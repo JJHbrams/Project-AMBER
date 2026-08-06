@@ -70,7 +70,7 @@ class MemoryBus:
         session_id = self._get_session_id(session)
         return get_recent_messages(session_id, limit=limit)
 
-    def compose_prompt_context(
+    async def compose_prompt_context(
         self,
         user_query: str = "",
         *,
@@ -83,7 +83,7 @@ class MemoryBus:
     ) -> str:
         resolved_scope = self._resolve_scope_key(session, scope_key, project_key=project_key, cwd=cwd)
         resolved_project_key = project_key or resolve_project_key(cwd=cwd)
-        return build_system_prompt(user_query, caller=caller, scope_key=resolved_scope, project_key=resolved_project_key or "", is_session_init=is_session_init)
+        return await build_system_prompt(user_query, caller=caller, scope_key=resolved_scope, project_key=resolved_project_key or "", is_session_init=is_session_init)
 
     def maybe_save_episodic_memory(
         self,

@@ -33,7 +33,7 @@ def _detect_temporal(query: str) -> int:
     return 0
 
 
-def _precompute_query_vec(user_query: str) -> "list[float] | None":
+async def _precompute_query_vec(user_query: str) -> "list[float] | None":
     """user_query의 임베딩 벡터를 미리 계산한다.
     실패 시 None 반환 — 각 검색 함수가 직접 재시도하도록."""
     if not user_query:
@@ -42,13 +42,13 @@ def _precompute_query_vec(user_query: str) -> "list[float] | None":
         sg = get_semantic_graph()
         if not sg.enabled:
             return None
-        vec = sg.compute_embedding(user_query)
+        vec = await sg.compute_embedding(user_query)
         return vec if vec else None
     except Exception:
         return None
 
 
-def _episode_context_snippet(
+async def _episode_context_snippet(
     user_query: str,
     max_age_days: int = 0,
     top_k: int = 2,
@@ -61,7 +61,7 @@ def _episode_context_snippet(
         sg = get_semantic_graph()
         if not sg.enabled:
             return ""
-        hits = sg.episode_semantic_search(
+        hits = await sg.episode_semantic_search(
             user_query, top_k=top_k, threshold=0.25, max_age_days=max_age_days,
             query_vec=query_vec,
         )
@@ -73,7 +73,7 @@ def _episode_context_snippet(
         return ""
 
 
-def _wiki_reminder_snippet(
+async def _wiki_reminder_snippet(
     user_query: str,
     top_k: int = 3,
     threshold: float = 0.45,
@@ -94,7 +94,7 @@ def _wiki_reminder_snippet(
         if not sg.enabled:
             return ""
         # 제외 타입만큼 여유분을 더 가져온 뒤 필터링
-        hits = sg.semantic_search(
+        hits = await sg.semantic_search(
             user_query, top_k=top_k + len(exclude_types), threshold=threshold, query_vec=query_vec
         )
         filtered = [h for h in hits if h.get("type", "") not in exclude_types][:top_k]
@@ -110,7 +110,7 @@ def _wiki_reminder_snippet(
         return ""
 
 
-def _kg_context_snippet(
+async def _kg_context_snippet(
     user_query: str,
     top_k: int = 3,
     project_key: str = "",
@@ -153,7 +153,7 @@ def _kg_context_snippet(
         try:
             sg = get_semantic_graph()
             if sg.enabled:
-                hits = sg.semantic_search(user_query, top_k=top_k, threshold=0.35, query_vec=query_vec)
+                hits = await sg.semantic_search(user_query, top_k=top_k, threshold=0.35, query_vec=query_vec)
                 for h in hits:
                     line = f"[{h['type']}] {h['title']}: {h['summary'][:80]}"
                     if line not in snippets:
@@ -164,7 +164,7 @@ def _kg_context_snippet(
     return "\n".join(snippets)
 
 
-def build_system_prompt(user_query: str = "", caller: str = "all", scope_key: str = "", project_key: str = "", is_session_init: bool = False) -> str:
+async def build_system_prompt(user_query: str = "", caller: str = "all", scope_key: str = "", project_key: str = "", is_session_init: bool = False) -> str:
     identity = get_identity()
     persona = get_persona()
     themes = get_themes(5)
@@ -211,13 +211,13 @@ def build_system_prompt(user_query: str = "", caller: str = "all", scope_key: st
 
     # 기억 + KG — query 벡터 1번만 계산, project_key 직접 조회 우선, semantic search 보완
     memory_section = ""
-    query_vec = _precompute_query_vec(user_query)
-    kg_snippet = _kg_context_snippet(user_query, project_key=project_key, query_vec=query_vec)
+    query_vec = await _precompute_query_vec(user_query)
+    kg_snippet = await _kg_context_snippet(user_query, project_key=project_key, query_vec=query_vec)
     if user_query or kg_snippet:
         search_limit = int(get_cfg_value("memory.long_term.search_limit", 2))
         item_max = int(get_cfg_value("memory.long_term.item_max_chars", 100))
         max_age = _detect_temporal(user_query)
-        memories = search_memories(user_query, limit=search_limit, max_age_days=max_age) if user_query else []
+        memories = await search_memories(user_query, limit=search_limit, max_age_days=max_age) if user_query else []
 
         items = [m[:item_max] + ("..." if len(m) > item_max else "") for m in memories]
         if kg_snippet:
@@ -239,7 +239,7 @@ def build_system_prompt(user_query: str = "", caller: str = "all", scope_key: st
     if user_query and wiki_enabled and not is_session_init:
         wr_top_k = int(get_cfg_value("memory.wiki_reminder.top_k", 3))
         wr_threshold = float(get_cfg_value("memory.wiki_reminder.threshold", 0.45))
-        wr_snippet = _wiki_reminder_snippet(
+        wr_snippet = await _wiki_reminder_snippet(
             user_query, top_k=wr_top_k, threshold=wr_threshold, query_vec=query_vec
         )
         if wr_snippet:

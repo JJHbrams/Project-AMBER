@@ -94,9 +94,12 @@ a = Analysis(
         *_character_datas,
         *_embedding_model_datas,
         ('config\\overlay.yaml', 'config'),
+        # runtime_config(core/config/runtime_config.py)가 읽는 파일.
+        # 누락 시 resolve_runtime_path 가 못 찾아 tools.disabled 등이 조용히 무시된다.
+        ('config\\config.yaml', 'config'),
         *_tcl_tk_datas,
     ],
-    hiddenimports=['core.context.context_builder', 'core.storage.db', 'core.identity', 'core.memory', 'core.context.directives', 'core.identity.reflection', 'core.identity.curiosity', 'core.common.sanitizer', 'core.memory.bus', 'core.config.runtime_config', 'core.graph.semantic', 'core.graph.semantic.stm_promoter', 'core.observability.activity', 'core.context.project_scope', 'discord_bot', 'discord_bot.bot', 'tkinterweb', 'tkinterweb_tkhtml', 'mcp_server', 'kg_watcher'],
+    hiddenimports=['core.context.context_builder', 'core.storage.db', 'core.identity', 'core.memory', 'core.context.directives', 'core.identity.reflection', 'core.identity.curiosity', 'core.common.sanitizer', 'core.memory.bus', 'core.config.runtime_config', 'core.config.remote_tokens', 'core.graph.semantic', 'core.graph.semantic.stm_promoter', 'core.observability.activity', 'core.context.project_scope', 'discord_bot', 'discord_bot.bot', 'tkinterweb', 'tkinterweb_tkhtml', 'mcp_server', 'kg_watcher'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

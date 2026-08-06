@@ -28,6 +28,11 @@ summary: engram wiki 작성·편집 시 준수할 상세 규칙. 구조·경로�
 
 - 핵심 키워드만. timestamp 필요 시 파일명 앞에 `yymmdd_` 붙임.
 - `kg_add_note` title 파라미터 = 파일명 슬러그 (한국어·공백 금지, kebab-case 영문)
+- **title에 슬래시로 서브디렉토리 지정 불가** — 슬러그화 과정에서 제거되어 항상
+  flat한 파일명이 됨. 기존 프로젝트 하위에 배치하려면 `subdir` 파라미터를 쓸 것
+  (예: `note_type="project", subdir="001_TruviewCADMOM/log"`).
+  note_type에 경로를 욱여넣는 방식은 쓰지 말 것 — DB에 기록되는 실제 type이
+  NODE_TYPES 밖 값으로 오염돼 다음 kg_sync 때 "concept"로 강등된다.
 
 ## Frontmatter
 

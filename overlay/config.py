@@ -308,6 +308,41 @@ def set_ollama_model(model: str, sync_user: bool = False) -> str:
     return model
 
 
+def get_flip_horizontal(cfg: dict | None = None) -> bool:
+    if cfg is None:
+        cfg = load_cfg()
+    overlay_cfg = cfg.get("overlay", {}) if isinstance(cfg, dict) else {}
+    if not isinstance(overlay_cfg, dict):
+        overlay_cfg = {}
+    return bool(overlay_cfg.get("flip_horizontal", False))
+
+
+def set_flip_horizontal(value: bool) -> bool:
+    """캐릭터 좌우 반전 여부를 user.yaml에 영속화한다(설정창 체크박스·우클릭 메뉴 공용)."""
+    value = bool(value)
+    user = _safe_load_yaml(_USER_CONFIG_PATH)
+    overlay_cfg = user.get("overlay") if isinstance(user, dict) else None
+    if not isinstance(overlay_cfg, dict):
+        overlay_cfg = {}
+
+    if value:
+        overlay_cfg["flip_horizontal"] = True
+    else:
+        overlay_cfg.pop("flip_horizontal", None)
+
+    if overlay_cfg:
+        user["overlay"] = overlay_cfg
+    else:
+        user.pop("overlay", None)
+
+    _USER_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    _USER_CONFIG_PATH.write_text(
+        yaml.safe_dump(user, sort_keys=False, allow_unicode=False),
+        encoding="utf-8",
+    )
+    return value
+
+
 def normalize_chat_mode(mode: str | None) -> str:
     value = str(mode or "").strip().lower()
     if value in _SUPPORTED_CHAT_MODES:

@@ -26,6 +26,7 @@ from .config import (
     get_bubble_session_id,
     get_chat_mode,
     get_cli_provider,
+    get_flip_horizontal,
     get_ollama_model,
     get_permission_level,
     get_workdir,
@@ -36,6 +37,7 @@ from .config import (
     set_ollama_model,
 )
 from .settings_window import open_settings
+from .remote_tunnel import TunnelManager
 from .stm_server import STMServer
 from .bubble.bubble_manager import BubbleManager
 from .bubble.history_panel import HistoryPanel
@@ -301,6 +303,13 @@ class OverlayApp:
         self._quit_reason = "unknown"
         self._mcp_recovery_lock = threading.Lock()
         self._last_mcp_recovery_at = 0.0
+        # 원격 SSH 리버스 터널. 실제 연결은 _deferred_startup 에서 MCP 준비 후 시작한다.
+        self._tunnels = TunnelManager(
+            get_port=lambda: int((load_cfg().get("mcp") or {}).get("remote_port", 17386) or 17386),
+            get_auto_reconnect=lambda: bool(
+                (load_cfg().get("mcp") or {}).get("tunnel_auto_reconnect", False)
+            ),
+        )
         # Ollama 모델 목록 백그라운드 로드
         threading.Thread(target=_load_ollama_models, daemon=True).start()
 
@@ -775,8 +784,16 @@ class OverlayApp:
             log.warning("[mcp_http] 포트 %d 리스너는 있으나 /health 실패 — 신규 MCP 서버 기동 시도", port)
         # frozen 번들: 같은 exe 를 멀티콜(`--role mcp-server`)로 재실행 → conda python 불필요.
         # 개발(소스) 모드: conda python 으로 mcp_server.py 실행.
+        # 원격 인증 리스너는 명시적으로 켤 때만 연다. SSH 리버스 터널은 http_port 가
+        # 아니라 이 포트에 연결한다 — http_port 는 무인증이므로 터널에 노출하면 안 된다.
+        remote_args: list[str] = []
+        if bool(mcp_cfg.get("remote_enabled", False)):
+            remote_port = int(mcp_cfg.get("remote_port", port + 1))
+            remote_args = ["--remote-port", str(remote_port)]
+            log.info("[mcp_http] 원격 인증 리스너 활성 port=%d", remote_port)
+
         if getattr(sys, "frozen", False):
-            cmd = [sys.executable, "--role", "mcp-server", "--transport", transport, "--port", str(port)]
+            cmd = [sys.executable, "--role", "mcp-server", "--transport", transport, "--port", str(port), *remote_args]
             cwd = str(PROJECT_ROOT)
         else:
             py = _find_mcp_python()
@@ -784,7 +801,7 @@ class OverlayApp:
             if not py or not script:
                 log.warning("[mcp_http] Python 또는 mcp_server.py를 찾을 수 없어 MCP HTTP 서버 시작 스킵")
                 return None
-            cmd = [py, str(script), "--transport", transport, "--port", str(port)]
+            cmd = [py, str(script), "--transport", transport, "--port", str(port), *remote_args]
             cwd = str(script.parent)
         try:
             from core.config.runtime_config import get_db_root_dir
@@ -831,11 +848,36 @@ class OverlayApp:
         self._wait_mcp_ready(timeout=float(settings["ready_timeout_secs"]), port=int(settings["port"]))
         self._kg_watcher_proc = self._start_kg_watcher()
         self._dashboard_proc = self._start_dashboard()
+        # 원격 리스너가 떠 있어야 터널이 의미가 있으므로 MCP 준비 이후에 연다.
+        self._apply_tunnels()
         # 전역 SessionStart hook 을 현재 auto_inject 설정과 동기화한다(설치/제거 멱등).
         try:
             sync_sessionstart_hook(is_auto_inject_enabled())
         except Exception:
             log.exception("[overlay] SessionStart hook 동기화 실패")
+
+    def _apply_tunnels(self) -> None:
+        """설정의 mcp.tunnels 목록만 복원한다. 연결은 하지 않는다.
+
+        재빌드로 오버레이가 재시작돼도 대상 목록이 남아 있는 것이 목적이고,
+        연결 수립은 사용자가 설정 탭에서 [연결]을 눌러 로그인하며 한다.
+        """
+        try:
+            cfg = load_cfg()
+            mcp_cfg = cfg.get("mcp") or {}
+            if not bool(mcp_cfg.get("remote_enabled", False)):
+                self._tunnels.stop_all()
+                return
+            hosts = [
+                str(t.get("host")).strip()
+                for t in (mcp_cfg.get("tunnels") or [])
+                if isinstance(t, dict) and t.get("host")
+            ]
+            self._tunnels.register(hosts)
+            if hosts:
+                log.info("[tunnel] 대상 %d개 복원(연결 안 함): %s", len(hosts), ", ".join(hosts))
+        except Exception:
+            log.exception("[tunnel] 목록 복원 실패")
 
     def _start_dashboard(self) -> "subprocess.Popen | None":
         """engram_dashboard.py 를 streamlit으로 시작한다. 이미 실행 중이면 스킵."""
@@ -965,6 +1007,7 @@ class OverlayApp:
             on_saved=self._reload_config,
             on_get_ollama_models=_get_ollama_model_list_snapshot,
             on_reload_ollama_models=_reload_ollama_models,
+            tunnels=self._tunnels,
         )
 
     def _reload_config(self):
@@ -972,6 +1015,9 @@ class OverlayApp:
         cfg = load_cfg()
         new_provider = get_cli_provider(cfg)
         self._chat_mode = get_chat_mode(cfg)
+        self.character.set_flip(get_flip_horizontal(cfg))
+        # 터널 목록/자동 여부 변경을 즉시 반영한다.
+        self._apply_tunnels()
         # 기존 세션은 시작 시점 컨텍스트(페르소나/권한 수준)를 유지하므로,
         # 설정 저장 후에는 세션을 닫아 다음 채팅에서 최신 설정을 적용한다.
         self.chat.kill()
@@ -1346,6 +1392,12 @@ class OverlayApp:
             t.join(timeout=15)
         except Exception as e:
             log.warning("STM promote failed at quit: %s", e)
+        # 원격 터널 종료. 반드시 Popen 핸들로만 죽인다 — 이름(ssh.exe)으로 죽이면
+        # 사용자가 따로 열어둔 SSH 세션까지 함께 끊긴다.
+        try:
+            self._tunnels.stop_all()
+        except Exception:
+            log.exception("[tunnel] 종료 실패")
         # MCP HTTP 서버 종료
         self._terminate_managed_process("_mcp_http_proc", "mcp_http", "MCP HTTP 서버")
         # dashboard 종료 (overlay가 직접 시작한 경우에만)

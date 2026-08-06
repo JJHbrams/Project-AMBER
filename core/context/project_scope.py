@@ -56,6 +56,21 @@ def resolve_project_key(project_key: Optional[str] = None, cwd: Optional[str] = 
     return _project_key_from_path(project_root)
 
 
+def cwd_is_foreign(cwd: Optional[str]) -> bool:
+    """클라이언트가 준 cwd 가 이 서버 파일시스템에 실재하지 않는지 판정한다.
+
+    원격(SSH 리버스 터널) 클라이언트는 자기 쪽 경로를 보내는데 그 경로는 서버에 없다.
+    그러면 detect_project_root 가 None 을 반환하고 조용히 global 스코프로 폴백해
+    프로젝트별 기억이 한 바구니에 섞인다. 호출부에서 이 조건을 감지해 경고한다.
+    """
+    if not cwd:
+        return False
+    try:
+        return not Path(cwd).exists()
+    except OSError:
+        return True
+
+
 def detect_project_root(cwd: Optional[str] = None) -> Optional[Path]:
     raw_path = Path(cwd or os.getcwd())
     start_path = raw_path if raw_path.is_dir() else raw_path.parent

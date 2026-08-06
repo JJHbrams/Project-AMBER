@@ -108,16 +108,23 @@ _CACHED_CFG: dict[str, Any] | None = None
 _CACHED_SIG: tuple[int, int] | None = None
 
 
+# core/config/runtime_config.py → 프로젝트 루트는 세 단계 위.
+# 423db3a(core 패키지 재편)에서 이 파일이 core/ → core/config/ 로 옮겨졌는데
+# 아래 계산이 따라가지 않아 루트가 core/ 로 잡혔고, config/config.yaml 이
+# 소스·설치본 양쪽에서 조용히 무시됐다.
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+
+
 def _get_base_dir() -> Path:
     if getattr(sys, "frozen", False):
         return Path(sys.executable).parent
-    return Path(__file__).parent.parent
+    return _PROJECT_ROOT
 
 
 def _get_bundle_dir() -> Path:
     if getattr(sys, "_MEIPASS", None):
         return Path(sys._MEIPASS)
-    return Path(__file__).parent.parent
+    return _PROJECT_ROOT
 
 
 def resolve_runtime_path(rel: str = _DEFAULT_REL) -> Path:

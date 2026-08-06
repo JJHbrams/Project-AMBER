@@ -181,25 +181,27 @@ def save_memory(
 
 
 def _async_upsert_episode(episode_id: str, content: str, keywords: str, session_id: str, provider: str = "", model: str = ""):
-    """백그라운드 스레드에서 EpisodeNode를 KuzuDB에 upsert한다."""
+    """백그라운드 스레드(_embed_executor, 이벤트 루프 없음)에서 EpisodeNode를 KuzuDB에 upsert한다."""
     try:
         # core.graph.semantic 패키지는 stm_promoter ↔ store 순환이 있어 지연 import 유지.
-        from core.graph.semantic import get_semantic_graph
+        from core.graph.semantic import get_semantic_graph, run_sg_coro
 
         sg = get_semantic_graph()
         if sg.enabled:
-            sg.upsert_episode(
-                episode_id=episode_id,
-                content=content,
-                keywords=keywords,
-                session_id=session_id,
-                created_at=datetime.now(tz=timezone.utc).isoformat(),
+            run_sg_coro(
+                sg.upsert_episode(
+                    episode_id=episode_id,
+                    content=content,
+                    keywords=keywords,
+                    session_id=session_id,
+                    created_at=datetime.now(tz=timezone.utc).isoformat(),
+                )
             )
     except Exception:
         pass
 
 
-def search_memories(query: str, limit: int = 5, max_age_days: int = 0) -> List[str]:
+async def search_memories(query: str, limit: int = 5, max_age_days: int = 0) -> List[str]:
     """EpisodeNode 시맨틱 검색 (SemanticGraph 활성 시 우선), 아니면 키워드 겹침 기반 fallback.
 
     Args:
@@ -215,7 +217,7 @@ def search_memories(query: str, limit: int = 5, max_age_days: int = 0) -> List[s
 
             sg = get_semantic_graph()
             if sg.enabled:
-                hits = sg.episode_semantic_search(query, top_k=limit, threshold=0.25, max_age_days=max_age_days)
+                hits = await sg.episode_semantic_search(query, top_k=limit, threshold=0.25, max_age_days=max_age_days)
                 if hits:
                     return [h["content"] for h in hits]
         except Exception:
