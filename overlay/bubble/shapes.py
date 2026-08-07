@@ -669,8 +669,13 @@ def _html_widget(canvas: tk.Canvas):
                 return w
         except tk.TclError:
             pass
+    # vertical_scrollbar="auto": 내용이 할당 높이를 넘칠 때만 tkinterweb 자체
+    # AutoScrollbar가 나온다. 예전엔 False(=none)로 꺼놨는데, 호출부는 max_body_h로
+    # 높이를 잘라내면서 HTML 경로에선 스크롤 수단을 주지 않아 "잘리기만 하고 못 읽는"
+    # 상태가 됐다(tk.Text 폴백 경로만 캔버스 스크롤바를 붙였다).
+    # 가로는 계속 끔 — 줄바꿈은 tkhtml이 처리하므로 가로 스크롤은 생길 일이 없다.
     w = _HtmlFrame(
-        canvas, messages_enabled=False, vertical_scrollbar=False, horizontal_scrollbar=False,
+        canvas, messages_enabled=False, vertical_scrollbar="auto", horizontal_scrollbar=False,
         selection_enabled=True,
     )
     try:
@@ -679,6 +684,31 @@ def _html_widget(canvas: tk.Canvas):
         pass
     canvas._rich_html_frame = w
     return w
+
+
+def _sync_html_scrollbar(frame) -> None:
+    """HtmlFrame 세로 스크롤바의 표시 여부를 현재 yview 기준으로 강제 재계산한다.
+
+    tkinterweb의 AutoScrollbar는 tkhtml이 yscrollcommand를 쏠 때만 표시 여부를 다시
+    판단한다. 그런데 말풍선은 "내용 로드 → 나중에 place()로 최종 높이 확정" 순서라
+    높이가 줄어드는 시점에 그 콜백이 안 튀는 경우가 있다 — 그러면 내용이 넘치는데도
+    스크롤바가 grid remove 된 상태로 남는다. 여기서 한 번 밀어준다.
+
+    place() 직후에는 아직 레이아웃이 반영되지 않아 yview가 옛 값이다. after_idle 도
+    tkhtml 자체 리플로우보다 먼저 도는 경우가 있어(실측), 짧은 지연을 하나 더 둔다.
+    여러 번 불려도 결과는 같은 값으로 수렴하므로 중복 호출은 무해하다."""
+    def _apply():
+        try:
+            frame._vsb.set(*frame.html.yview())
+        except Exception:
+            pass
+
+    _apply()
+    for delay in (0, 60):
+        try:
+            frame.after(delay, _apply)
+        except Exception:
+            pass
 
 
 def _bubble_css(font, fg, bg, outline, code_bg, code_fg) -> str:
@@ -830,6 +860,11 @@ def draw_speech_bubble(
     else:
         _hide_scrollbar(canvas)
         widget.place(x=inner_x, y=inner_y, width=inner_w, height=inner_h)
+
+    if used_html:
+        # HTML 경로는 캔버스 스크롤바(_scrollbar_widget) 대신 HtmlFrame 자체 스크롤바를
+        # 쓴다. 높이는 위에서 max_body_h로 잘렸으므로, 넘치면 여기서 스크롤바가 나온다.
+        _sync_html_scrollbar(widget)
 
     widget.lift()
     draw_resize_grip(canvas, total_w, total_h, color=outline, corner=grip_corner, margin=TAIL_REACH)

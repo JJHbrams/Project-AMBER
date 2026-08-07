@@ -63,6 +63,21 @@ def _thinking_progress_text(tokens: int) -> str:
     return "깊이 고민하는 중…"
 
 
+def brief_thinking_text(thinking: str) -> str:
+    """실제 추론 텍스트를 '간략(brief)' 모드용 진행 문구로 축약한다.
+
+    bubble.thought_detail='brief' 일 때 쓴다. 레닥션된 경우와 같은 어휘를 쓰되,
+    토큰 수 대신 지금까지 누적된 추론 텍스트 길이로 구간을 나눈다 — 무엇을
+    생각하는지(주제)는 여기서도 지어내지 않는다. 그래야 CLI가 추론 텍스트를
+    주든 안 주든(레닥션) 사용자에게 보이는 모습이 같아진다."""
+    n = len(thinking or "")
+    if n < 200:
+        return "잠깐 생각 중…"
+    if n < 800:
+        return "생각을 정리하는 중…"
+    return "깊이 고민하는 중…"
+
+
 def stream_event_to_bubble_events(msg: StreamEvent, turn_seq: int) -> list[dict]:
     """content_block_delta의 text_delta/thinking_delta만 speech/thought로 변환."""
     event = msg.event or {}

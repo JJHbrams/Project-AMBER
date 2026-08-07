@@ -72,6 +72,16 @@ _PERMISSION_LEVEL_VALUE_TO_DISPLAY = {
     "confirm_risky": "위험한 작업만 확인",
     "confirm_always": "항상 확인",
 }
+_THOUGHT_DETAIL_OPTIONS = ["상세 — 추론 내용 표시 (CLI가 줄 때만)", "간략 — 상태 문구만"]
+_THOUGHT_DETAIL_DISPLAY_TO_VALUE = {
+    "상세 — 추론 내용 표시 (CLI가 줄 때만)": "full",
+    "간략 — 상태 문구만": "brief",
+}
+_THOUGHT_DETAIL_VALUE_TO_DISPLAY = {
+    "full": "상세 — 추론 내용 표시 (CLI가 줄 때만)",
+    "brief": "간략 — 상태 문구만",
+}
+
 _THEME_COLOR_ROWS = [
     ("speech_bg", "대화풍선 배경"),
     ("speech_outline", "대화풍선 테두리"),
@@ -898,6 +908,23 @@ class _SettingsWindow:
             ttk.Label(h_box, textvariable=lbl_var, width=8).grid(row=r, column=2, sticky="w", padx=(4, 8), pady=3)
             lbl_var.set("무제한" if default_val == 0 else f"{default_val:.2f}")
 
+        # ── 생각 풍선 표시 방식 ──
+        detail_row = height_row + 1
+        d_box = ttk.LabelFrame(f, text="생각 풍선 내용")
+        d_box.grid(row=detail_row, column=0, columnspan=3, sticky="we", padx=8, pady=(6, 4))
+        self._thought_detail_var = tk.StringVar()
+        ttk.Combobox(
+            d_box, textvariable=self._thought_detail_var,
+            values=_THOUGHT_DETAIL_OPTIONS, state="readonly", width=30,
+        ).grid(row=0, column=0, sticky="w", padx=8, pady=(6, 2))
+        ttk.Label(
+            d_box,
+            text="최신 Claude Code CLI는 추론 텍스트를 감추고 진행 상황만 보냅니다 — 이 경우\n"
+                 "'상세'로 둬도 \"생각을 정리하는 중…\" 같은 문구만 나옵니다(오버레이가 만들어낼 수\n"
+                 "없는 내용입니다). '간략'은 CLI가 내용을 주더라도 항상 짧은 문구로 고정합니다.",
+            foreground="gray", justify="left",
+        ).grid(row=1, column=0, sticky="w", padx=8, pady=(0, 6))
+
         f.columnconfigure(1, weight=1)
 
     def _preview_font_size(self) -> int:
@@ -1513,6 +1540,11 @@ class _SettingsWindow:
         self._speech_max_h_var.set(float(_nested_get(cfg, ["bubble", "speech_max_height_ratio"], 0.55) or 0))
         self._thought_max_h_var.set(float(_nested_get(cfg, ["bubble", "thought_max_height_ratio"], 0.30) or 0))
 
+        thought_detail = str(_nested_get(cfg, ["bubble", "thought_detail"], "full") or "full").strip().lower()
+        self._thought_detail_var.set(
+            _THOUGHT_DETAIL_VALUE_TO_DISPLAY.get(thought_detail, _THOUGHT_DETAIL_VALUE_TO_DISPLAY["full"])
+        )
+
         # 말풍선 탭 — 자동 페이드아웃 (ms → 초 표시)
         for key, dflt_on, dflt_ms in (("echo", True, 8000), ("speech", True, 20000), ("thought", True, 0)):
             self._fade_vars[key].set(bool(_nested_get(cfg, ["bubble", f"{key}_fade"], dflt_on)))
@@ -1835,6 +1867,10 @@ class _SettingsWindow:
             except (tk.TclError, ValueError):
                 val = default
             _nested_set(user, ["bubble", key], None if val == default else (val if val > 0 else 0))
+
+        # ── 말풍선 탭 — 생각 풍선 내용 (기본값 full 이면 저장 안 함) ──
+        thought_detail = _THOUGHT_DETAIL_DISPLAY_TO_VALUE.get(self._thought_detail_var.get().strip(), "full")
+        _nested_set(user, ["bubble", "thought_detail"], None if thought_detail == "full" else thought_detail)
 
         # ── 말풍선 탭 — 자동 페이드아웃 (기본값이면 저장 안 함) ──
         for key, dflt_on, dflt_ms in (("echo", True, 8000), ("speech", True, 20000), ("thought", True, 0)):

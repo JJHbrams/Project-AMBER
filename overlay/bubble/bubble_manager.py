@@ -20,7 +20,7 @@ session.py의 on_event 콜백을 root.after(0, lambda: manager.handle_event(ev))
 import tkinter as tk
 from typing import Callable
 
-from overlay.bubble import geometry, shapes
+from overlay.bubble import events, geometry, shapes
 from overlay.bubble.bubble_window import BubbleWindow
 from overlay.chat_window import terminal_font_size
 
@@ -46,6 +46,12 @@ _DEFAULTS = {
     # 최대 높이 — 모니터 작업영역 높이 대비 비율. 0이면 무제한.
     "speech_max_height_ratio": 0.55,
     "thought_max_height_ratio": 0.30,
+    # 생각풍선에 무엇을 보여줄지.
+    #   "full"  = 실제 추론 텍스트를 그대로(없으면 진행 문구로 폴백) — 기존 동작
+    #   "brief" = 항상 "생각 중…" 류 진행 문구만 (추론 텍스트가 와도 축약)
+    # CLI가 추론 텍스트를 레닥션하고 estimated_tokens만 주는 경우가 있어, full 이어도
+    # 환경에 따라 진행 문구만 보일 수 있다. brief 는 그 편차를 없애고 항상 간략하게 만든다.
+    "thought_detail": "full",
 }
 
 _TOOL_INDICATORS = {"running": "⏳", "ok": "✓", "error": "✗"}
@@ -793,6 +799,18 @@ class BubbleManager:
     def _tool_lines_text(self) -> str:
         return "\n".join(self._format_tool_line(tid) for tid in self._tool_order)
 
+    def _thought_display_text(self) -> str:
+        """생각풍선에 실제로 그릴 텍스트 — bubble.thought_detail 설정을 적용한다.
+
+        원문(self._thought_text)은 그대로 두고 표시할 때만 축약하므로, 설정을 바꾸면
+        (update_cfg → 재렌더) 스트리밍을 다시 받지 않아도 즉시 반영된다."""
+        text = self._thought_text
+        if not text:
+            return text
+        if str(self._cfg.get("thought_detail", "full")).strip().lower() == "brief":
+            return events.brief_thinking_text(text)
+        return text
+
     def _render_thought(self) -> None:
         tool_lines = self._tool_lines_text()
         if self._thought_dismissed or not (self._thought_text or tool_lines):
@@ -800,6 +818,7 @@ class BubbleManager:
             self._thought_rect = None
             self._render_speech()  # 생각풍선이 사라졌으니 말풍선이 비켜갈 이유도 없어짐
             return
+        thought_text = self._thought_display_text()
         char_x, char_y, char_w, char_h = self._get_char_rect()
         max_width = self._thought_width_override or self._default_width(char_x, char_y, char_w)
         font = (self._font_family(), max(9, self._font_size() - 1))
@@ -812,7 +831,7 @@ class BubbleManager:
                       else self._max_body_h(char_y, "thought_max_height_ratio"))
         # 각도는 아직 모르니 임시값(기본=위쪽)으로 그려서 크기만 잰다(폭/높이는 각도와 무관).
         w, h = shapes.draw_thought_bubble(
-            canvas, self._thought_text, max_width, font=font,
+            canvas, thought_text, max_width, font=font,
             fixed_body_w=self._thought_width_override, tool_lines=tool_lines, max_body_h=max_body_h, **thought_colors,
         )
 
@@ -825,7 +844,7 @@ class BubbleManager:
                     cur_x + w / 2, cur_y + h / 2, char_x + char_w / 2, char_y + char_h / 2
                 )
                 w, h = shapes.draw_thought_bubble(
-                    canvas, self._thought_text, max_width, angle_rad=angle_rad, font=font,
+                    canvas, thought_text, max_width, angle_rad=angle_rad, font=font,
                     fixed_body_w=self._thought_width_override, tool_lines=tool_lines, max_body_h=max_body_h, **thought_colors,
                 )
                 win.geometry(f"{w}x{h}")
@@ -849,7 +868,7 @@ class BubbleManager:
         # 꼬리는 항상 몸통 중심→캐릭터 중심 방향의 실제 각도를 향한다(대각선 포함).
         angle_rad = geometry.angle_to_point(x + w / 2, y + h / 2, char_x + char_w / 2, char_y + char_h / 2)
         w, h = shapes.draw_thought_bubble(
-            canvas, self._thought_text, max_width, angle_rad=angle_rad, font=font,
+            canvas, thought_text, max_width, angle_rad=angle_rad, font=font,
             fixed_body_w=self._thought_width_override, tool_lines=tool_lines, max_body_h=max_body_h, **thought_colors,
         )
         self._thought.place(x, y, w, h)

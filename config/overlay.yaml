@@ -77,6 +77,13 @@ bubble:
   speech_max_height_ratio: 0.55 # 응답 풍선: 화면 높이의 55%
   thought_max_height_ratio: 0.30 # 생각 풍선: 화면 높이의 30%
 
+  # 생각 풍선에 무엇을 보여줄지 (설정 창의 "말풍선" 탭에서 조절 가능)
+  #   full  = 실제 추론 텍스트를 그대로 표시 (기본)
+  #   brief = 항상 "생각 중…" 류 상태 문구만 표시 (추론 텍스트가 와도 축약)
+  # CLI가 추론 텍스트를 숨기고 진행 상황(estimated_tokens)만 보내는 경우가 있어,
+  # full 이어도 환경에 따라 상태 문구만 보일 수 있다. brief는 그 편차를 없앤다.
+  thought_detail: "full"
+
   # 글꼴/폰트 크기 (설정 창의 "말풍선" 탭에서 조절 가능)
   font_family: "Noto Sans KR Medium" # 대화/생각/입력 풍선 본문 글꼴
   # font_size: 0 이면 자동 — terminal.base_font_size/ref_screen_height 기준 TUI 스케일을

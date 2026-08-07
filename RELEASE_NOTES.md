@@ -1,5 +1,47 @@
 # Release Notes
 
+## 2026-08-07 - v1.1.1: Bubble Scrollbar, and a Bug That Wasn't Ours
+
+> Patch release on the **1.1 line** — no separate GitHub Release. The installer is attached to
+> the existing `Ver 1.1` release; grab the newest one from its **Assets**.
+
+### Fixed
+
+- **A response bubble taller than its maximum showed no scrollbar.** The content was clipped and
+  there was no way to reach the rest. Both scroll mechanisms were switched off while the height
+  was still being cut: the `needs_scroll` condition carried a `not used_html` guard, so the HTML
+  path never built the canvas scrollbar, and `HtmlFrame` was constructed with
+  `vertical_scrollbar=False`, disabling tkinterweb's own.
+
+  The tk.Text fallback has no such guard — so this **only looked correct on machines where
+  tkinterweb failed to load**. The working path was the backup path; both had the same bug.
+
+  Now created with `vertical_scrollbar="auto"`, plus an explicit re-evaluation once `place()`
+  fixes the final height. tkinterweb's `AutoScrollbar` only re-checks visibility when tkhtml
+  fires `yscrollcommand`, and that callback does not fire when the height *shrinks* — `after_idle`
+  also runs before tkhtml reflows, both confirmed by measurement, hence one short additional delay.
+
+### Added
+
+- **Thought-bubble detail option** (`bubble.thought_detail` = `full` | `brief`, exposed in
+  Settings → 말풍선). Default `full`, preserving existing behavior.
+
+  This started as "the thought bubble looks like an old version on this machine", and the
+  investigation ended somewhere else: **it is not our bug.** Current Claude Code CLI (2.1.223)
+  emits `thinking_delta` events with the `thinking` text blanked, sending only `estimated_tokens`
+  — measured directly (4 `thinking_delta` events, 0 characters of text, `estimated_tokens: 100`).
+  That number is what becomes "생각을 정리하는 중…". The overlay cannot reconstruct text it never
+  receives, so `full` cannot bring it back.
+
+  The split came from versions, not packaging per se: this machine runs the native standalone
+  binary, which updates itself, while an npm install waits for the user. One side simply got the
+  new behavior first — it was **ahead, not behind**.
+
+  So the option is useful in the opposite direction: `brief` pins the bubble to a short status
+  line even where the CLI does supply reasoning text, making machines look alike. Abbreviation
+  happens at render time (the original is kept), so saving takes effect immediately without a
+  restart.
+
 ## 2026-08-06 - v1.1.0: Remote Access, and the Embedding Call That Froze the Server
 
 > Folds in v1.0.0 (authenticated remote listener, SSH reverse tunnel access), which was built
