@@ -29,8 +29,8 @@ overlay:
 
   # 채팅 UI 모드
   # - tui: 기존 Windows Terminal(wt) 스폰 방식
-  # - bubble: 캐릭터 옆 말풍선 대화창 (실험적, 미구현 — 선택 시 tui로 폴백)
-  chat_mode: "tui"
+  # - bubble: 캐릭터 옆 말풍선 대화창 (기본)
+  chat_mode: "bubble"
 
   # 단축키
   hotkey: "alt+f12"

@@ -76,7 +76,7 @@ _USER_TEMPLATE = """\
 
 # overlay:
 #   char_height_ratio: 0.125
-#   chat_mode: "tui"  # tui | bubble (bubble은 실험적, 미구현 — 선택 시 tui로 폴백)
+#   chat_mode: "bubble"  # bubble(기본) | tui
 #   character:
 #     name: "smoke_chroma"
 #     sequence:
@@ -347,7 +347,7 @@ def normalize_chat_mode(mode: str | None) -> str:
     value = str(mode or "").strip().lower()
     if value in _SUPPORTED_CHAT_MODES:
         return value
-    return "tui"
+    return "bubble"
 
 
 def get_chat_mode(cfg: dict | None = None) -> str:

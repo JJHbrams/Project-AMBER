@@ -1483,7 +1483,7 @@ class _SettingsWindow:
             workdir = str(self._engram_user_cfg.get("workdir") or "")
         self._workdir_var.set(str(workdir))
 
-        chat_mode = normalize_chat_mode(_nested_get(cfg, ["overlay", "chat_mode"], "tui"))
+        chat_mode = normalize_chat_mode(_nested_get(cfg, ["overlay", "chat_mode"], "bubble"))
         self._chat_mode_var.set(_CHAT_MODE_VALUE_TO_DISPLAY.get(chat_mode, _CHAT_MODE_OPTIONS[0]))
 
         permission_level = normalize_permission_level(_nested_get(cfg, ["bubble", "permission_level"], "auto"))
@@ -1780,8 +1780,8 @@ class _SettingsWindow:
         _nested_set(user, ["cli", "workdir"], workdir or None)
 
         chat_mode_display = self._chat_mode_var.get().strip()
-        chat_mode = _CHAT_MODE_DISPLAY_TO_VALUE.get(chat_mode_display, "tui")
-        _nested_set(user, ["overlay", "chat_mode"], None if chat_mode == "tui" else chat_mode)
+        chat_mode = _CHAT_MODE_DISPLAY_TO_VALUE.get(chat_mode_display, "bubble")
+        _nested_set(user, ["overlay", "chat_mode"], None if chat_mode == "bubble" else chat_mode)
 
         permission_level_display = self._permission_level_var.get().strip()
         permission_level = _PERMISSION_LEVEL_DISPLAY_TO_VALUE.get(permission_level_display, "auto")

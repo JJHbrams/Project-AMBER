@@ -2,6 +2,14 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.1.2] — 2026-08-11
+
+### Changed
+
+- **말풍선 대화 모드를 기본값으로 전환** — 신규 설치 및 사용자 오버라이드가 없는
+  환경은 이제 `overlay.chat_mode: bubble`로 시작한다. 설정에서 TUI 모드를 명시적으로
+  선택하면 `overlay.user.yaml`에 `tui`를 저장해 기본값 변경 이후에도 선택을 유지한다.
+
 ## [1.1.1] — 2026-08-07
 
 말풍선 두 건. 하나는 진짜 버그였고, 하나는 우리 버그가 아니었다.

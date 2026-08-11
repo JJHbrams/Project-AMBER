@@ -1,5 +1,17 @@
 # Release Notes
 
+## 2026-08-11 - v1.1.2: Bubble Mode by Default
+
+> Patch release on the **1.1 line**. The installer is attached to the existing `Ver 1.1`
+> release; use the newest asset.
+
+### Changed
+
+- **New installations now start in bubble mode.** `overlay.chat_mode` defaults to `bubble`
+  when there is no user override.
+- **Explicit TUI selections remain stable.** Choosing TUI in Settings writes `tui` to
+  `overlay.user.yaml`, so the new default does not override that choice.
+
 ## 2026-08-07 - v1.1.1: Bubble Scrollbar, and a Bug That Wasn't Ours
 
 > Patch release on the **1.1 line** — no separate GitHub Release. The installer is attached to
