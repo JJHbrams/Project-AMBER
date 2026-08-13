@@ -16,6 +16,8 @@ class CopilotBootstrapInstallTests(unittest.TestCase):
         self.assertIn("config\\clients\\copilot.md", configure)
         self.assertIn('SetEnvironmentVariable("COPILOT_CUSTOM_INSTRUCTIONS_DIRS", $ShimDir, "User")', configure)
         self.assertIn('Source: "..\\config\\clients\\copilot.md"', iss)
+        self.assertIn('Source: "..\\config\\overlay.yaml"', iss)
+        self.assertIn('Source: "..\\config\\config.yaml"', iss)
 
     def test_wrapper_keeps_bootstrap_for_interactive_options(self):
         shims = (ROOT / "installer" / "modules" / "07_shims.ps1").read_text(encoding="utf-8-sig")

@@ -1,5 +1,19 @@
 # Release Notes
 
+## 2026-08-13 - v1.2.1: Frozen MCP Cold-Start Fix
+
+> Patch release on the **1.2 line**. Use this installer instead of v1.2.0.
+
+### Fixed
+
+- The first frozen MCP startup can take more than a minute while Windows scans newly installed
+  modules. The overlay previously used fallback health settings and repeatedly terminated the
+  healthy process before initialization completed.
+- MCP supervision settings now live in the configuration file actually read by the overlay, with
+  a 180-second startup grace period and a 120-second readiness timeout.
+- Runtime configuration is installed beside the executable, allowing packaging-only fixes without
+  rebuilding the full frozen Python bundle.
+
 ## 2026-08-13 - v1.2.0: Graph-Aware Memory Retrieval and Reliable Sync
 
 > Minor release built from development commit `0ef76be`. This release receives its own GitHub

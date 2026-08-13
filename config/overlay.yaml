@@ -223,6 +223,14 @@ mcp:
   # overlay.exe가 소유하는 지속 MCP HTTP(SSE) 서버
   # Copilot CLI / Gemini CLI 가 이 포트로 SSE 연결 (stdio 프로세스 대신)
   http_port: 17385
+  transport: "streamable-http"
+  # frozen 첫 실행은 OS/백신의 모듈 스캔으로 1분 이상 걸릴 수 있다.
+  # 준비 전 health monitor가 정상 프로세스를 재시작하지 않도록 충분히 유예한다.
+  healthcheck_interval_secs: 10
+  healthcheck_fail_threshold: 6
+  healthcheck_start_delay_secs: 180
+  restart_cooldown_secs: 30
+  ready_timeout_secs: 120
   # python_exe: ""  # overlay.exe(동결) 모드에서 자동 감지 안 되면 직접 지정
   # python_exe: "C:/Users/yourname/miniconda3/envs/intel_engram/python.exe"
   #

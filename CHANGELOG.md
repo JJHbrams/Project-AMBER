@@ -4,6 +4,16 @@ All notable changes to this project are documented in this file.
 
 ## Unreleased
 
+## [1.2.1] — 2026-08-13
+
+### Fixed
+
+- frozen MCP 첫 실행이 Windows 파일 스캔으로 늦어질 때 health monitor가 준비 중인
+  프로세스를 반복 종료하던 문제를 수정했다. 실제 감독 코드가 읽는
+  `config/overlay.yaml`에 시작 유예·실패 임계값을 배치하고, installer가 런타임
+  config를 exe 옆에 외부 파일로 배포해 Python exe 재빌드 없이도 설정을 교정할 수
+  있게 했다.
+
 ## [1.2.0] — 2026-08-13
 
 ### Added
