@@ -24,9 +24,6 @@
 Do not replace the `_internal` directory. This executable is compatible with the v1.2.1 installer
 bundle only.
 
-SHA-256:
-`E7A24B4CEFA9FA78BD79559FF2650AA04BCDDC089336C094DAAA9B5AF7991ECA`
-
 ## 2026-08-13 - v1.2.1: Frozen MCP Cold-Start Fix
 
 > Patch release on the **1.2 line**. Use this installer instead of v1.2.0.
