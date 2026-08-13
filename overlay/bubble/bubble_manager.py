@@ -214,14 +214,21 @@ class BubbleManager:
         # 색과 구분되게 input 팔레트를 쓴다.
         fixed_w = max(w0 - shapes.TAIL_REACH * 2, 60)
         font = (self._font_family(), self._font_size())
-        angle_rad = geometry.angle_to_point(x + w0 / 2, y + h0 / 2, char_x + char_w / 2, char_y + char_h / 2)
+        # 먼저 크기만 구한 뒤 실제 최종 위치에서 모니터 하단 중앙을 향하도록 다시 그린다.
         w, h = shapes.draw_speech_bubble(
-            canvas, self._echo_text, fixed_w, angle_rad=angle_rad, font=font, fixed_body_w=fixed_w,
+            canvas, self._echo_text, fixed_w, font=font, fixed_body_w=fixed_w,
             fg=self._theme["speech_fg"], bg=self._theme["input_bg"], outline=self._theme["input_outline"],
         )
         # 입력창 바닥을 기준으로 위로 자라게 앵커(입력창은 화면 하단에 있었으므로).
         mon_rect = geometry.get_monitor_work_rect(char_x, char_y)
         nx, ny = geometry.clamp_rect(int(x), int(y + h0 - h), w, h, mon_rect)
+        monitor_rect = geometry.get_monitor_rect(char_x + char_w // 2, char_y + char_h // 2)
+        target_x, target_y = geometry.monitor_bottom_center_pixel(monitor_rect)
+        angle_rad = geometry.angle_to_point(nx + w / 2, ny + h / 2, target_x, target_y)
+        w, h = shapes.draw_speech_bubble(
+            canvas, self._echo_text, fixed_w, angle_rad=angle_rad, font=font, fixed_body_w=fixed_w,
+            fg=self._theme["speech_fg"], bg=self._theme["input_bg"], outline=self._theme["input_outline"],
+        )
         self._echo.place(nx, ny, w, h)
 
     def refresh_positions(self) -> None:

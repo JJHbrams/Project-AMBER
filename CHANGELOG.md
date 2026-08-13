@@ -4,6 +4,14 @@ All notable changes to this project are documented in this file.
 
 ## Unreleased
 
+### Fixed
+
+- **v1.2.1 portable exe hotfix** — frozen 설치본에서 `~/.engram/engram-overlay.cmd`가
+  없어도 현재 `engram-overlay.exe`를 자동 시작 바로가기 대상으로 사용한다. installer가
+  이미 만든 바로가기는 설정 저장 시 불필요하게 다시 만들지 않는다.
+- 입력·에코 말풍선 꼬리가 캐릭터가 아닌 해당 모니터 하단 중앙을 향하도록 조정해
+  사용자 발화와 캐릭터 응답의 화자 방향을 구분한다.
+
 ## [1.2.1] — 2026-08-13
 
 ### Fixed

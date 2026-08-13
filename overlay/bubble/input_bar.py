@@ -166,9 +166,11 @@ class InputBar:
 
         grip_corner = "top-left" if tail_side == "right" else "top-right"
         self._bubble.set_grip_corner(grip_corner)
-        # 꼬리는 항상 몸통 중심→캐릭터 중심 방향의 실제 각도를 향한다(대각선 포함) —
-        # grip_corner만 tail_side(이진)를 그대로 써서 리사이즈 앵커와 분리한다.
-        angle_rad = geometry.angle_to_point(x + w / 2, y + h / 2, char_x + char_w / 2, char_y + char_h / 2)
+        # 입력은 사용자의 발화이므로 캐릭터가 아니라, 캐릭터가 있는 디스플레이의
+        # 실제 마지막 픽셀 행 중앙을 향하게 해 응답 풍선과 화자 방향을 구분한다.
+        monitor_rect = geometry.get_monitor_rect(char_x + char_w // 2, char_y + char_h // 2)
+        target_x, target_y = geometry.monitor_bottom_center_pixel(monitor_rect)
+        angle_rad = geometry.angle_to_point(x + w / 2, y + h / 2, target_x, target_y)
         w, h = shapes.draw_input_shell(canvas, body_w, body_h, angle_rad=angle_rad, grip_corner=grip_corner, **input_colors)
 
         self._bubble.place(x, y, w, h)

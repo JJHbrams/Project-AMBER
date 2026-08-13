@@ -1,5 +1,32 @@
 # Release Notes
 
+## 2026-08-13 - v1.2.1 Portable EXE Hotfix 1
+
+> This is an executable-only hotfix for an existing **v1.2.1** installation. It also contains
+> the input/echo bubble speaker-direction adjustment built from development commit `c1181c5`.
+
+### Fixed
+
+- Settings opened from the overlay context menu no longer require
+  `~/.engram/engram-overlay.cmd` when saving autostart settings. Frozen installations use the
+  currently running `engram-overlay.exe`, and an installer-created startup shortcut is preserved.
+- Input and echo bubble tails point toward the bottom-center of their monitor, visually separating
+  user speech from character responses.
+
+### Apply the Hotfix
+
+1. Exit Engram Overlay from its context menu.
+2. Open `%LOCALAPPDATA%\Programs\EngramOverlay\dist\engram-overlay`.
+3. Back up the existing `engram-overlay.exe`.
+4. Replace it with the downloaded `EngramOverlay_1.2.1_hotfix1.exe`.
+5. Rename the replacement to `engram-overlay.exe`, then start it.
+
+Do not replace the `_internal` directory. This executable is compatible with the v1.2.1 installer
+bundle only.
+
+SHA-256:
+`E7A24B4CEFA9FA78BD79559FF2650AA04BCDDC089336C094DAAA9B5AF7991ECA`
+
 ## 2026-08-13 - v1.2.1: Frozen MCP Cold-Start Fix
 
 > Patch release on the **1.2 line**. Use this installer instead of v1.2.0.

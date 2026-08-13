@@ -12,9 +12,8 @@ import win32api
 
 def angle_to_point(from_x: float, from_y: float, to_x: float, to_y: float) -> float:
     """(from_x, from_y)에서 (to_x, to_y)를 향하는 각도(라디안, 화면 좌표계 —
-    0=오른쪽, 양수는 시계방향/아래쪽) — 말풍선 몸통 중심에서 캐릭터 중심을 향한
-    꼬리 방향을 매 렌더마다 새로 계산하는 데 쓴다(위치가 바뀔 때마다 갱신되어야
-    하므로 저장하지 않고 그때그때 구함)."""
+    0=오른쪽, 양수는 시계방향/아래쪽) — 말풍선 몸통 중심에서 대상 지점을 향한
+    꼬리 방향을 매 렌더마다 새로 계산하는 데 쓴다."""
     return math.atan2(to_y - from_y, to_x - from_x)
 
 
@@ -26,6 +25,22 @@ def get_monitor_work_rect(x: int, y: int) -> tuple[int, int, int, int]:
         return wl, wt, wr, wb
     except Exception:
         return 0, 0, 1920, 1080
+
+
+def get_monitor_rect(x: int, y: int) -> tuple[int, int, int, int]:
+    """주어진 논리 좌표를 포함하는 모니터 전체 영역(left, top, right, bottom)."""
+    try:
+        hmon = win32api.MonitorFromPoint((x, y), 2)
+        left, top, right, bottom = win32api.GetMonitorInfo(hmon)["Monitor"]
+        return left, top, right, bottom
+    except Exception:
+        return 0, 0, 1920, 1080
+
+
+def monitor_bottom_center_pixel(mon_rect: tuple[int, int, int, int]) -> tuple[int, int]:
+    """모니터 전체 영역에서 중앙에 가장 가까운 마지막 픽셀 좌표."""
+    left, _, right, bottom = mon_rect
+    return (left + right - 1) // 2, bottom - 1
 
 
 def clamp_rect(x: int, y: int, w: int, h: int, mon_rect: tuple[int, int, int, int]) -> tuple[int, int]:

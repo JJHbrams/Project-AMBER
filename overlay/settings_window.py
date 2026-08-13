@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 import tkinter as tk
 import tkinter.ttk as ttk
 from pathlib import Path
@@ -122,6 +123,10 @@ _OVERLAY_EXE: Path | None = None  # resolved lazily
 def _resolve_overlay_target() -> Path | None:
     if _OVERLAY_CMD.exists():
         return _OVERLAY_CMD
+    if getattr(sys, "frozen", False):
+        current_exe = Path(sys.executable)
+        if current_exe.exists():
+            return current_exe
     global _OVERLAY_EXE
     if _OVERLAY_EXE and _OVERLAY_EXE.exists():
         return _OVERLAY_EXE
@@ -134,9 +139,13 @@ def _is_autostart_enabled() -> bool:
 
 def _set_autostart(enabled: bool) -> None:
     if enabled:
+        # 설치 직후에는 installer가 이미 유효한 바로가기를 만든다. 설정을 저장할
+        # 때마다 이를 재생성하면 PATH용 .cmd가 없는 배포 형태에서 불필요하게 실패한다.
+        if _STARTUP_LINK.exists():
+            return
         target = _resolve_overlay_target()
         if target is None:
-            raise RuntimeError("engram-overlay.cmd 를 찾을 수 없습니다.\n" ".engram/ 폴더를 확인하세요.")
+            raise RuntimeError("자동 시작에 사용할 Engram Overlay 실행 파일을 찾을 수 없습니다.")
         _STARTUP_DIR.mkdir(parents=True, exist_ok=True)
         ps = (
             f"$s = New-Object -ComObject WScript.Shell; "
