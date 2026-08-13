@@ -103,8 +103,12 @@ def resolve_kg_node_id(project_key: str) -> str | None:
     """
     # 1) config 직접 매핑
     mapping = get_cfg_value("memory.scope.kg_node_map", {})
-    if isinstance(mapping, dict) and project_key in mapping:
-        return mapping[project_key]
+    key_no_digest = re.sub(r"-[0-9a-f]{8}$", "", project_key or "")
+    if isinstance(mapping, dict):
+        if project_key in mapping:
+            return mapping[project_key]
+        if key_no_digest in mapping:
+            return mapping[key_no_digest]
 
     if not project_key:
         return None
@@ -121,7 +125,6 @@ def resolve_kg_node_id(project_key: str) -> str | None:
             return re.sub(r"[-_]", "", s.lower())
 
         # project_key에서 digest(마지막 8자 hex) 제거
-        key_no_digest = re.sub(r"-[0-9a-f]{8}$", "", project_key)
         key_norm = _normalize(key_no_digest)
 
         for row in rows:
@@ -138,4 +141,3 @@ def resolve_kg_node_id(project_key: str) -> str | None:
 def _slugify(value: str) -> str:
     collapsed = re.sub(r"[^a-zA-Z0-9]+", "-", (value or "").strip().lower()).strip("-")
     return collapsed or ""
-

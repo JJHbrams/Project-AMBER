@@ -1,0 +1,28 @@
+{
+  "cases": [
+    {
+      "name": "direct-p0-integrity",
+      "query": "그래프 탐색은 최대 몇 홉으로 제한하기로 했지?",
+      "project_key": "ProjectIntelContunuum",
+      "expected_kg_ids_any": [
+        "graph-memory-roadmap",
+        "iccc-메모리-레이어-설계-논의"
+      ]
+    },
+    {
+      "name": "paraphrase-episode-kg-integrity",
+      "query": "에피소드와 지식 그래프 연결 무결성을 어떤 기준으로 확인했지?",
+      "project_key": "ProjectIntelContunuum",
+      "expected_kg_ids_any": [
+        "graph-memory-roadmap"
+      ]
+    },
+    {
+      "name": "medical-ei-negative-control",
+      "query": "의료 환경에서 감성지능 EI를 측정하는 임상 연구",
+      "project_key": "ProjectIntelContunuum",
+      "forbid_episode_hits": true,
+      "forbid_graph_hits": true
+    }
+  ]
+}

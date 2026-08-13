@@ -11,6 +11,8 @@ import asyncio
 import socket
 import threading
 import time
+import logging
+from datetime import datetime, timezone
 import uvicorn
 from starlette.responses import Response
 
@@ -37,7 +39,7 @@ from core.identity import (
     seed_persona,
     get_persona_status,
 )
-from core.memory import save_message, save_memory, search_memories, list_memories, upsert_working_memory
+from core.memory import save_message, save_memory, search_memories, search_memory_hits, list_memories, upsert_working_memory
 from core.identity import add_curiosity, get_pending_curiosities, address_curiosity, dismiss_curiosity
 from core.tutorial import (
     get_tutorial_status,
@@ -396,6 +398,26 @@ def _find_latest_open_session_id(scope_key: str = "") -> str:
         return str(row[0])
     except Exception:
         return ""
+
+
+def _close_scoped_session(scope_key: str, summary: str, session_id: str = "") -> str:
+    """scope에서 확인된 세션만 종료하고 실제 종료된 ID를 반환한다."""
+    from core.memory import close_session as _close_session
+
+    result_stm = _stm_post(
+        "/stm/session/close",
+        {
+            "session_id": int(session_id) if session_id else None,
+            "scope_key": scope_key,
+            "summary": summary,
+        },
+    )
+    if result_stm:
+        return str(result_stm.get("closed_session_id", "") or "").strip()
+    if session_id:
+        _close_session(int(session_id), summary)
+        return str(session_id)
+    return ""
 
 
 def _tutorial_step_mismatch_response(expected_step: str, tutorial_snapshot: dict) -> dict:
@@ -1463,55 +1485,112 @@ def engram_start_session(scope_key: str = "", project_key: str = "", projects: s
     return {"session_id": session.session_id, "scope_key": session.scope_key, "projects": parsed_keys or ["general"]}
 
 
-def _schedule_vault_sync() -> None:
-    """close_session 후 vault .md → KG DB 백그라운드 동기화 (비차단)."""
-    import threading
-
-    def _run():
-        try:
-            from pathlib import Path
-            from core.graph.knowledge import get_kg, iter_wiki_md_files
-            from core.graph.semantic import get_semantic_graph
-            from core.config.runtime_config import get_db_root_dir
-
-            docs_dir = Path(get_db_root_dir()) / "docs"
-            if not docs_dir.exists():
-                return
-            kg = get_kg()
-            for f in iter_wiki_md_files(docs_dir):
-                kg.sync_file(f, docs_dir)
-            kg.resolve_links(docs_dir)
-            kg.prune_missing(docs_dir)
-            from core.graph.semantic import run_sg_coro
-
-            run_sg_coro(get_semantic_graph().sync_from_kg())
-        except Exception:
-            pass
-
-    t = threading.Thread(target=_run, daemon=True)
-    t.start()
-
-
-def _schedule_memories_sync() -> None:
-    """close_session 후 SQLite memories(LTM) → KuzuDB EpisodeNode 백그라운드 동기화 (비차단)."""
-    import threading
-
-    def _run():
-        try:
-            _sync_memories_incremental(cancel_event=None)
-        except Exception:
-            pass
-
-    t = threading.Thread(target=_run, daemon=True)
-    t.start()
-
-
 _post_session_sync_running = threading.Event()
 _sync_cancel = threading.Event()  # 워치독이 세트하면 진행 중인 sync가 조기 종료
 _sync_start_time: float = 0.0  # 워치독 경과 시간 계산용 (0.0 = 미실행)
 _sync_gate = threading.Event()  # get_context 호출 시 열림 → sync 스케줄 시 닫힘
-_last_sync_completed_at: float = 0.0  # cooldown 계산용
+_last_sync_completed_at: float = 0.0  # 마지막 성공 sync cooldown 계산용
 _MEMORIES_SYNC_STATE_FILENAME = "memories_sync_state.json"
+_SYNC_STATUS_FILENAME = "sync_status.json"
+_SYNC_STATUS_LOCK = threading.RLock()
+_SYNC_SCHEDULE_LOCK = threading.RLock()
+_SYNC_STATUS: dict | None = None
+_active_sync_run_id: str | None = None
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _sync_status_path() -> str:
+    return os.path.join(get_db_root_dir(), "temp", _SYNC_STATUS_FILENAME)
+
+
+def _empty_sync_status() -> dict:
+    return {
+        "state": "idle",
+        "run_id": None,
+        "current_stage": None,
+        "started_at": None,
+        "finished_at": None,
+        "last_success_at": None,
+        "last_error_stage": None,
+        "last_error": None,
+        "checkpoint_id": 0,
+        "sqlite_max_memory_id": 0,
+        "kuzu_episode_count": 0,
+        "drift": {},
+        "stages": {},
+        "last_schedule": None,
+    }
+
+
+def _atomic_write_json(path: str, payload: dict) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp_path = f"{path}.{_uuid.uuid4().hex}.tmp"
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, path)
+    finally:
+        if os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                logging.getLogger(__name__).warning("임시 sync 상태 파일 삭제 실패: %s", tmp_path, exc_info=True)
+
+
+def _load_sync_status() -> dict:
+    global _SYNC_STATUS
+    with _SYNC_STATUS_LOCK:
+        if _SYNC_STATUS is not None:
+            return dict(_SYNC_STATUS)
+        status = _empty_sync_status()
+        path = _sync_status_path()
+        if os.path.exists(path):
+            try:
+                with open(path, encoding="utf-8") as f:
+                    saved = json.load(f)
+                if isinstance(saved, dict):
+                    status.update(saved)
+            except (OSError, ValueError, TypeError):
+                logging.getLogger(__name__).warning("sync 상태 파일 읽기 실패: %s", path, exc_info=True)
+        if status.get("state") in {"scheduled", "running"}:
+            finished_at = _now_iso()
+            status.update(
+                state="failed",
+                finished_at=finished_at,
+                last_error_stage=status.get("current_stage") or "scheduler",
+                last_error="sync process interrupted before completion",
+            )
+            try:
+                _atomic_write_json(path, status)
+            except Exception:
+                logging.getLogger(__name__).exception("중단된 sync 상태 복구 저장 실패: %s", path)
+        _SYNC_STATUS = status
+        return dict(status)
+
+
+def _save_sync_status(status: dict) -> dict:
+    global _SYNC_STATUS
+    with _SYNC_STATUS_LOCK:
+        merged = _empty_sync_status()
+        merged.update(status)
+        _SYNC_STATUS = merged
+        try:
+            _atomic_write_json(_sync_status_path(), merged)
+        except Exception:
+            logging.getLogger(__name__).exception("sync 상태 파일 저장 실패: %s", _sync_status_path())
+        return dict(merged)
+
+
+def _update_sync_status(**changes) -> dict:
+    with _SYNC_STATUS_LOCK:
+        status = _load_sync_status()
+        status.update(changes)
+        return _save_sync_status(status)
 
 
 def _memories_sync_state_path() -> str:
@@ -1525,32 +1604,25 @@ def _load_memories_sync_checkpoint() -> int:
             payload = json.load(f)
         last_memory_id = int(payload.get("last_memory_id", 0))
         return max(0, last_memory_id)
-    except Exception:
+    except FileNotFoundError:
+        return 0
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        logging.getLogger(__name__).warning("memories sync 체크포인트 읽기 실패: %s", path, exc_info=True)
         return 0
 
 
 def _save_memories_sync_checkpoint(last_memory_id: int) -> None:
-    if last_memory_id <= 0:
-        return
     path = _memories_sync_state_path()
-    try:
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        tmp_path = f"{path}.tmp"
-        with open(tmp_path, "w", encoding="utf-8") as f:
-            json.dump(
-                {
-                    "last_memory_id": int(last_memory_id),
-                    "updated_at": int(time.time()),
-                },
-                f,
-                ensure_ascii=False,
-            )
-        os.replace(tmp_path, path)
-    except Exception:
-        pass
+    _atomic_write_json(
+        path,
+        {
+            "last_memory_id": max(0, int(last_memory_id)),
+            "updated_at": _now_iso(),
+        },
+    )
 
 
-def _sync_memories_incremental(cancel_event: threading.Event | None = None) -> tuple[int, int]:
+def _sync_memories_incremental(cancel_event: threading.Event | None = None) -> dict:
     """memories를 체크포인트 기반으로 증분 동기화한다.
     SemanticGraph는 코루틴이라, 이벤트 루프 없는 이 호출부(백그라운드 스레드) 전체를
     run_sg_coro로 한 번만 감싼다(행마다 asyncio.run을 반복하지 않도록)."""
@@ -1558,14 +1630,57 @@ def _sync_memories_incremental(cancel_event: threading.Event | None = None) -> t
 
     sg = get_semantic_graph()
     if not sg.enabled:
-        return 0, _load_memories_sync_checkpoint()
+        checkpoint = _load_memories_sync_checkpoint()
+        return {
+            "status": "skipped",
+            "reason": "semantic_graph_disabled",
+            "processed": 0,
+            "checkpoint_id": checkpoint,
+        }
 
     return run_sg_coro(_sync_memories_incremental_async(sg, cancel_event))
 
 
-async def _sync_memories_incremental_async(sg, cancel_event: threading.Event | None = None) -> tuple[int, int]:
+async def _scan_memory_drift(sg) -> dict:
+    conn = get_connection()
+    try:
+        canonical_ids = [int(row[0]) for row in conn.execute("SELECT id FROM memories ORDER BY id").fetchall()]
+    finally:
+        conn.close()
+
+    sqlite_max = max(canonical_ids, default=0)
+    saved_checkpoint = _load_memories_sync_checkpoint()
+    reconciliation = await sg.reconcile_episodes([str(memory_id) for memory_id in canonical_ids], apply=False)
+    missing_ids = sorted(int(memory_id) for memory_id in reconciliation.get("missing_ids", []))
+    if missing_ids:
+        effective_checkpoint = max(0, min(missing_ids) - 1)
+    else:
+        effective_checkpoint = sqlite_max
+    effective_checkpoint = min(effective_checkpoint, sqlite_max)
+    _save_memories_sync_checkpoint(effective_checkpoint)
+    return {
+        "checkpoint_id": effective_checkpoint,
+        "saved_checkpoint_id": saved_checkpoint,
+        "sqlite_max_memory_id": sqlite_max,
+        "kuzu_episode_count": int(reconciliation.get("episode_count_before", 0)),
+        "drift": {
+            "missing_ids": [str(memory_id) for memory_id in reconciliation.get("missing_ids", [])],
+            "stale_ids": [str(memory_id) for memory_id in reconciliation.get("stale_ids", [])],
+            "unlinked_episode_ids": [
+                str(memory_id) for memory_id in reconciliation.get("unlinked_episode_ids", [])
+            ],
+        },
+    }
+
+
+async def _sync_memories_incremental_async(
+    sg,
+    cancel_event: threading.Event | None = None,
+    scan_result: dict | None = None,
+) -> dict:
     batch_size = max(50, int(get_cfg_value("sync.memories_batch_size", 300)))
-    checkpoint_id = _load_memories_sync_checkpoint()
+    scan = scan_result or await _scan_memory_drift(sg)
+    checkpoint_id = int(scan["checkpoint_id"])
     last_synced_id = checkpoint_id
     processed = 0
 
@@ -1573,7 +1688,13 @@ async def _sync_memories_incremental_async(sg, cancel_event: threading.Event | N
     try:
         while True:
             if cancel_event is not None and cancel_event.is_set():
-                break
+                _save_memories_sync_checkpoint(last_synced_id)
+                return {
+                    **scan,
+                    "status": "cancelled",
+                    "processed": processed,
+                    "checkpoint_id": last_synced_id,
+                }
 
             rows = conn.execute(
                 "SELECT id, session_id, content, keywords, created_at " "FROM memories WHERE id > ? ORDER BY id LIMIT ?",
@@ -1584,15 +1705,31 @@ async def _sync_memories_incremental_async(sg, cancel_event: threading.Event | N
 
             for row in rows:
                 if cancel_event is not None and cancel_event.is_set():
-                    break
+                    _save_memories_sync_checkpoint(last_synced_id)
+                    return {
+                        **scan,
+                        "status": "cancelled",
+                        "processed": processed,
+                        "checkpoint_id": last_synced_id,
+                    }
                 row_id = int(row[0] or 0)
-                await sg.upsert_episode(
+                upserted = await sg.upsert_episode(
                     episode_id=str(row_id),
                     content=row[2] or "",
                     keywords=row[3] or "",
                     session_id=str(row[1] or ""),
                     created_at=row[4] or "",
                 )
+                if not upserted:
+                    _save_memories_sync_checkpoint(last_synced_id)
+                    return {
+                        **scan,
+                        "status": "failed",
+                        "processed": processed,
+                        "checkpoint_id": last_synced_id,
+                        "failed_memory_id": row_id,
+                        "error": f"upsert_episode returned False for memory {row_id}",
+                    }
                 if row_id > last_synced_id:
                     last_synced_id = row_id
                 processed += 1
@@ -1606,7 +1743,12 @@ async def _sync_memories_incremental_async(sg, cancel_event: threading.Event | N
     finally:
         conn.close()
 
-    return processed, last_synced_id
+    return {
+        **scan,
+        "status": "success",
+        "processed": processed,
+        "checkpoint_id": last_synced_id,
+    }
 
 
 def _sync_watchdog_loop() -> None:
@@ -1616,9 +1758,12 @@ def _sync_watchdog_loop() -> None:
     _logger = _log.getLogger(__name__)
     while True:
         time.sleep(10)
-        if _post_session_sync_running.is_set() and _sync_start_time > 0:
+        with _SYNC_SCHEDULE_LOCK:
+            running = _post_session_sync_running.is_set()
+            start_time = _sync_start_time
+        if running and start_time > 0:
             timeout = get_cfg_value("sync.watchdog_timeout_secs", 300)
-            elapsed = time.monotonic() - _sync_start_time
+            elapsed = time.monotonic() - start_time
             if elapsed > timeout:
                 _logger.warning(
                     "sync watchdog: %.0fs 초과 (timeout=%ds) — 강제 취소",
@@ -1632,101 +1777,287 @@ _sync_watchdog_thread = threading.Thread(target=_sync_watchdog_loop, daemon=True
 _sync_watchdog_thread.start()
 
 
-def _schedule_post_session_sync() -> None:
+class _SyncCancelled(Exception):
+    pass
+
+
+def _schedule_post_session_sync() -> dict:
     """close_session 후 vault KG sync → memories sync를 백그라운드에서 순차 실행.
 
     프로그래밍 가드 (LLM 지시 미준수와 무관하게 작동):
       1. **sync gate**: get_context/get_context_once가 호출된 세션(오케스트레이터)만 통과.
          subagent는 get_context를 호출하지 않으므로 gate가 닫혀 있어 자동 차단됨.
-      2. **cooldown**: 마지막 sync 완료 후 cooldown_secs 이내 재실행 방지.
+      2. **cooldown**: 마지막 성공 sync 완료 후 cooldown_secs 이내 재실행 방지.
       3. **단일 실행 guard**: 이미 실행 중이면 skip (unbounded 스레드 생성 방지).
       4. **TOCTOU 수정**: _post_session_sync_running.set()을 t.start() 이전에 호출.
     """
-    global _sync_start_time, _last_sync_completed_at
-    import logging as _log
+    global _sync_start_time, _active_sync_run_id
+    _logger = logging.getLogger(__name__)
 
-    _logger = _log.getLogger(__name__)
+    def _skip(reason: str) -> dict:
+        _update_sync_status(last_schedule={"scheduled": False, "reason": reason, "at": _now_iso()})
+        return {"scheduled": False, "reason": reason}
 
-    # 가드 1: sync gate — get_context를 호출한 세션이 아니면 차단
-    if not _sync_gate.is_set():
-        _logger.debug("_schedule_post_session_sync: sync gate 닫힘 (get_context 미호출 세션) — 스킵")
-        return
+    with _SYNC_SCHEDULE_LOCK:
+        # 가드 1: sync gate — get_context를 호출한 세션이 아니면 차단
+        if not _sync_gate.is_set():
+            _logger.debug("_schedule_post_session_sync: sync gate 닫힘 (get_context 미호출 세션) — 스킵")
+            return _skip("gate_closed")
 
-    # 가드 2: cooldown 윈도우
-    cooldown = get_cfg_value("sync.cooldown_secs", 120)
-    now = time.monotonic()
-    if now - _last_sync_completed_at < cooldown:
-        _logger.debug(
-            "_schedule_post_session_sync: cooldown 중 (%.0fs / %ds) — 스킵",
-            now - _last_sync_completed_at,
-            cooldown,
+        # 가드 2: cooldown 윈도우
+        cooldown = get_cfg_value("sync.cooldown_secs", 120)
+        now = time.monotonic()
+        if _last_sync_completed_at > 0 and now - _last_sync_completed_at < cooldown:
+            _logger.debug(
+                "_schedule_post_session_sync: cooldown 중 (%.0fs / %ds) — 스킵",
+                now - _last_sync_completed_at,
+                cooldown,
+            )
+            return _skip("cooldown")
+
+        # 가드 3: 단일 실행
+        if _post_session_sync_running.is_set():
+            _logger.debug("_schedule_post_session_sync: 이미 실행 중 — 스킵")
+            return _skip("already_running")
+
+        # gate 소비와 실행권 설정은 같은 락 안에서 원자적으로 수행한다.
+        _sync_gate.clear()
+        _sync_cancel.clear()
+        _post_session_sync_running.set()
+        _sync_start_time = time.monotonic()
+        run_id = _uuid.uuid4().hex
+        _active_sync_run_id = run_id
+        previous = _load_sync_status()
+        _save_sync_status(
+            {
+                **previous,
+                "state": "scheduled",
+                "run_id": run_id,
+                "current_stage": None,
+                "started_at": None,
+                "finished_at": None,
+                "last_error_stage": None,
+                "last_error": None,
+                "stages": {},
+                "last_schedule": {"scheduled": True, "reason": "scheduled", "at": _now_iso(), "run_id": run_id},
+            }
         )
-        return
-
-    # 가드 3: 단일 실행
-    if _post_session_sync_running.is_set():
-        _logger.debug("_schedule_post_session_sync: 이미 실행 중 — 스킵")
-        return
-
-    # gate 소비 (다음 close_session은 새 get_context 호출 후에만 sync 가능)
-    _sync_gate.clear()
-    # TOCTOU 수정: guard 플래그를 스레드 시작 전에 세트
-    _sync_cancel.clear()
-    _post_session_sync_running.set()
-    _sync_start_time = time.monotonic()
 
     def _run():
-        import logging as _log
+        global _sync_start_time, _last_sync_completed_at, _active_sync_run_id
+        _logger = logging.getLogger(__name__)
+        stage_name = None
+        files = []
+        sg = None
+        scan_result = None
 
-        _logger = _log.getLogger(__name__)
-        try:
-            # 1. vault sync
+        def _run_stage(name: str, operation):
+            nonlocal stage_name
+            stage_name = name
+            started_at = _now_iso()
+            started_clock = time.monotonic()
+            status = _load_sync_status()
+            stages = dict(status.get("stages") or {})
+            stages[name] = {
+                "status": "running",
+                "started_at": started_at,
+                "finished_at": None,
+                "duration_ms": None,
+                "processed": 0,
+            }
+            _update_sync_status(current_stage=name, stages=stages)
+            result = None
             try:
+                if _sync_cancel.is_set():
+                    raise _SyncCancelled()
+                result = operation()
+                if _sync_cancel.is_set() or (isinstance(result, dict) and result.get("status") == "cancelled"):
+                    raise _SyncCancelled()
+                if isinstance(result, dict) and result.get("status") == "failed":
+                    raise RuntimeError(result.get("error") or f"{name} failed")
+            except _SyncCancelled:
+                finished_at = _now_iso()
+                stages = dict((_load_sync_status().get("stages") or {}))
+                stages[name] = {
+                    **stages[name],
+                    "status": "cancelled",
+                    "finished_at": finished_at,
+                    "duration_ms": round((time.monotonic() - started_clock) * 1000),
+                    "processed": result.get("processed", 0) if isinstance(result, dict) else 0,
+                }
+                _update_sync_status(stages=stages)
+                raise
+            except Exception as exc:
+                finished_at = _now_iso()
+                stages = dict((_load_sync_status().get("stages") or {}))
+                stages[name] = {
+                    **stages[name],
+                    "status": "failed",
+                    "finished_at": finished_at,
+                    "duration_ms": round((time.monotonic() - started_clock) * 1000),
+                    "processed": result.get("processed", 0) if isinstance(result, dict) else 0,
+                    "error": str(exc),
+                }
+                if isinstance(result, dict):
+                    stages[name]["detail"] = result
+                _update_sync_status(stages=stages)
+                raise
+            finished_at = _now_iso()
+            processed = result.get("processed", 0) if isinstance(result, dict) else int(result or 0)
+            detail = result.get("detail") if isinstance(result, dict) else None
+            stages = dict((_load_sync_status().get("stages") or {}))
+            stages[name] = {
+                **stages[name],
+                "status": "success",
+                "finished_at": finished_at,
+                "duration_ms": round((time.monotonic() - started_clock) * 1000),
+                "processed": processed,
+            }
+            if detail is not None:
+                stages[name]["detail"] = detail
+            _update_sync_status(stages=stages)
+            return result
+
+        try:
+            _update_sync_status(state="running", started_at=_now_iso(), finished_at=None)
+
+            def _vault_scan():
+                nonlocal files
                 from pathlib import Path
-                from core.graph.knowledge import get_kg, iter_wiki_md_files
-                from core.graph.semantic import get_semantic_graph
-                from core.config.runtime_config import get_db_root_dir
+                from core.graph.knowledge import iter_wiki_md_files
 
                 docs_dir = Path(get_db_root_dir()) / "docs"
-                if docs_dir.exists():
-                    kg = get_kg()
-                    for f in iter_wiki_md_files(docs_dir):
-                        if _sync_cancel.is_set():
-                            _logger.info("post_session_sync: 워치독 취소 신호 — vault sync 중단")
-                            return
-                        kg.sync_file(f, docs_dir)
-                    if not _sync_cancel.is_set():
-                        kg.resolve_links(docs_dir)
-                        kg.prune_missing(docs_dir)
-                        from core.graph.semantic import run_sg_coro
+                files = list(iter_wiki_md_files(docs_dir)) if docs_dir.exists() else []
+                return {"processed": len(files), "detail": {"docs_exists": docs_dir.exists()}}
 
-                        run_sg_coro(get_semantic_graph().sync_from_kg())
-            except Exception:
-                pass
+            _run_stage("vault_scan", _vault_scan)
 
-            # 2. memories sync
-            if _sync_cancel.is_set():
-                return
-            try:
-                synced_rows, last_id = _sync_memories_incremental(cancel_event=_sync_cancel)
-                if _sync_cancel.is_set():
-                    _logger.info("post_session_sync: 워치독 취소 신호 — memories sync 중단")
-                elif synced_rows > 0:
-                    _logger.info(
-                        "post_session_sync: memories 증분 sync 완료 (%d rows, last_id=%d)",
-                        synced_rows,
-                        last_id,
-                    )
-            except Exception:
-                pass
+            def _sqlite_kg_sync():
+                from pathlib import Path
+                from core.graph.knowledge import get_kg
+
+                docs_dir = Path(get_db_root_dir()) / "docs"
+                if not docs_dir.exists():
+                    return {"processed": 0, "detail": "docs directory absent"}
+                kg = get_kg()
+                for vault_file in files:
+                    if _sync_cancel.is_set():
+                        raise _SyncCancelled()
+                    kg.sync_file(vault_file, docs_dir)
+                kg.resolve_links(docs_dir)
+                kg.prune_missing(docs_dir)
+                return {"processed": len(files)}
+
+            _run_stage("sqlite_kg_sync", _sqlite_kg_sync)
+
+            def _kuzu_kg_sync():
+                nonlocal sg
+                from core.graph.semantic import get_semantic_graph, run_sg_coro
+
+                sg = get_semantic_graph()
+                result = run_sg_coro(sg.sync_from_kg(cancel_event=_sync_cancel))
+                if result.get("status") == "cancelled":
+                    raise _SyncCancelled()
+                if result.get("status") != "ok":
+                    raise RuntimeError(f"Kuzu KG sync did not complete: {result.get('status', 'unknown')}")
+                return {
+                    "processed": int(result.get("nodes", 0) or 0),
+                    "detail": result,
+                }
+
+            _run_stage("kuzu_kg_sync", _kuzu_kg_sync)
+
+            def _sqlite_memory_scan():
+                nonlocal scan_result
+                from core.graph.semantic import run_sg_coro
+
+                scan_result = run_sg_coro(_scan_memory_drift(sg))
+                _update_sync_status(
+                    checkpoint_id=scan_result["checkpoint_id"],
+                    sqlite_max_memory_id=scan_result["sqlite_max_memory_id"],
+                    kuzu_episode_count=scan_result["kuzu_episode_count"],
+                    drift=scan_result["drift"],
+                )
+                return {
+                    "processed": scan_result["sqlite_max_memory_id"],
+                    "detail": scan_result,
+                }
+
+            _run_stage("sqlite_memory_scan", _sqlite_memory_scan)
+
+            def _episode_sync():
+                from core.graph.semantic import run_sg_coro
+
+                result = run_sg_coro(_sync_memories_incremental_async(sg, _sync_cancel, scan_result))
+                if result.get("status") != "success":
+                    return result
+                post_scan = run_sg_coro(_scan_memory_drift(sg))
+                result = {**result, "checkpoint_id": post_scan["checkpoint_id"], "post_sync_scan": post_scan}
+                _update_sync_status(
+                    checkpoint_id=post_scan["checkpoint_id"],
+                    sqlite_max_memory_id=post_scan["sqlite_max_memory_id"],
+                    kuzu_episode_count=post_scan["kuzu_episode_count"],
+                    drift=post_scan["drift"],
+                )
+                return result
+
+            result = _run_stage("episode_sync", _episode_sync)
+            finished_at = _now_iso()
+            _update_sync_status(
+                state="success",
+                current_stage=None,
+                finished_at=finished_at,
+                last_success_at=finished_at,
+                checkpoint_id=result["checkpoint_id"],
+            )
+            with _SYNC_SCHEDULE_LOCK:
+                if _active_sync_run_id == run_id:
+                    _last_sync_completed_at = time.monotonic()
+        except _SyncCancelled:
+            _logger.warning("post_session_sync: 워치독 취소 (stage=%s)", stage_name)
+            _update_sync_status(
+                state="cancelled",
+                current_stage=stage_name,
+                finished_at=_now_iso(),
+                last_error_stage=None,
+                last_error=None,
+            )
+        except Exception as exc:
+            _logger.exception("post_session_sync 실패 (stage=%s)", stage_name)
+            _update_sync_status(
+                state="failed",
+                current_stage=stage_name,
+                finished_at=_now_iso(),
+                last_error_stage=stage_name,
+                last_error=str(exc),
+            )
         finally:
-            _post_session_sync_running.clear()
-            _sync_start_time = 0.0
-            _sync_cancel.clear()
-            _last_sync_completed_at = time.monotonic()
+            with _SYNC_SCHEDULE_LOCK:
+                if _active_sync_run_id == run_id:
+                    _post_session_sync_running.clear()
+                    _sync_start_time = 0.0
+                    _sync_cancel.clear()
+                    _active_sync_run_id = None
 
     t = threading.Thread(target=_run, daemon=True, name="engram-post-session-sync")
-    t.start()
+    try:
+        t.start()
+    except Exception as exc:
+        with _SYNC_SCHEDULE_LOCK:
+            if _active_sync_run_id == run_id:
+                _post_session_sync_running.clear()
+                _sync_start_time = 0.0
+                _sync_cancel.clear()
+                _active_sync_run_id = None
+        _logger.exception("post_session_sync 스레드 시작 실패")
+        _update_sync_status(
+            state="failed",
+            finished_at=_now_iso(),
+            last_error_stage="scheduler",
+            last_error=str(exc),
+        )
+        return {"scheduled": False, "reason": "thread_start_failed", "run_id": run_id}
+    return {"scheduled": True, "reason": "scheduled", "run_id": run_id}
 
 
 def _apply_autonomous_reflection(new_narrative: str, persona_observations: str) -> bool:
@@ -1784,7 +2115,7 @@ async def engram_close_session(
     resolved_scope = resolve_scope_key(scope_key or None, cwd=effective_cwd)
     project_key = resolve_project_key(cwd=effective_cwd)
     kg_node_id = resolve_kg_node_id(project_key) if project_key else None
-    closed_session_id = _find_latest_open_session_id(resolved_scope) or _find_latest_open_session_id("")
+    closed_session_id = _find_latest_open_session_id(resolved_scope)
 
     # KG 노드 업데이트 시도
     if kg_node_id:
@@ -1806,45 +2137,18 @@ async def engram_close_session(
                     )
             # episodic memory에도 저장 — 마크다운 포맷 (source=close)
             try:
-                from core.memory import save_memory, close_session as _close_session
+                from core.memory import save_memory
 
+                closed_session_id = _close_scoped_session(resolved_scope, summary, closed_session_id)
                 mem_lines = [summary]
                 if open_intents:
                     mem_lines.append(f"\n다음 작업: {open_intents}")
-                save_memory(None, "\n".join(mem_lines), source="close", project=project_key or "")
-            except Exception:
-                pass
-            # sessions 테이블 종료 기록
-            try:
-                from core.memory import close_session as _close_session
-
-                result_stm = _stm_post(
-                    "/stm/session/close",
-                    {
-                        "session_id": int(closed_session_id) if closed_session_id else None,
-                        "scope_key": resolved_scope,
-                        "summary": summary,
-                    },
+                save_memory(
+                    int(closed_session_id) if closed_session_id else None,
+                    "\n".join(mem_lines),
+                    source="close",
+                    project=project_key or "",
                 )
-                if not result_stm:
-                    # STM 브로커 없으면 직접 처리 — 가장 최근 세션 닫기
-                    conn_s = __import__("core.storage.db", fromlist=["get_connection"]).get_connection()
-                    row_s = conn_s.execute(
-                        "SELECT id FROM sessions WHERE ended_at IS NULL AND scope_key = ? " "ORDER BY started_at DESC, id DESC LIMIT 1",
-                        (resolved_scope,),
-                    ).fetchone()
-                    if not row_s:
-                        row_s = conn_s.execute(
-                            "SELECT id FROM sessions WHERE ended_at IS NULL " "ORDER BY started_at DESC, id DESC LIMIT 1"
-                        ).fetchone()
-                    if row_s:
-                        _close_session(row_s[0], summary)
-                        closed_session_id = str(row_s[0])
-                    conn_s.close()
-                else:
-                    result_closed_session_id = str(result_stm.get("closed_session_id", "") or "").strip()
-                    if result_closed_session_id:
-                        closed_session_id = result_closed_session_id
             except Exception:
                 pass
             # working_memory에도 기록 (다음 세션 short_term 지원)
@@ -1862,38 +2166,34 @@ async def engram_close_session(
             except Exception:
                 pass
             reflection_applied = _apply_autonomous_reflection(new_narrative, persona_observations)
+            sync_schedule = None
             if trigger_sync:
-                _schedule_post_session_sync()
+                sync_schedule = _schedule_post_session_sync()
             return {
                 "status": "ok",
                 "method": "kg_node",
                 "node_id": kg_node_id,
                 "summary": summary,
                 "reflection_applied": reflection_applied,
+                **({"sync_schedule": sync_schedule} if trigger_sync else {}),
             }
 
     # fallback: working_memory
     upsert_working_memory(resolved_scope, summary, open_intents=open_intents)
     # LTM에도 저장 (source=close)
     try:
-        from core.memory import save_memory as _save_memory, close_session as _close_session
+        from core.memory import save_memory as _save_memory
 
+        closed_session_id = _close_scoped_session(resolved_scope, summary, closed_session_id)
         mem_lines = [summary]
         if open_intents:
             mem_lines.append(f"\n다음 작업: {open_intents}")
-        _save_memory(None, "\n".join(mem_lines), source="close", project=project_key or "")
-        # sessions 테이블 종료 기록 (fallback 경로)
-        conn_s = __import__("core.storage.db", fromlist=["get_connection"]).get_connection()
-        row_s = conn_s.execute(
-            "SELECT id FROM sessions WHERE ended_at IS NULL AND scope_key = ? " "ORDER BY started_at DESC, id DESC LIMIT 1",
-            (resolved_scope,),
-        ).fetchone()
-        if not row_s:
-            row_s = conn_s.execute("SELECT id FROM sessions WHERE ended_at IS NULL " "ORDER BY started_at DESC, id DESC LIMIT 1").fetchone()
-        if row_s:
-            _close_session(row_s[0], summary)
-            closed_session_id = str(row_s[0])
-        conn_s.close()
+        _save_memory(
+            int(closed_session_id) if closed_session_id else None,
+            "\n".join(mem_lines),
+            source="close",
+            project=project_key or "",
+        )
     except Exception:
         pass
     try:
@@ -1905,8 +2205,9 @@ async def engram_close_session(
     except Exception:
         pass
     reflection_applied = _apply_autonomous_reflection(new_narrative, persona_observations)
+    sync_schedule = None
     if trigger_sync:
-        _schedule_post_session_sync()
+        sync_schedule = _schedule_post_session_sync()
     return {
         "status": "ok",
         "method": "working_memory_fallback",
@@ -1914,6 +2215,7 @@ async def engram_close_session(
         "summary": summary,
         "reflection_applied": reflection_applied,
         "note": f"KG 노드 미감지 (project_key={project_key}). working_memory에 저장됨.",
+        **({"sync_schedule": sync_schedule} if trigger_sync else {}),
     }
 
 
@@ -2463,7 +2765,14 @@ async def kg_wiki_reminder(
         return {"status": "embedding_failed", "wiki_hits": [], "episode_hits": []}
 
     wiki_hits = await sg.semantic_search(query, top_k=top_k, threshold=threshold, query_vec=query_vec)
-    episode_hits = await sg.episode_semantic_search(query, top_k=top_k, threshold=threshold, query_vec=query_vec)
+    episode_hits = await search_memory_hits(
+        query,
+        limit=top_k,
+        project_key="",
+        query_vec=query_vec,
+        min_score=threshold,
+        semantic_threshold=threshold,
+    )
 
     return {
         "status": "ok",
@@ -2632,11 +2941,10 @@ def kg_lint() -> str:
 # KuzuDB single-writer 제약 해소: watcher가 직접 KuzuDB를 열지 않아도 됨.
 
 
-@engramMCP.tool()
-async def memories_sync(threshold: float = 0.40, top_k: int = 3) -> dict:
+async def _memories_sync_impl(threshold: float | None = None, top_k: int = 3) -> dict:
     """SQLite memories(LTM) 전체를 KuzuDB EpisodeNode로 동기화하고 KGNode와 시맨틱 연결합니다.
     memories 테이블의 내용을 임베딩하여 KGNode에 EP_TO_KG 릴레이션으로 연결합니다.
-    - threshold: 시맨틱 유사도 임계값 (기본 0.40)
+    - threshold: 시맨틱 유사도 임계값 (생략 시 config의 memory.ep_to_kg.semantic_threshold)
     - top_k: 에피소드당 연결할 최대 KGNode 수 (기본 3)"""
     from core.storage.db import get_connection as _get_db_conn
 
@@ -2665,15 +2973,89 @@ async def memories_sync(threshold: float = 0.40, top_k: int = 3) -> dict:
             failed += 1
 
     # 전체 EP_TO_KG 소급 연결 (upsert_episode 내부 연결 보완)
-    link_result = await sg.sync_all_ep_to_kg(sem_threshold=threshold, top_k=top_k)
+    effective_threshold = (
+        float(threshold)
+        if threshold is not None
+        else float(get_cfg_value("memory.ep_to_kg.semantic_threshold", 0.55))
+    )
+    link_result = await sg.sync_all_ep_to_kg(sem_threshold=effective_threshold, top_k=top_k)
 
     return {
         "status": "ok",
         "total": total,
         "success": success,
         "failed": failed,
+        "threshold": effective_threshold,
         "ep_to_kg": link_result,
     }
+
+
+@engramMCP.tool()
+async def memories_sync(threshold: float | None = None, top_k: int = 3) -> dict:
+    """SQLite memories 전체 sync와 persistent health/status 갱신을 함께 수행합니다."""
+    run_id = f"manual-{_uuid.uuid4().hex}"
+    started_at = _now_iso()
+    _update_sync_status(
+        state="running",
+        run_id=run_id,
+        current_stage="manual_memories_sync",
+        started_at=started_at,
+        finished_at=None,
+        last_error_stage=None,
+        last_error=None,
+    )
+    try:
+        result = await _memories_sync_impl(threshold=threshold, top_k=top_k)
+        if result.get("status") != "ok" or int(result.get("failed", 0) or 0) > 0:
+            raise RuntimeError(f"manual memories sync failed: {result}")
+
+        sg = get_semantic_graph()
+        scan = await _scan_memory_drift(sg)
+        finished_at = _now_iso()
+        _update_sync_status(
+            state="success",
+            run_id=run_id,
+            current_stage=None,
+            finished_at=finished_at,
+            last_success_at=finished_at,
+            checkpoint_id=scan["checkpoint_id"],
+            sqlite_max_memory_id=scan["sqlite_max_memory_id"],
+            kuzu_episode_count=scan["kuzu_episode_count"],
+            drift=scan["drift"],
+        )
+        return {**result, "sync_status": scan}
+    except Exception as exc:
+        _update_sync_status(
+            state="failed",
+            run_id=run_id,
+            current_stage=None,
+            finished_at=_now_iso(),
+            last_error_stage="manual_memories_sync",
+            last_error=str(exc),
+        )
+        raise
+
+
+async def _reconcile_memories(apply: bool = False) -> dict:
+    sg = get_semantic_graph()
+    if not sg.enabled:
+        raise RuntimeError("SemanticGraph 비활성화 — KuzuDB 접근 불가")
+
+    def _load_canonical_ids() -> list[str]:
+        db_conn = get_connection()
+        try:
+            return [str(row[0]) for row in db_conn.execute("SELECT id FROM memories").fetchall()]
+        finally:
+            db_conn.close()
+
+    return await sg.reconcile_episodes(_load_canonical_ids, apply=apply)
+
+
+@engramMCP.tool()
+async def memories_reconcile(apply: bool = False) -> dict:
+    """SQLite memories를 기준으로 EpisodeNode 무결성을 점검합니다.
+    기본 dry-run이며 apply=True일 때만 stale EpisodeNode를 삭제합니다."""
+    return await _reconcile_memories(apply=apply)
 
 
 @engramMCP.custom_route("/kg_sync", methods=["POST"])
@@ -2701,7 +3083,35 @@ async def _http_memories_sync(request) -> "Response":
 async def _http_health(request) -> "Response":
     from starlette.responses import JSONResponse
 
-    return JSONResponse({"status": "ok"})
+    sync = _load_sync_status()
+    drift = sync.get("drift") or {}
+    return JSONResponse(
+        {
+            "status": "ok",
+            "sync": {
+                "state": sync["state"],
+                "run_id": sync["run_id"],
+                "current_stage": sync["current_stage"],
+                "finished_at": sync["finished_at"],
+                "last_success_at": sync["last_success_at"],
+                "last_error_stage": sync["last_error_stage"],
+                "checkpoint_id": sync["checkpoint_id"],
+                "sqlite_max_memory_id": sync["sqlite_max_memory_id"],
+                "drift": {
+                    "missing_count": len(drift.get("missing_ids", [])),
+                    "stale_count": len(drift.get("stale_ids", [])),
+                    "unlinked_count": len(drift.get("unlinked_episode_ids", [])),
+                },
+            },
+        }
+    )
+
+
+@engramMCP.custom_route("/api/sync/status", methods=["GET"])
+async def _http_sync_status(request) -> "Response":
+    from starlette.responses import JSONResponse
+
+    return JSONResponse(_load_sync_status())
 
 
 # ── SemanticGraph read API (Dashboard / 외부 읽기 전용 클라이언트용) ───────────
@@ -2765,10 +3175,24 @@ async def _http_sg_graph(request) -> "Response":
         )
         ep_edges_raw = await sg.cypher_query(
             "MATCH (e:EpisodeNode)-[r:EP_TO_KG]->(k:KGNode) "
-            "RETURN e.id AS from_id, k.id AS to_id, r.rel_type AS rel_type"
+            "RETURN e.id AS from_id, k.id AS to_id, r.rel_type AS rel_type, "
+            "r.weight AS weight, r.keywords AS keywords, r.score AS score, "
+            "r.method AS method, r.model AS model, r.version AS version, "
+            "r.created_at AS created_at"
         )
         ep_edges = [
-            {"from": r.get("from_id"), "to": r.get("to_id"), "rel_type": r.get("rel_type")}
+            {
+                "from": r.get("from_id"),
+                "to": r.get("to_id"),
+                "rel_type": r.get("rel_type"),
+                "weight": r.get("weight"),
+                "keywords": r.get("keywords"),
+                "score": r.get("score"),
+                "method": r.get("method"),
+                "model": r.get("model"),
+                "version": r.get("version"),
+                "created_at": r.get("created_at"),
+            }
             for r in ep_edges_raw
         ]
         return JSONResponse(

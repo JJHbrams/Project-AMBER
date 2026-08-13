@@ -58,6 +58,10 @@ if ($Uninstall) {
         Write-Ok "Removed: $ClaudeCommandPath"
     }
     [Environment]::SetEnvironmentVariable(("CON" + "TINUUM_DB_DIR"), $null, "User")
+    if ([Environment]::GetEnvironmentVariable("COPILOT_CUSTOM_INSTRUCTIONS_DIRS", "User") -eq $ShimDir) {
+        [Environment]::SetEnvironmentVariable("COPILOT_CUSTOM_INSTRUCTIONS_DIRS", $null, "User")
+        Write-Ok "Removed COPILOT_CUSTOM_INSTRUCTIONS_DIRS"
+    }
     $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
     if ($userPath -like "*$ShimDir*") {
         $newPath = ($userPath -split ";" | Where-Object { $_ -ne $ShimDir }) -join ";"

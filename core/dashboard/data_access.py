@@ -74,7 +74,7 @@ def memory_nodes_edges(show_semantic: bool = True) -> tuple[list[dict], list[dic
         kid = ep_edge.get("to", "")
         rtype = ep_edge.get("rel_type") or "semantic"
         if eid and kid:
-            ep_to_kg_map.setdefault(eid, []).append({"kg_id": kid, "rel_type": rtype})
+            ep_to_kg_map.setdefault(eid, []).append({"kg_id": kid, **ep_edge, "rel_type": rtype})
 
     has_ep_to_kg = bool(ep_to_kg_map)
 
@@ -90,7 +90,20 @@ def memory_nodes_edges(show_semantic: bool = True) -> tuple[list[dict], list[dic
                 links = [lk for lk in links if lk["rel_type"] == "keyword"]
             if links:
                 for link in links:
-                    extra_edges.append({"from": nid, "to": link["kg_id"], "rel_type": link["rel_type"], "context": ""})
+                    provenance = {
+                        key: link.get(key)
+                        for key in ("method", "score", "weight", "keywords", "model", "version", "created_at")
+                        if link.get(key) not in (None, "")
+                    }
+                    extra_edges.append(
+                        {
+                            "from": nid,
+                            "to": link["kg_id"],
+                            "rel_type": link["rel_type"],
+                            "context": json.dumps(provenance, ensure_ascii=False),
+                            **provenance,
+                        }
+                    )
             elif id_row:
                 extra_edges.append({"from": identity_id, "to": nid, "rel_type": "has_memory", "context": ""})
         elif id_row:
@@ -113,4 +126,3 @@ def memory_nodes_edges(show_semantic: bool = True) -> tuple[list[dict], list[dic
             extra_edges.append({"from": identity_id, "to": nid, "rel_type": "has_curiosity", "context": ""})
 
     return extra_nodes, extra_edges
-

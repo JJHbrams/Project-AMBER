@@ -11,6 +11,8 @@ memory:
     default_global: "global:main"
     project_prefix: "project:"
     discord_prefix: "discord:"
+    kg_node_map:
+      projectintelcontunuum: graph-memory-roadmap
 
   short_term:
     limit_turns: 8
@@ -29,6 +31,33 @@ memory:
   long_term:
     search_limit: 2
     item_max_chars: 100
+    semantic_threshold: 0.25
+    raw_min_score: 0.47
+    min_score: 0.38
+    kg_threshold: 0.55
+    project_match_boost: 0.15
+    project_mismatch_penalty: 0.15
+    unknown_project_penalty: 0.03
+    strict_project_scope: true
+    hangul_min_token_overlap: 2
+    test_episode_max_chars: 120
+    test_markers:
+      - 테스트
+      - test
+      - verify
+      - placeholder
+
+  ep_to_kg:
+    semantic_threshold: 0.55
+
+  graph_retrieval:
+    enabled: true
+    max_hops: 2
+    top_k: 6
+    hop_decay: 0.75
+    min_score: 0.12
+    item_max_chars: 140
+    path_max_chars: 180
 
   wiki_reminder:
     # 세션 시작 시 user_query와 유사한 wiki 노트를 자동 리마인드
@@ -97,4 +126,5 @@ tools:
     - kg_list_nodes
     - kg_semantic_neighbors
     - memories_sync
+    - memories_reconcile
     - engram_consult_engram

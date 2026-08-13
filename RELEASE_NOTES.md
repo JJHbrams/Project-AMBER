@@ -1,5 +1,43 @@
 # Release Notes
 
+## 2026-08-13 - v1.2.0: Graph-Aware Memory Retrieval and Reliable Sync
+
+> Minor release built from development commit `0ef76be`. This release receives its own GitHub
+> Release and installer.
+
+### Highlights
+
+- **Memory retrieval can now explain its graph path.** Episode results traverse `EP_TO_KG` and
+  `KG_EDGE` up to two hops, combine retrieval relevance with link confidence and hop decay, and
+  inject the strongest bounded paths as `<ctx:graph_evidence>`.
+- **Episode/KG synchronization is recoverable and observable.** Persistent atomic sync status,
+  drift measurement, checkpoint repair, watchdog cancellation, and an administrator reconcile
+  command make interrupted or inconsistent synchronization diagnosable without silently creating
+  missing records.
+- **Link quality is stricter.** Project scope, node type, stop words, Korean suffix normalization,
+  minimum evidence, and per-Episode limits reduce broad or cross-project false links.
+- **Raw Copilot CLI sessions load Engram automatically.** Installation now registers
+  `COPILOT_CUSTOM_INSTRUCTIONS_DIRS`, deploys the Copilot protocol in both installer modes, and
+  preserves bootstrap injection when interactive options such as `--yolo` or `--model` are used.
+
+### Added
+
+- Graph-aware retrieval API with provenance metadata and best-path scoring.
+- Graph evidence context injection with configurable path and summary budgets.
+- Direct, paraphrase, negative-control, and temporary-Kuzu E2E evaluation cases.
+- `scripts/kg/evaluate_graph_retrieval.py` for operational retrieval evaluation.
+- SQLite-to-Kuzu Episode integrity reconcile tooling.
+- Dashboard and health reporting for synchronization status and drift.
+
+### Fixed
+
+- Cross-event-loop locking that could deadlock MCP and background synchronization.
+- Checkpoint advancement after failed upserts and stale `scheduled`/`running` recovery.
+- Concurrent `close_session` synchronization races and inappropriate cooldown after failures.
+- Loss of source session IDs on generated memory Episodes.
+- Weak single-keyword and unrelated-project memory matches.
+- Destructive replacement of valid `EP_TO_KG` links when candidate calculation fails.
+
 ## 2026-08-11 - v1.1.2: Bubble Mode by Default
 
 > Patch release on the **1.1 line**. The installer is attached to the existing `Ver 1.1`

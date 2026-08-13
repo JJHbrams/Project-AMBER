@@ -6,12 +6,15 @@ KuzuDB는 단일 writer 제약이 있어 MCP 서버와 동시 사용 불가.
 
 사용법:
     conda activate intel_engram
-    python scripts/kg/ep_to_kg_sync.py [--threshold 0.40] [--top-k 3]
+    python scripts/kg/ep_to_kg_sync.py [--threshold 0.55] [--top-k 3]
     python scripts/kg/ep_to_kg_sync.py --sync-memories          # SQLite memories → EpisodeNode 백필 후 EP_TO_KG 연결
+    python scripts/kg/ep_to_kg_sync.py --reconcile              # 무결성 dry-run
+    python scripts/kg/ep_to_kg_sync.py --apply-reconcile        # stale EpisodeNode 명시적 삭제
 """
 
 import argparse
 import asyncio
+import json
 import sys
 import logging
 from pathlib import Path
@@ -66,12 +69,30 @@ async def backfill_memories(sg) -> dict:
     return {"total": total, "success": success, "failed": failed}
 
 
+def load_canonical_memory_ids() -> list[str]:
+    from core.storage.db import get_connection
+
+    conn = get_connection()
+    try:
+        return [str(row[0]) for row in conn.execute("SELECT id FROM memories").fetchall()]
+    finally:
+        conn.close()
+
+
 async def _main_async(args) -> None:
     sg = get_semantic_graph()
 
     if not sg.enabled:
         logger.error("SemanticGraph 비활성화 — KuzuDB 접근 불가. MCP 서버가 실행 중이면 중단 후 재시도.")
         sys.exit(1)
+
+    if args.reconcile or args.apply_reconcile:
+        report = await sg.reconcile_episodes(
+            load_canonical_memory_ids,
+            apply=args.apply_reconcile,
+        )
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+        return
 
     # 현황 확인
     ep_count = await sg.count("MATCH (e:EpisodeNode) RETURN COUNT(e)")
@@ -97,8 +118,15 @@ async def _main_async(args) -> None:
 
     # 2단계: EP_TO_KG 소급 연결 (--sync-memories는 upsert_episode 내부에서 이미 수행하지만
     #         KGNode가 sync_from_kg 이전에 없었을 수 있으므로 한 번 더 전체 적용)
-    print(f"\nEP_TO_KG 소급 연결 시작 (threshold={args.threshold}, top_k={args.top_k}) ...")
-    result = await sg.sync_all_ep_to_kg(sem_threshold=args.threshold, top_k=args.top_k)
+    from core.config.runtime_config import get_cfg_value
+
+    effective_threshold = (
+        float(args.threshold)
+        if args.threshold is not None
+        else float(get_cfg_value("memory.ep_to_kg.semantic_threshold", 0.55))
+    )
+    print(f"\nEP_TO_KG 소급 연결 시작 (threshold={effective_threshold}, top_k={args.top_k}) ...")
+    result = await sg.sync_all_ep_to_kg(sem_threshold=effective_threshold, top_k=args.top_k)
 
     link_after = await sg.count("MATCH ()-[r:EP_TO_KG]->() RETURN COUNT(r)")
 
@@ -108,15 +136,23 @@ async def _main_async(args) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="memories 백필 + EP_TO_KG 배치 소급 동기화")
-    parser.add_argument("--threshold", type=float, default=0.40, help="시맨틱 유사도 임계값 (기본 0.40)")
+    parser.add_argument(
+        "--threshold",
+        type=float,
+        default=None,
+        help="시맨틱 유사도 임계값 (기본: config memory.ep_to_kg.semantic_threshold)",
+    )
     parser.add_argument("--top-k", type=int, default=3, help="에피소드당 연결할 최대 KGNode 수 (기본 3)")
     parser.add_argument("--dry-run", action="store_true", help="실제 연결 없이 현황만 출력")
     parser.add_argument("--sync-memories", action="store_true", help="SQLite memories → EpisodeNode 백필 후 EP_TO_KG 연결")
+    reconcile_group = parser.add_mutually_exclusive_group()
+    reconcile_group.add_argument("--reconcile", action="store_true", help="SQLite 기준 EpisodeNode 무결성 dry-run")
+    reconcile_group.add_argument("--apply-reconcile", action="store_true", help="SQLite에 없는 EpisodeNode를 명시적으로 삭제")
     args = parser.parse_args()
+    if (args.reconcile or args.apply_reconcile) and (args.dry_run or args.sync_memories):
+        parser.error("reconcile options cannot be combined with --dry-run or --sync-memories")
     asyncio.run(_main_async(args))
 
 
 if __name__ == "__main__":
     main()
-
-

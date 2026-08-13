@@ -39,6 +39,15 @@ if ($existingProjectRoot -ne $ProjectRoot) {
     Write-Warn "Restart terminal for ENGRAM_PROJECT_ROOT to take effect"
 } else { Write-Ok "ENGRAM_PROJECT_ROOT already set: $ProjectRoot" }
 
+# raw Copilot CLI도 ~/.engram/copilot-instructions.md를 읽도록 전역 등록.
+Write-Step "Persistent environment variable (COPILOT_CUSTOM_INSTRUCTIONS_DIRS)..."
+$existingCopilotInstructionsDirs = [Environment]::GetEnvironmentVariable("COPILOT_CUSTOM_INSTRUCTIONS_DIRS", "User")
+if ($existingCopilotInstructionsDirs -ne $ShimDir) {
+    [Environment]::SetEnvironmentVariable("COPILOT_CUSTOM_INSTRUCTIONS_DIRS", $ShimDir, "User")
+    Write-Ok "COPILOT_CUSTOM_INSTRUCTIONS_DIRS=$ShimDir (User-level, persistent)"
+    Write-Warn "Restart terminal for COPILOT_CUSTOM_INSTRUCTIONS_DIRS to take effect"
+} else { Write-Ok "COPILOT_CUSTOM_INSTRUCTIONS_DIRS already set: $ShimDir" }
+
 # 8b. persona.user.yaml 템플릿 생성 (없을 때만)
 Write-Step "User persona config (~/.engram/persona.user.yaml)..."
 $UserPersonaYaml = Join-Path $env:USERPROFILE ".engram\persona.user.yaml"

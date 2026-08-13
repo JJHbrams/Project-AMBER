@@ -6,11 +6,12 @@ import re
 import threading
 import concurrent.futures
 from datetime import datetime, timezone
-from typing import List, Optional, Dict
+from typing import Any, List, Optional, Dict
 
 from core.storage.db import get_connection
 from core.common.sanitizer import sanitize
 from core.config.runtime_config import get_cfg_value, get_default_fallback_scope_key
+from core.context.project_scope import resolve_project_key
 
 DEFAULT_SCOPE_KEY = get_default_fallback_scope_key()
 DEFAULT_PROJECT_KEY = "general"
@@ -201,7 +202,238 @@ def _async_upsert_episode(episode_id: str, content: str, keywords: str, session_
         pass
 
 
-async def search_memories(query: str, limit: int = 5, max_age_days: int = 0) -> List[str]:
+_FRONTMATTER_PROJECT_RE = re.compile(r"(?mi)^project:\s*(.+?)\s*$")
+_FRONTMATTER_END_RE = re.compile(r"(?s)^---\s*\n.*?\n---\s*\n")
+_PROJECT_DIGEST_RE = re.compile(r"-[0-9a-f]{8}$")
+_RETRIEVAL_STOPWORDS = {
+    "이",
+    "가",
+    "을",
+    "를",
+    "은",
+    "는",
+    "의",
+    "에",
+    "와",
+    "과",
+    "로",
+    "한",
+    "할",
+}
+_KOREAN_TOKEN_SUFFIXES = (
+    "에서",
+    "으로",
+    "에게",
+    "부터",
+    "까지",
+    "하는",
+    "하며",
+    "하고",
+    "했다",
+    "한",
+    "을",
+    "를",
+    "은",
+    "는",
+    "이",
+    "가",
+    "의",
+    "와",
+    "과",
+    "로",
+)
+
+
+def _episode_project(content: str) -> str:
+    match = _FRONTMATTER_PROJECT_RE.search(content or "")
+    return resolve_project_key(project_key=match.group(1)) if match else ""
+
+
+def _portable_project_key(project_key: str) -> str:
+    return _PROJECT_DIGEST_RE.sub("", resolve_project_key(project_key=project_key))
+
+
+def _retrieval_tokens(text: str) -> set[str]:
+    normalized = set()
+    for token in _tokenize(text):
+        if re.search(r"[가-힣]", token):
+            for suffix in _KOREAN_TOKEN_SUFFIXES:
+                if token.endswith(suffix) and len(token) - len(suffix) >= 2:
+                    token = token[: -len(suffix)]
+                    break
+        if len(token) >= 2 and token not in _RETRIEVAL_STOPWORDS:
+            normalized.add(token)
+    return normalized
+
+
+def _is_test_episode(content: str) -> bool:
+    body = _FRONTMATTER_END_RE.sub("", content or "", count=1).strip()
+    max_chars = int(get_cfg_value("memory.long_term.test_episode_max_chars", 120))
+    if len(body) > max_chars:
+        return False
+    configured = get_cfg_value("memory.long_term.test_markers", ["테스트", "test", "verify", "placeholder"])
+    markers = configured if isinstance(configured, list) else ["테스트", "test", "verify", "placeholder"]
+    normalized = body.casefold()
+    for marker in markers:
+        normalized_marker = str(marker).strip().casefold()
+        if not normalized_marker:
+            continue
+        if normalized_marker.isascii() and normalized_marker.isalnum():
+            if re.search(rf"(?<![a-z0-9]){re.escape(normalized_marker)}(?![a-z0-9])", normalized):
+                return True
+        elif normalized_marker in normalized:
+            return True
+    return False
+
+
+def _matches_declared_negative_control(content: str, query: str) -> bool:
+    query_words = _retrieval_tokens(query)
+    if not query_words:
+        return False
+
+    generic = {
+        "다음",
+        "작업",
+        "새",
+        "세션",
+        "세션의",
+        "직접",
+        "패러프레이즈",
+        "실행",
+        "재측정",
+        "무관",
+        "질의",
+        "질문",
+    }
+    for segment in re.split(r"[.\n]", content or ""):
+        if "무관 질의" not in segment and "무관 질문" not in segment:
+            continue
+        declared_words = _retrieval_tokens(segment) - generic
+        overlap = query_words & declared_words
+        if len(overlap) >= 2 or any(len(word) >= 6 for word in overlap):
+            return True
+    return False
+
+
+def _rank_episode_hits(
+    hits: list[dict],
+    project_key: str,
+    limit: int,
+    query: str = "",
+    min_score: Optional[float] = None,
+    raw_min_score: Optional[float] = None,
+) -> list[dict]:
+    normalized_project = resolve_project_key(project_key=project_key)
+    portable_project = _portable_project_key(normalized_project)
+    effective_min_score = (
+        float(min_score)
+        if min_score is not None
+        else float(get_cfg_value("memory.long_term.min_score", 0.38))
+    )
+    effective_raw_min_score = (
+        float(raw_min_score)
+        if raw_min_score is not None
+        else float(get_cfg_value("memory.long_term.raw_min_score", 0.47))
+    )
+    match_boost = float(get_cfg_value("memory.long_term.project_match_boost", 0.15))
+    mismatch_penalty = float(get_cfg_value("memory.long_term.project_mismatch_penalty", 0.10))
+    unknown_penalty = float(get_cfg_value("memory.long_term.unknown_project_penalty", 0.03))
+    strict_project_scope = bool(get_cfg_value("memory.long_term.strict_project_scope", True))
+    hangul_min_overlap = int(get_cfg_value("memory.long_term.hangul_min_token_overlap", 1))
+    query_words = _retrieval_tokens(query)
+    query_has_hangul = bool(re.search(r"[가-힣]", query or ""))
+
+    ranked = []
+    for hit in hits:
+        content = str(hit.get("content", "") or "")
+        if not content or _is_test_episode(content) or _matches_declared_negative_control(content, query):
+            continue
+        raw_score = float(hit.get("score", 0.0) or 0.0)
+        if raw_score < effective_raw_min_score:
+            continue
+        episode_project = _episode_project(content)
+        portable_episode_project = _portable_project_key(episode_project)
+        if (
+            strict_project_scope
+            and portable_project
+            and portable_episode_project
+            and portable_episode_project != portable_project
+        ):
+            continue
+        if query_has_hangul and query_words:
+            content_words = _retrieval_tokens(_FRONTMATTER_END_RE.sub("", content, count=1))
+            if len(query_words & content_words) < hangul_min_overlap:
+                continue
+        adjusted_score = raw_score
+        if normalized_project:
+            if portable_episode_project == portable_project:
+                adjusted_score += match_boost
+            elif episode_project:
+                adjusted_score -= mismatch_penalty
+            else:
+                adjusted_score -= unknown_penalty
+        if adjusted_score < effective_min_score:
+            continue
+        ranked.append(
+            {
+                **hit,
+                "raw_score": round(raw_score, 4),
+                "score": round(adjusted_score, 4),
+                "project": episode_project,
+            }
+        )
+    ranked.sort(key=lambda item: (item["score"], item["raw_score"]), reverse=True)
+    return ranked[:limit]
+
+
+async def search_memory_hits(
+    query: str,
+    limit: int = 5,
+    max_age_days: int = 0,
+    project_key: str = "",
+    query_vec: Optional[list[float]] = None,
+    min_score: Optional[float] = None,
+    semantic_threshold: Optional[float] = None,
+    semantic_graph: Any = None,
+) -> list[dict]:
+    """EpisodeNode 검색 결과를 오염 필터와 프로젝트 일치도로 재순위화한다."""
+    if query:
+        try:
+            if semantic_graph is None:
+                from core.graph.semantic import get_semantic_graph
+
+                sg = get_semantic_graph()
+            else:
+                sg = semantic_graph
+            if sg.enabled:
+                configured_threshold = float(get_cfg_value("memory.long_term.semantic_threshold", 0.25))
+                threshold = (
+                    min(configured_threshold, float(semantic_threshold))
+                    if semantic_threshold is not None
+                    else configured_threshold
+                )
+                hits = await sg.episode_semantic_search(
+                    query,
+                    top_k=0,
+                    threshold=threshold,
+                    max_age_days=max_age_days,
+                    query_vec=query_vec,
+                )
+                ranked = _rank_episode_hits(hits, project_key, limit, query=query, min_score=min_score)
+                if ranked:
+                    return ranked
+        except Exception:
+            pass
+    return []
+
+
+async def search_memories(
+    query: str,
+    limit: int = 5,
+    max_age_days: int = 0,
+    project_key: str = "",
+    query_vec: Optional[list[float]] = None,
+) -> List[str]:
     """EpisodeNode 시맨틱 검색 (SemanticGraph 활성 시 우선), 아니면 키워드 겹침 기반 fallback.
 
     Args:
@@ -213,35 +445,46 @@ async def search_memories(query: str, limit: int = 5, max_age_days: int = 0) -> 
     if query:
         try:
             # core.graph.semantic 패키지는 stm_promoter ↔ store 순환이 있어 지연 import 유지.
-            from core.graph.semantic import get_semantic_graph
-
-            sg = get_semantic_graph()
-            if sg.enabled:
-                hits = await sg.episode_semantic_search(query, top_k=limit, threshold=0.25, max_age_days=max_age_days)
-                if hits:
-                    return [h["content"] for h in hits]
+            hits = await search_memory_hits(
+                query,
+                limit=limit,
+                max_age_days=max_age_days,
+                project_key=project_key,
+                query_vec=query_vec,
+            )
+            if hits:
+                return [h["content"] for h in hits]
         except Exception:
             pass
 
     # 2. Keyword fallback (SQLite)
-    query_words = set(_tokenize(query))
+    query_words = _retrieval_tokens(query)
     conn = get_connection()
     rows = conn.execute("SELECT content, keywords FROM memories ORDER BY created_at DESC LIMIT 200").fetchall()
     conn.close()
 
-    if not query_words:
-        return [row["content"] for row in rows[:limit]]
-
-    scored = []
+    scored: list[dict] = []
     for row in rows:
-        kw = set(_tokenize(row["keywords"] or ""))
-        content_words = set(_tokenize(row["content"]))
+        content = row["content"]
+        if _is_test_episode(content):
+            continue
+        kw = _retrieval_tokens(row["keywords"] or "")
+        content_words = _retrieval_tokens(content)
         overlap = len(query_words & (kw | content_words))
-        if overlap > 0:
-            scored.append((overlap, row["content"]))
+        if query_words and overlap <= 0:
+            continue
+        raw_score = overlap / max(1, len(query_words)) if query_words else 0.5
+        scored.append({"id": "", "content": content, "score": raw_score, "created_at": ""})
 
-    scored.sort(key=lambda x: x[0], reverse=True)
-    return [c for _, c in scored[:limit]]
+    ranked = _rank_episode_hits(
+        scored,
+        project_key,
+        limit,
+        query=query,
+        min_score=-1.0,
+        raw_min_score=0.0,
+    )
+    return [hit["content"] for hit in ranked]
 
 
 def get_recent_messages(session_id: int, limit: int = 20) -> List[dict]:

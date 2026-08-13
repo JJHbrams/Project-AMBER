@@ -198,6 +198,40 @@ class SemanticGraphConcurrencyTests(unittest.IsolatedAsyncioTestCase):
         count = await self.sg.count("MATCH (n:KGNode {id: 'threaded1'}) RETURN count(n)")
         self.assertEqual(count, 1)
 
+    async def test_write_lock_contention_across_event_loops(self):
+        lock_held = threading.Event()
+        release_lock = threading.Event()
+        errors: list[BaseException] = []
+
+        async def _hold_lock():
+            async with self.sg._write_lock:
+                lock_held.set()
+                await asyncio.to_thread(release_lock.wait)
+
+        def _run(coro):
+            try:
+                run_sg_coro(coro)
+            except BaseException as exc:
+                errors.append(exc)
+
+        holder = threading.Thread(target=_run, args=(_hold_lock(),))
+        holder.start()
+        self.assertTrue(lock_held.wait(timeout=5))
+
+        contender = threading.Thread(
+            target=_run,
+            args=(self.sg.upsert_node("cross-loop", "Cross Loop", "concept", [], "summary"),),
+        )
+        contender.start()
+        release_lock.set()
+        holder.join(timeout=10)
+        contender.join(timeout=10)
+
+        self.assertFalse(holder.is_alive())
+        self.assertFalse(contender.is_alive())
+        self.assertEqual(errors, [])
+        count = await self.sg.count("MATCH (n:KGNode {id: 'cross-loop'}) RETURN count(n)")
+        self.assertEqual(count, 1)
 
 if __name__ == "__main__":
     unittest.main()

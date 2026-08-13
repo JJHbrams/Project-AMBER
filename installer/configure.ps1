@@ -38,6 +38,8 @@ $ShimDir       = Join-Path $env:USERPROFILE ".engram"
 $DistExe       = Join-Path $InstallDir "dist\engram-overlay\engram-overlay.exe"
 $UserConfig    = Join-Path $ShimDir "user.config.yaml"
 $OverlayConfig = Join-Path $ShimDir "overlay.user.yaml"
+$CopilotInstructions = Join-Path $ShimDir "copilot-instructions.md"
+$CopilotInstructionsSource = Join-Path $InstallDir "config\clients\copilot.md"
 $EnvFile       = Join-Path $ShimDir ".env"
 $MCP_HTTP_PORT = 17385
 $Utf8NoBom     = [System.Text.UTF8Encoding]::new($false)
@@ -54,6 +56,9 @@ if ($Uninstall) {
     )) { if (Test-Path $lnk) { Remove-Item $lnk -Force; Write-Ok "Removed: $lnk" } }
     foreach ($v in @("ENGRAM_DB_DIR", "ENGRAM_WORKDIR", "ENGRAM_PROJECT_ROOT")) {
         [Environment]::SetEnvironmentVariable($v, $null, "User")
+    }
+    if ([Environment]::GetEnvironmentVariable("COPILOT_CUSTOM_INSTRUCTIONS_DIRS", "User") -eq $ShimDir) {
+        [Environment]::SetEnvironmentVariable("COPILOT_CUSTOM_INSTRUCTIONS_DIRS", $null, "User")
     }
     Write-Ok "Done (DB/config preserved at $ShimDir)"
     exit 0
@@ -169,8 +174,16 @@ Write-Step "환경변수 (User)"
 [Environment]::SetEnvironmentVariable("ENGRAM_DB_DIR", $DbDir, "User")
 [Environment]::SetEnvironmentVariable("ENGRAM_WORKDIR", $WorkDir, "User")
 [Environment]::SetEnvironmentVariable("ENGRAM_PROJECT_ROOT", $InstallDir, "User")
+[Environment]::SetEnvironmentVariable("COPILOT_CUSTOM_INSTRUCTIONS_DIRS", $ShimDir, "User")
 [Environment]::SetEnvironmentVariable(("CON" + "TINUUM_DB_DIR"), $null, "User")
-Write-Ok "ENGRAM_DB_DIR / ENGRAM_WORKDIR / ENGRAM_PROJECT_ROOT"
+Write-Ok "ENGRAM_DB_DIR / ENGRAM_WORKDIR / ENGRAM_PROJECT_ROOT / COPILOT_CUSTOM_INSTRUCTIONS_DIRS"
+
+if (Test-Path $CopilotInstructionsSource) {
+    Copy-Item $CopilotInstructionsSource $CopilotInstructions -Force
+    Write-Ok "Copilot session protocol: $CopilotInstructions"
+} else {
+    Write-Warn "Copilot session protocol source 없음: $CopilotInstructionsSource"
+}
 
 # ── 6. Identity 이름 (선택) — 첫 실행 시 반영되도록 env 로 전달 ──
 if ($IdentityName) {

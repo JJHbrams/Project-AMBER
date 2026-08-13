@@ -55,6 +55,15 @@ _DEFAULT_CFG = {
             "search_limit": 2,
             "item_max_chars": 100,
         },
+        "graph_retrieval": {
+            "enabled": True,
+            "max_hops": 2,
+            "top_k": 6,
+            "hop_decay": 0.75,
+            "min_score": 0.12,
+            "item_max_chars": 140,
+            "path_max_chars": 180,
+        },
     },
     "session": {
         "auto_inject": False,

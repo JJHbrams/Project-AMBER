@@ -21,12 +21,25 @@ export interface EpisodeNodeData {
   created_at?: string;
 }
 
+export interface EpisodeEdgeData {
+  from: string;
+  to: string;
+  rel_type: string;
+  weight?: number;
+  keywords?: string;
+  score?: number;
+  method?: string;
+  model?: string;
+  version?: string;
+  created_at?: string;
+}
+
 export interface GraphData {
   enabled: boolean;
   kg_nodes: KGNodeData[];
   kg_edges: KGEdgeData[];
   ep_nodes: EpisodeNodeData[];
-  ep_edges: Array<{ from: string; to: string; rel_type: string }>;
+  ep_edges: EpisodeEdgeData[];
   error?: string;
 }
 

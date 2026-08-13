@@ -21,14 +21,61 @@ import hashlib
 import json
 import logging
 import os
+import re
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, Iterable, TypedDict
 
 from core.config.runtime_config import get_cfg_value, get_db_root_dir
+from core.context.project_scope import resolve_kg_node_id
 
 logger = logging.getLogger(__name__)
+
+
+class CrossLoopAsyncLock:
+    """여러 이벤트 루프에서 공유할 수 있는 비동기 컨텍스트 락."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+
+    def locked(self) -> bool:
+        return self._lock.locked()
+
+    def try_acquire(self) -> bool:
+        return self._lock.acquire(blocking=False)
+
+    async def acquire(self) -> None:
+        while not self.try_acquire():
+            await asyncio.sleep(0.01)
+
+    def release(self) -> None:
+        self._lock.release()
+
+    async def __aenter__(self) -> CrossLoopAsyncLock:
+        await self.acquire()
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        self.release()
+
+
+class EpisodeReconciliationReport(TypedDict):
+    canonical_count: int
+    episode_count_before: int
+    stale_ids: list[str]
+    missing_ids: list[str]
+    unlinked_episode_ids: list[str]
+    applied: bool
+    deleted_count: int
+    episode_count_after: int
+
+
+def _memory_id_sort_key(value: str) -> tuple[int, int, str]:
+    text = str(value)
+    if text.isdigit():
+        return (0, int(text), text)
+    return (1, 0, text)
 
 # ── KuzuDB 스키마 ─────────────────────────────────────────────────────────────
 
@@ -58,12 +105,53 @@ CREATE NODE TABLE IF NOT EXISTS EpisodeNode (
 );
 CREATE REL TABLE IF NOT EXISTS EP_TO_KG (
     FROM EpisodeNode TO KGNode,
-    rel_type STRING
+    rel_type  STRING,
+    weight    DOUBLE DEFAULT 0.0,
+    keywords  STRING DEFAULT '',
+    score     DOUBLE DEFAULT 0.0,
+    method    STRING DEFAULT '',
+    model     STRING DEFAULT '',
+    version   STRING DEFAULT '',
+    created_at STRING DEFAULT ''
 );
 """
 
 # 기존 DB에 content_hash 컬럼이 없을 경우 마이그레이션
-MIGRATION_DDL = "ALTER TABLE KGNode ADD content_hash STRING DEFAULT ''"
+MIGRATION_DDL = (
+    ("KGNode.content_hash", "ALTER TABLE KGNode ADD content_hash STRING DEFAULT ''"),
+    ("EP_TO_KG.weight", "ALTER TABLE EP_TO_KG ADD weight DOUBLE DEFAULT 0.0"),
+    ("EP_TO_KG.keywords", "ALTER TABLE EP_TO_KG ADD keywords STRING DEFAULT ''"),
+    ("EP_TO_KG.score", "ALTER TABLE EP_TO_KG ADD score DOUBLE DEFAULT 0.0"),
+    ("EP_TO_KG.method", "ALTER TABLE EP_TO_KG ADD method STRING DEFAULT ''"),
+    ("EP_TO_KG.model", "ALTER TABLE EP_TO_KG ADD model STRING DEFAULT ''"),
+    ("EP_TO_KG.version", "ALTER TABLE EP_TO_KG ADD version STRING DEFAULT ''"),
+    ("EP_TO_KG.created_at", "ALTER TABLE EP_TO_KG ADD created_at STRING DEFAULT ''"),
+)
+
+EP_TO_KG_LINK_VERSION = "1"
+EP_TO_KG_KEYWORD_STOPWORDS = {
+    "assistant",
+    "close",
+    "content",
+    "date",
+    "engram",
+    "memory",
+    "model",
+    "project",
+    "provider",
+    "save",
+    "session",
+    "source",
+    "user",
+    "기억",
+    "내용",
+    "사용자",
+    "세션",
+    "작업",
+    "프로젝트",
+}
+_EP_PROJECT_RE = re.compile(r"(?mi)^project:\s*(.+?)\s*$")
+_TEST_NODE_TOKEN_RE = re.compile(r"(?i)(?<![a-z0-9])(test|verify|placeholder)(?![a-z0-9])|테스트")
 
 
 def _now_iso() -> str:
@@ -74,6 +162,101 @@ def _content_hash(title: str, summary: str, tags: str) -> str:
     """노드 콘텐츠의 sha256 앞 16자 — 변경 감지용"""
     raw = f"{title}|{summary}|{tags}"
     return hashlib.sha256(raw.encode()).hexdigest()[:16]
+
+
+def _normalized_keywords(raw: Any) -> set[str]:
+    values: list[Any]
+    if isinstance(raw, (list, tuple, set)):
+        values = list(raw)
+    elif isinstance(raw, dict):
+        values = list(raw.values())
+    else:
+        text = str(raw or "")
+        try:
+            parsed = json.loads(text)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            values = [text]
+        else:
+            if isinstance(parsed, dict):
+                values = list(parsed.values())
+            elif isinstance(parsed, list):
+                values = parsed
+            else:
+                values = [parsed]
+
+    words: set[str] = set()
+    pending = list(values)
+    while pending:
+        value = pending.pop()
+        if isinstance(value, dict):
+            pending.extend(value.values())
+        elif isinstance(value, (list, tuple, set)):
+            pending.extend(value)
+        elif value is not None:
+            for token in re.findall(r"[^\W_]+", str(value), flags=re.UNICODE):
+                normalized = token.casefold()
+                if len(normalized) < 2 or normalized.isdigit():
+                    continue
+                if normalized not in EP_TO_KG_KEYWORD_STOPWORDS:
+                    words.add(normalized)
+    return words
+
+
+def _episode_project(content: str) -> str:
+    match = _EP_PROJECT_RE.search(content or "")
+    return match.group(1).strip() if match else ""
+
+
+def _kg_project_group(path: str) -> str:
+    parts = [part for part in re.split(r"[\\/]+", path or "") if part]
+    if len(parts) >= 2 and parts[0].casefold() == "projects":
+        return parts[1].casefold()
+    return ""
+
+
+def _is_test_kg_node(node_id: str, title: str) -> bool:
+    return bool(_TEST_NODE_TOKEN_RE.search(f"{node_id} {title}"))
+
+
+def _kg_candidate_allowed(
+    node_id: str,
+    node_type: str,
+    node_path: str,
+    node_title: str,
+    anchor_id: str,
+    anchor_group: str,
+) -> bool:
+    if _is_test_kg_node(node_id, node_title):
+        return False
+    if not anchor_group:
+        return True
+    candidate_group = _kg_project_group(node_path)
+    if node_type == "project" and node_id != anchor_id:
+        return False
+    return not candidate_group or candidate_group == anchor_group
+
+
+def _load_kg_scope_cache() -> dict[str, tuple[str, str, str]]:
+    from core.storage.db import get_connection
+
+    conn = get_connection()
+    try:
+        rows = conn.execute("SELECT id, type, path, title FROM kg_nodes").fetchall()
+        return {
+            str(row[0]): (str(row[1] or ""), str(row[2] or ""), str(row[3] or ""))
+            for row in rows
+        }
+    finally:
+        conn.close()
+
+
+def _resolve_episode_scope(content: str, kg_scope_cache: dict[str, tuple[str, str, str]]) -> tuple[str, str]:
+    project_key = _episode_project(content)
+    if not project_key:
+        return "", ""
+    anchor_id = resolve_kg_node_id(project_key) or ""
+    anchor_meta = kg_scope_cache.get(anchor_id)
+    return anchor_id, _kg_project_group(anchor_meta[1]) if anchor_meta else "__unresolved__"
 
 
 def run_sg_coro(coro):
@@ -105,9 +288,9 @@ class SemanticGraph:
         embedding_model: str = "paraphrase-multilingual-MiniLM-L12-v2",
         read_only: bool = False,
     ) -> None:
-        self._write_lock = asyncio.Lock()
-        self._sync_lock = asyncio.Lock()  # sync_from_kg 동시 실행 방지
-        self._encoder_lock = asyncio.Lock()  # 임베딩 모델 lazy-load 이중 실행 방지
+        self._write_lock = CrossLoopAsyncLock()
+        self._sync_lock = CrossLoopAsyncLock()  # sync_from_kg 동시 실행 방지
+        self._encoder_lock = CrossLoopAsyncLock()  # 임베딩 모델 lazy-load 이중 실행 방지
         self._read_only = read_only
         self._enabled = False
         self._embedding_model_name = embedding_model
@@ -191,12 +374,14 @@ class SemanticGraph:
                     conn.execute(stmt + ";")
                 except Exception:
                     logger.debug("_init_schema: DDL 스킵 (already exists): %s", stmt[:60])
-        # 기존 DB에 content_hash 컬럼이 없으면 마이그레이션
-        try:
-            conn.execute(MIGRATION_DDL + ";")
-            logger.info("KGNode.content_hash 컬럼 추가 (마이그레이션)")
-        except Exception:
-            pass  # 이미 존재하면 정상
+        for property_name, migration in MIGRATION_DDL:
+            try:
+                conn.execute(migration + ";")
+                logger.info("%s 컬럼 추가 (마이그레이션)", property_name)
+            except Exception as exc:
+                message = str(exc).casefold()
+                if not any(marker in message for marker in ("already exists", "already has", "duplicate")):
+                    raise
 
     # ── 임베딩 캐시 헬퍼 ──────────────────────────────────────────────────────
 
@@ -412,7 +597,7 @@ class SemanticGraph:
 
     # ── SQLite KG → KuzuDB 동기화 ────────────────────────────────────────────
 
-    async def sync_from_kg(self) -> dict:
+    async def sync_from_kg(self, cancel_event: threading.Event | None = None) -> dict:
         """
         SQLite kg_nodes / kg_edges 를 KuzuDB 에 동기화한다.
         content_hash 기반으로 변경된 노드만 임베딩을 재계산한다.
@@ -421,44 +606,60 @@ class SemanticGraph:
         if not self._enabled:
             return {"status": "disabled"}
 
-        # locked() 체크와 락 진입 사이에 await가 없어야 다른 코루틴이 끼어들 수 없다 —
-        # 이 두 줄 사이에 절대 await를 넣지 말 것.
-        if self._sync_lock.locked():
+        if not self._sync_lock.try_acquire():
             logger.debug("sync_from_kg: 이미 실행 중 — 스킵")
             return {"status": "skipped"}
 
-        async with self._sync_lock:
+        try:
             from core.storage.db import get_connection
 
             conn = get_connection()
+            try:
+                nodes = conn.execute("SELECT id, title, type, tags, summary FROM kg_nodes").fetchall()
+                node_synced = 0
+                reembedded = 0
+                for row in nodes:
+                    if cancel_event is not None and cancel_event.is_set():
+                        return {
+                            "status": "cancelled",
+                            "nodes": node_synced,
+                            "reembedded": reembedded,
+                            "edges": 0,
+                        }
+                    nid, title, ntype, tags_json, summary = row
+                    did_reembed = await self.upsert_node(
+                        node_id=nid,
+                        title=title,
+                        node_type=ntype,
+                        tags=tags_json,
+                        summary=summary,
+                    )
+                    node_synced += 1
+                    if did_reembed:
+                        reembedded += 1
 
-            nodes = conn.execute("SELECT id, title, type, tags, summary FROM kg_nodes").fetchall()
-            node_synced = 0
-            reembedded = 0
-            for row in nodes:
-                nid, title, ntype, tags_json, summary = row
-                did_reembed = await self.upsert_node(
-                    node_id=nid,
-                    title=title,
-                    node_type=ntype,
-                    tags=tags_json,
-                    summary=summary,
-                )
-                node_synced += 1
-                if did_reembed:
-                    reembedded += 1
+                if cancel_event is not None and cancel_event.is_set():
+                    return {
+                        "status": "cancelled",
+                        "nodes": node_synced,
+                        "reembedded": reembedded,
+                        "edges": 0,
+                    }
 
-            # 엣지 동기화 (전체 재생성 — clear+create_edge 는 MERGE로 중복 방지됨)
-            await self.clear_edges()
-            edges = conn.execute("SELECT from_id, to_id, rel_type, weight FROM kg_edges").fetchall()
-            edge_synced = 0
-            for row in edges:
-                await self.create_edge(row[0], row[1], row[2], float(row[3]))
-                edge_synced += 1
+                # 엣지는 clear 이후 중단하면 부분 그래프가 되므로 한 번에 끝까지 재생성한다.
+                await self.clear_edges()
+                edges = conn.execute("SELECT from_id, to_id, rel_type, weight FROM kg_edges").fetchall()
+                edge_synced = 0
+                for row in edges:
+                    await self.create_edge(row[0], row[1], row[2], float(row[3]))
+                    edge_synced += 1
+            finally:
+                conn.close()
 
-            conn.close()
             logger.info("SemanticGraph 동기화: nodes=%d (재임베딩=%d), edges=%d", node_synced, reembedded, edge_synced)
             return {"status": "ok", "nodes": node_synced, "reembedded": reembedded, "edges": edge_synced}
+        finally:
+            self._sync_lock.release()
 
     # ── 시맨틱 검색 ───────────────────────────────────────────────────────────
 
@@ -483,7 +684,14 @@ class SemanticGraph:
         async with self._write_lock:
             return await self._semantic_search_locked(query_vec, top_k, threshold)
 
-    async def _semantic_search_locked(self, query_vec: list, top_k: int, threshold: float) -> list[dict]:
+    async def _semantic_search_locked(
+        self,
+        query_vec: list,
+        top_k: int,
+        threshold: float,
+        *,
+        raise_on_error: bool = False,
+    ) -> list[dict]:
         """호출자가 이미 self._write_lock을 쥔 상태에서만 호출(link_episode_to_kg 등)."""
         try:
             import numpy as np
@@ -506,9 +714,11 @@ class SemanticGraph:
                         }
                     )
             rows.sort(key=lambda x: x["score"], reverse=True)
-            return rows[:top_k]
+            return rows[:top_k] if top_k > 0 else rows
         except Exception as exc:
             logger.warning("semantic_search 실패: %s", exc)
+            if raise_on_error:
+                raise
             return []
 
     # ── 특정 노드의 시맨틱 이웃 ──────────────────────────────────────────────
@@ -546,6 +756,195 @@ class SemanticGraph:
             except Exception as exc:
                 logger.warning("semantic_neighbors 실패: %s", exc)
                 return []
+
+    async def graph_retrieve_from_episodes(
+        self,
+        episode_hits: list[dict],
+        *,
+        max_hops: int | None = None,
+        top_k: int | None = None,
+        hop_decay: float | None = None,
+        min_score: float | None = None,
+    ) -> list[dict]:
+        """Episode 검색 결과에서 EP_TO_KG와 KG_EDGE를 따라 관련 KG 노드를 찾는다.
+
+        KG traversal은 최대 2홉으로 강제한다. 각 결과 점수는 Episode 검색 점수,
+        EP_TO_KG 신뢰도, KG_EDGE 가중치, 홉 감쇠를 곱해 계산한다.
+        """
+        if not self._enabled or not episode_hits:
+            return []
+        if not bool(get_cfg_value("memory.graph_retrieval.enabled", True)):
+            return []
+
+        configured_hops = int(get_cfg_value("memory.graph_retrieval.max_hops", 2))
+        effective_hops = configured_hops if max_hops is None else int(max_hops)
+        effective_hops = max(0, min(effective_hops, 2))
+        effective_top_k = (
+            int(get_cfg_value("memory.graph_retrieval.top_k", 6))
+            if top_k is None
+            else int(top_k)
+        )
+        effective_decay = (
+            float(get_cfg_value("memory.graph_retrieval.hop_decay", 0.75))
+            if hop_decay is None
+            else float(hop_decay)
+        )
+        effective_decay = max(0.0, min(effective_decay, 1.0))
+        effective_min_score = (
+            float(get_cfg_value("memory.graph_retrieval.min_score", 0.12))
+            if min_score is None
+            else float(min_score)
+        )
+
+        def _confidence(value: Any, fallback: float = 0.0) -> float:
+            try:
+                parsed = float(value)
+            except (TypeError, ValueError):
+                parsed = fallback
+            return max(0.0, min(parsed, 1.0))
+
+        results: dict[str, dict] = {}
+        try:
+            async with self._write_lock:
+                for episode_hit in episode_hits:
+                    episode_id = str(episode_hit.get("id", "") or "")
+                    episode_score = _confidence(episode_hit.get("score"))
+                    if not episode_id or episode_score <= 0.0:
+                        continue
+
+                    anchor_rows = await self.async_conn.execute(
+                        "MATCH (e:EpisodeNode {id: $eid})-[r:EP_TO_KG]->(k:KGNode) "
+                        "RETURN k.id, k.title, k.type, k.summary, "
+                        "r.rel_type, r.score, r.weight",
+                        {"eid": episode_id},
+                    )
+                    frontier: list[dict] = []
+                    while anchor_rows.has_next():
+                        row = anchor_rows.get_next()
+                        edge_score = _confidence(row[5], _confidence(row[6], 1.0))
+                        if edge_score <= 0.0:
+                            edge_score = _confidence(row[6], 1.0)
+                        score = episode_score * edge_score
+                        if score < effective_min_score:
+                            continue
+                        node_id = str(row[0])
+                        path = [
+                            {"kind": "episode", "id": episode_id},
+                            {
+                                "kind": "edge",
+                                "type": "EP_TO_KG",
+                                "rel_type": str(row[4] or ""),
+                                "weight": round(edge_score, 4),
+                            },
+                            {
+                                "kind": "kg",
+                                "id": node_id,
+                                "title": str(row[1] or node_id),
+                            },
+                        ]
+                        candidate = {
+                            "id": node_id,
+                            "title": str(row[1] or node_id),
+                            "type": str(row[2] or ""),
+                            "summary": str(row[3] or ""),
+                            "score": round(score, 4),
+                            "hop": 0,
+                            "episode_id": episode_id,
+                            "episode_score": round(episode_score, 4),
+                            "path": path,
+                        }
+                        if score > float(results.get(node_id, {}).get("score", -1.0)):
+                            results[node_id] = candidate
+                        frontier.append(
+                            {
+                                **candidate,
+                                "score": score,
+                                "path_ids": {node_id},
+                            }
+                        )
+
+                    best_expansion: dict[tuple[str, int], float] = {}
+                    for hop in range(1, effective_hops + 1):
+                        next_frontier: list[dict] = []
+                        for current in frontier:
+                            node_id = current["id"]
+                            neighbor_specs = (
+                                (
+                                    "MATCH (n:KGNode {id: $id})-[r:KG_EDGE]->(m:KGNode) "
+                                    "RETURN m.id, m.title, m.type, m.summary, "
+                                    "r.rel_type, r.weight",
+                                    "out",
+                                ),
+                                (
+                                    "MATCH (m:KGNode)-[r:KG_EDGE]->(n:KGNode {id: $id}) "
+                                    "RETURN m.id, m.title, m.type, m.summary, "
+                                    "r.rel_type, r.weight",
+                                    "in",
+                                ),
+                            )
+                            for query, direction in neighbor_specs:
+                                neighbor_rows = await self.async_conn.execute(query, {"id": node_id})
+                                while neighbor_rows.has_next():
+                                    row = neighbor_rows.get_next()
+                                    neighbor_id = str(row[0])
+                                    if neighbor_id in current["path_ids"]:
+                                        continue
+                                    edge_weight = _confidence(row[5], 1.0)
+                                    score = float(current["score"]) * edge_weight * effective_decay
+                                    if score < effective_min_score:
+                                        continue
+                                    expansion_key = (neighbor_id, hop)
+                                    if score <= best_expansion.get(expansion_key, -1.0):
+                                        continue
+                                    best_expansion[expansion_key] = score
+                                    path = [
+                                        *current["path"],
+                                        {
+                                            "kind": "edge",
+                                            "type": "KG_EDGE",
+                                            "rel_type": str(row[4] or ""),
+                                            "direction": direction,
+                                            "weight": round(edge_weight, 4),
+                                        },
+                                        {
+                                            "kind": "kg",
+                                            "id": neighbor_id,
+                                            "title": str(row[1] or neighbor_id),
+                                        },
+                                    ]
+                                    candidate = {
+                                        "id": neighbor_id,
+                                        "title": str(row[1] or neighbor_id),
+                                        "type": str(row[2] or ""),
+                                        "summary": str(row[3] or ""),
+                                        "score": round(score, 4),
+                                        "hop": hop,
+                                        "episode_id": current["episode_id"],
+                                        "episode_score": current["episode_score"],
+                                        "path": path,
+                                    }
+                                    if score > float(results.get(neighbor_id, {}).get("score", -1.0)):
+                                        results[neighbor_id] = candidate
+                                    next_frontier.append(
+                                        {
+                                            **candidate,
+                                            "score": score,
+                                            "path_ids": {*current["path_ids"], neighbor_id},
+                                        }
+                                    )
+                        frontier = next_frontier
+                        if not frontier:
+                            break
+        except Exception as exc:
+            logger.warning("graph_retrieve_from_episodes 실패: %s", exc)
+            return []
+
+        ranked = sorted(
+            results.values(),
+            key=lambda item: (float(item["score"]), -int(item["hop"]), item["id"]),
+            reverse=True,
+        )
+        return ranked[:effective_top_k] if effective_top_k > 0 else ranked
 
     # ── EpisodeNode upsert & 검색 ────────────────────────────────────────────
 
@@ -593,13 +992,13 @@ class SemanticGraph:
                 },
             )
             self._episode_cache_dirty = True
-            # EP_TO_KG 자동 연결 (임베딩 계산 완료 후 즉시)
-            if emb:
-                await self._link_episode_to_kg_locked(
-                    episode_id=episode_id,
-                    episode_vec=emb,
-                    episode_keywords=keywords,
-                )
+            # EP_TO_KG 자동 연결 (임베딩이 없어도 키워드 연결은 수행)
+            await self._link_episode_to_kg_locked(
+                episode_id=episode_id,
+                episode_vec=emb or None,
+                episode_keywords=keywords,
+                episode_content=content,
+            )
             return True
         except Exception as exc:
             logger.debug("upsert_episode 실패 (id=%s): %s", episode_id, exc)
@@ -611,9 +1010,10 @@ class SemanticGraph:
         episode_vec: list | None = None,
         episode_keywords: str = "",
         top_k: int = 3,
-        sem_threshold: float = 0.40,
-        kw_threshold: int = 1,
+        sem_threshold: float | None = None,
+        kw_threshold: int = 2,
         kg_keyword_cache: list[tuple] | None = None,
+        kg_scope_cache: dict[str, tuple[str, str, str]] | None = None,
     ) -> int:
         """EpisodeNode를 관련 KGNode들에 EP_TO_KG 릴레이션으로 연결.
 
@@ -625,7 +1025,15 @@ class SemanticGraph:
         """
         async with self._write_lock:
             return await self._link_episode_to_kg_locked(
-                episode_id, episode_vec, episode_keywords, top_k, sem_threshold, kw_threshold, kg_keyword_cache
+                episode_id,
+                episode_vec,
+                episode_keywords,
+                "",
+                top_k,
+                sem_threshold,
+                kw_threshold,
+                kg_keyword_cache,
+                kg_scope_cache,
             )
 
     async def _link_episode_to_kg_locked(
@@ -633,92 +1041,197 @@ class SemanticGraph:
         episode_id: str,
         episode_vec: list | None = None,
         episode_keywords: str = "",
+        episode_content: str = "",
         top_k: int = 3,
-        sem_threshold: float = 0.40,
-        kw_threshold: int = 1,
+        sem_threshold: float | None = None,
+        kw_threshold: int = 2,
         kg_keyword_cache: list[tuple] | None = None,
+        kg_scope_cache: dict[str, tuple[str, str, str]] | None = None,
     ) -> int:
         """호출자가 이미 self._write_lock을 쥔 상태에서만 호출
         (upsert_episode/sync_all_ep_to_kg 내부)."""
         if not self._enabled:
             return 0
 
-        created = 0
-
-        # 기존 EP_TO_KG 삭제 (rel_type='semantic' 또는 'keyword' 만 대상, 다른 타입 보존)
-        try:
-            await self.async_conn.execute(
-                "MATCH (e:EpisodeNode {id: $eid})-[r:EP_TO_KG]->() "
-                "WHERE r.rel_type IN ['semantic', 'keyword'] DELETE r",
-                {"eid": episode_id}
-            )
-        except Exception as exc:
-            logger.debug("EP_TO_KG 기존 edge 삭제 실패 (id=%s): %s", episode_id, exc)
+        linked_at = _now_iso()
+        if sem_threshold is None:
+            sem_threshold = float(get_cfg_value("memory.ep_to_kg.semantic_threshold", 0.55))
+        if not episode_content:
+            try:
+                res = await self.async_conn.execute(
+                    "MATCH (e:EpisodeNode {id: $eid}) RETURN e.content",
+                    {"eid": episode_id},
+                )
+                if res.has_next():
+                    episode_content = res.get_next()[0] or ""
+            except Exception:
+                episode_content = ""
+        episode_project = _episode_project(episode_content)
+        if kg_scope_cache is None and episode_project:
+            try:
+                kg_scope_cache = _load_kg_scope_cache()
+            except Exception:
+                kg_scope_cache = {}
+        elif kg_scope_cache is None:
+            kg_scope_cache = {}
+        anchor_id, anchor_group = _resolve_episode_scope(episode_content, kg_scope_cache)
 
         # 1. 시맨틱 연결
+        semantic_candidates: list[dict] = []
         if episode_vec is not None:
-            sem_hits = await self._semantic_search_locked(episode_vec, top_k, sem_threshold)
+            try:
+                sem_hits = await self._semantic_search_locked(
+                    episode_vec,
+                    0,
+                    sem_threshold,
+                    raise_on_error=True,
+                )
+            except Exception:
+                return 0
             for hit in sem_hits:
-                try:
-                    await self.async_conn.execute(
-                        "MERGE (e:EpisodeNode {id: $eid}) " "MERGE (k:KGNode {id: $kid}) " "MERGE (e)-[r:EP_TO_KG {rel_type: 'semantic'}]->(k)",
-                        {"eid": episode_id, "kid": hit["id"]},
-                    )
-                    created += 1
-                except Exception as exc:
-                    logger.debug("EP_TO_KG semantic link 실패 (%s→%s): %s", episode_id, hit["id"], exc)
+                node_type, node_path, node_title = kg_scope_cache.get(
+                    str(hit["id"]),
+                    (str(hit.get("type", "") or ""), "", str(hit.get("title", "") or "")),
+                )
+                if not _kg_candidate_allowed(
+                    str(hit["id"]),
+                    node_type,
+                    node_path,
+                    node_title,
+                    anchor_id,
+                    anchor_group,
+                ):
+                    continue
+                semantic_candidates.append(hit)
+                if len(semantic_candidates) >= top_k:
+                    break
 
-        # 2. 키워드 연결 (정규화된 테이블 활용)
+        # 2. 키워드 연결
+        keyword_candidates: list[tuple[float, float, str, list[str]]] = []
         try:
-            # SQLite에서 현재 에피소드의 정규화된 키워드 목록 가져오기
-            from core.storage.db import get_connection
-            sqlite_conn = get_connection()
-            ep_keywords_rows = sqlite_conn.execute(
-                "SELECT k.name FROM keywords k "
-                "JOIN memory_keywords mk ON k.id = mk.keyword_id "
-                "WHERE mk.memory_id = ?",
-                (episode_id,)
-            ).fetchall()
-            ep_words = set(row["name"] for row in ep_keywords_rows)
-            sqlite_conn.close()
+            ep_words = _normalized_keywords(episode_keywords)
 
             if ep_words:
                 rows_to_scan = kg_keyword_cache
                 if rows_to_scan is None:
-                    res = await self.async_conn.execute("MATCH (k:KGNode) WHERE k.tags <> '' OR k.title <> '' RETURN k.id, k.tags, k.title")
+                    res = await self.async_conn.execute(
+                        "MATCH (k:KGNode) WHERE k.tags <> '' OR k.title <> '' "
+                        "RETURN k.id, k.tags, k.title, k.type"
+                    )
                     rows_to_scan = []
                     while res.has_next():
                         rows_to_scan.append(res.get_next())
 
                 for row in rows_to_scan:
-                    kg_id, tags_raw, title = row[0], row[1] or "", row[2] or ""
-                    # KGNode의 태그와 제목에서 키워드 추출
-                    kg_words = set(w.lower() for w in (tags_raw + " " + title).replace(",", " ").split() if len(w) > 1)
-
-                    # 교집합 크기 계산
+                    kg_id, tags_raw, title = str(row[0]), row[1] or "", row[2] or ""
+                    node_type, node_path, cached_title = kg_scope_cache.get(
+                        kg_id,
+                        (str(row[3] or "") if len(row) > 3 else "", "", str(title)),
+                    )
+                    if not _kg_candidate_allowed(
+                        kg_id,
+                        node_type,
+                        node_path,
+                        cached_title or str(title),
+                        anchor_id,
+                        anchor_group,
+                    ):
+                        continue
+                    kg_words = _normalized_keywords(tags_raw) | _normalized_keywords(title)
                     intersection = ep_words & kg_words
                     if len(intersection) >= kw_threshold:
-                        await self.async_conn.execute(
-                            "MERGE (e:EpisodeNode {id: $eid}) "
-                            "MERGE (k:KGNode {id: $kid}) "
-                            "MERGE (e)-[r:EP_TO_KG {rel_type: 'keyword'}]->(k) "
-                            "SET r.weight = $weight, r.keywords = $matched",
-                            {
-                                "eid": episode_id,
-                                "kid": kg_id,
-                                "weight": len(intersection),
-                                "matched": ", ".join(list(intersection))
-                            },
-                        )
-                        created += 1
+                        matched = sorted(intersection)
+                        overlap = float(len(matched))
+                        score = overlap / max(1, len(kg_words))
+                        keyword_candidates.append((score, overlap, kg_id, matched))
+
+                keyword_candidates.sort(key=lambda item: (-item[0], -item[1], item[2]))
+                keyword_candidates = keyword_candidates[:top_k]
         except Exception as exc:
-            logger.debug("EP_TO_KG keyword link (normalized) 실패: %s", exc)
+            logger.warning("EP_TO_KG keyword candidate 계산 실패 (id=%s): %s", episode_id, exc)
+            return 0
+
+        try:
+            created = await asyncio.to_thread(
+                self._replace_episode_links_transaction,
+                episode_id,
+                semantic_candidates,
+                keyword_candidates,
+                linked_at,
+            )
+        except Exception as exc:
+            logger.warning("EP_TO_KG atomic replace 실패 (id=%s): %s", episode_id, exc)
+            return 0
 
         if created:
             logger.debug("EP_TO_KG: episode=%s, %d 릴레이션 생성", episode_id, created)
         return created
 
-    async def sync_all_ep_to_kg(self, sem_threshold: float = 0.40, top_k: int = 3) -> dict:
+    def _replace_episode_links_transaction(
+        self,
+        episode_id: str,
+        semantic_candidates: list[dict],
+        keyword_candidates: list[tuple[float, float, str, list[str]]],
+        linked_at: str,
+    ) -> int:
+        conn = self.async_conn.acquire_connection()
+        created = 0
+        try:
+            conn.execute("BEGIN TRANSACTION")
+            conn.execute(
+                "MATCH (e:EpisodeNode {id: $eid})-[r:EP_TO_KG]->() "
+                "WHERE r.rel_type IN ['semantic', 'keyword'] DELETE r",
+                {"eid": episode_id},
+            )
+            for hit in semantic_candidates:
+                conn.execute(
+                    "MERGE (e:EpisodeNode {id: $eid}) "
+                    "MERGE (k:KGNode {id: $kid}) "
+                    "MERGE (e)-[r:EP_TO_KG {rel_type: 'semantic'}]->(k) "
+                    "SET r.weight=$score, r.keywords='', r.score=$score, "
+                    "r.method='semantic', r.model=$model, r.version=$version, "
+                    "r.created_at=$created_at",
+                    {
+                        "eid": episode_id,
+                        "kid": hit["id"],
+                        "score": float(hit["score"]),
+                        "model": self._embedding_model_name,
+                        "version": EP_TO_KG_LINK_VERSION,
+                        "created_at": linked_at,
+                    },
+                )
+                created += 1
+            for score, overlap, kg_id, matched in keyword_candidates:
+                conn.execute(
+                    "MERGE (e:EpisodeNode {id: $eid}) "
+                    "MERGE (k:KGNode {id: $kid}) "
+                    "MERGE (e)-[r:EP_TO_KG {rel_type: 'keyword'}]->(k) "
+                    "SET r.weight=$weight, r.keywords=$matched, r.score=$score, "
+                    "r.method='keyword', r.model='', r.version=$version, "
+                    "r.created_at=$created_at",
+                    {
+                        "eid": episode_id,
+                        "kid": kg_id,
+                        "weight": overlap,
+                        "score": score,
+                        "matched": ", ".join(matched),
+                        "version": EP_TO_KG_LINK_VERSION,
+                        "created_at": linked_at,
+                    },
+                )
+                created += 1
+            conn.execute("COMMIT")
+            return created
+        except Exception:
+            try:
+                conn.execute("ROLLBACK")
+            except Exception:
+                logger.exception("Failed to roll back EP_TO_KG replacement")
+            raise
+        finally:
+            self.async_conn.release_connection(conn)
+
+    async def sync_all_ep_to_kg(self, sem_threshold: float | None = None, top_k: int = 3) -> dict:
         """기존 EpisodeNode 전체에 link_episode_to_kg 소급 적용.
         MCP 서버 중단 후 실행해야 함 (KuzuDB 단일 writer 제약).
         Returns: {"processed": N, "linked": M}
@@ -726,41 +1239,60 @@ class SemanticGraph:
         async with self._write_lock:
             return await self._sync_all_ep_to_kg_locked(sem_threshold, top_k)
 
-    async def _sync_all_ep_to_kg_locked(self, sem_threshold: float = 0.40, top_k: int = 3) -> dict:
+    async def _sync_all_ep_to_kg_locked(self, sem_threshold: float | None = None, top_k: int = 3) -> dict:
         if not self._enabled:
             return {"processed": 0, "linked": 0, "error": "KuzuDB disabled"}
-
-        if self._episode_cache_dirty:
-            await self._rebuild_episode_cache_locked()
 
         # KGNode keyword/title 캐시 1회 빌드 → link_episode_to_kg 호출마다 전체 스캔 방지
         kg_keyword_cache: list[tuple] | None = None
         try:
-            res = await self.async_conn.execute("MATCH (k:KGNode) WHERE k.tags <> '' RETURN k.id, k.tags, k.title")
+            res = await self.async_conn.execute(
+                "MATCH (k:KGNode) WHERE k.tags <> '' OR k.title <> '' "
+                "RETURN k.id, k.tags, k.title, k.type"
+            )
             kg_keyword_cache = []
             while res.has_next():
                 kg_keyword_cache.append(res.get_next())
         except Exception:
             kg_keyword_cache = None
 
+        episodes: list[tuple[str, list | None, str, str]] = []
+        try:
+            res = await self.async_conn.execute(
+                "MATCH (e:EpisodeNode) RETURN e.id, e.embedding, e.keywords, e.content"
+            )
+            while res.has_next():
+                ep_id, embedding_raw, keywords, content = res.get_next()
+                ep_vec = None
+                if embedding_raw:
+                    try:
+                        ep_vec = json.loads(embedding_raw)
+                    except (TypeError, ValueError, json.JSONDecodeError):
+                        logger.warning("EpisodeNode embedding 파싱 실패: %s", ep_id)
+                episodes.append((str(ep_id), ep_vec, keywords or "", content or ""))
+        except Exception as exc:
+            raise RuntimeError("EpisodeNode inventory load failed") from exc
+
+        if any(_episode_project(content) for _, _, _, content in episodes):
+            try:
+                kg_scope_cache = _load_kg_scope_cache()
+            except Exception:
+                kg_scope_cache = {}
+        else:
+            kg_scope_cache = {}
+
         processed = 0
         linked = 0
-        for i, ep_id in enumerate(self._episode_cache_ids):
-            ep_vec = self._episode_cache_matrix[i].tolist() if self._episode_cache_matrix is not None else None
-            keywords = ""
-            try:
-                res = await self.async_conn.execute("MATCH (e:EpisodeNode {id: $id}) RETURN e.keywords", {"id": ep_id})
-                if res.has_next():
-                    keywords = res.get_next()[0] or ""
-            except Exception:
-                pass
+        for ep_id, ep_vec, keywords, content in episodes:
             n = await self._link_episode_to_kg_locked(
                 ep_id,
                 episode_vec=ep_vec,
                 episode_keywords=keywords,
+                episode_content=content,
                 top_k=top_k,
                 sem_threshold=sem_threshold,
                 kg_keyword_cache=kg_keyword_cache,
+                kg_scope_cache=kg_scope_cache,
             )
             linked += n
             processed += 1
@@ -781,21 +1313,22 @@ class SemanticGraph:
             return
 
         ids: list[str] = []
+        contents: list[str] = []
         dates: list[str] = []
         vecs: list[Any] = []
 
         try:
-            # content 제거: id, created_at, embedding만 조회
             res = await self.async_conn.execute(
                 "MATCH (e:EpisodeNode) WHERE e.embedding <> '' "
-                "RETURN e.id, e.created_at, e.embedding"
+                "RETURN e.id, e.content, e.created_at, e.embedding"
             )
             while res.has_next():
                 row = res.get_next()
                 try:
-                    vec = np.array(json.loads(row[2]), dtype=np.float32)
+                    vec = np.array(json.loads(row[3]), dtype=np.float32)
                     ids.append(row[0])
-                    dates.append(row[1] or "")
+                    contents.append(row[1] or "")
+                    dates.append(row[2] or "")
                     vecs.append(vec)
                 except Exception:
                     pass
@@ -804,9 +1337,98 @@ class SemanticGraph:
 
         self._episode_cache_matrix = np.stack(vecs) if vecs else None
         self._episode_cache_ids = ids
+        self._episode_cache_contents = contents
         self._episode_cache_dates = dates
         self._episode_cache_dirty = False
         logger.debug("_rebuild_episode_cache: %d 에피소드 로드", len(ids))
+
+    async def reconcile_episodes(
+        self,
+        canonical_memory_ids: Iterable[str | int] | Callable[[], Iterable[str | int]],
+        apply: bool = False,
+    ) -> EpisodeReconciliationReport:
+        """SQLite memories ID 집합을 기준으로 EpisodeNode 무결성을 점검한다."""
+        if not self._enabled:
+            raise RuntimeError("SemanticGraph is disabled")
+        if apply and self._read_only:
+            raise RuntimeError("Cannot apply episode reconciliation to a read-only SemanticGraph")
+
+        async with self._write_lock:
+            source_ids = canonical_memory_ids() if callable(canonical_memory_ids) else canonical_memory_ids
+            canonical_ids = {str(memory_id) for memory_id in source_ids}
+            try:
+                episode_ids = await self._episode_ids_locked()
+                linked_ids = await self._linked_episode_ids_locked()
+            except Exception as exc:
+                raise RuntimeError("Failed to audit EpisodeNode integrity") from exc
+
+            stale_ids = sorted(episode_ids - canonical_ids, key=_memory_id_sort_key)
+            missing_ids = sorted(canonical_ids - episode_ids, key=_memory_id_sort_key)
+            unlinked_ids = sorted(episode_ids - linked_ids, key=_memory_id_sort_key)
+            episode_count_before = len(episode_ids)
+            episode_ids_after = episode_ids
+
+            if apply and stale_ids:
+                try:
+                    await asyncio.to_thread(
+                        self._delete_stale_episodes_transaction,
+                        stale_ids,
+                    )
+                    episode_ids_after = await self._episode_ids_locked()
+                except Exception as exc:
+                    self._episode_cache_dirty = True
+                    raise RuntimeError("Failed to delete stale EpisodeNodes") from exc
+                self._episode_cache_dirty = True
+
+            return {
+                "canonical_count": len(canonical_ids),
+                "episode_count_before": episode_count_before,
+                "stale_ids": stale_ids,
+                "missing_ids": missing_ids,
+                "unlinked_episode_ids": unlinked_ids,
+                "applied": apply,
+                "deleted_count": len(episode_ids - episode_ids_after),
+                "episode_count_after": len(episode_ids_after),
+            }
+
+    def _delete_stale_episodes_transaction(self, stale_ids: list[str]) -> None:
+        conn = self.async_conn.acquire_connection()
+        try:
+            conn.execute("BEGIN TRANSACTION")
+            for episode_id in stale_ids:
+                conn.execute(
+                    "MATCH (e:EpisodeNode {id: $id})-[r:EP_TO_KG]->() DELETE r",
+                    {"id": episode_id},
+                )
+                conn.execute(
+                    "MATCH (e:EpisodeNode {id: $id}) DELETE e",
+                    {"id": episode_id},
+                )
+            conn.execute("COMMIT")
+        except Exception:
+            try:
+                conn.execute("ROLLBACK")
+            except Exception:
+                logger.exception("Failed to roll back stale EpisodeNode deletion")
+            raise
+        finally:
+            self.async_conn.release_connection(conn)
+
+    async def _episode_ids_locked(self) -> set[str]:
+        res = await self.async_conn.execute("MATCH (e:EpisodeNode) RETURN e.id")
+        ids: set[str] = set()
+        while res.has_next():
+            ids.add(str(res.get_next()[0]))
+        return ids
+
+    async def _linked_episode_ids_locked(self) -> set[str]:
+        res = await self.async_conn.execute(
+            "MATCH (e:EpisodeNode)-[:EP_TO_KG]->() RETURN DISTINCT e.id"
+        )
+        ids: set[str] = set()
+        while res.has_next():
+            ids.add(str(res.get_next()[0]))
+        return ids
 
     async def episode_semantic_search(
         self,
@@ -862,30 +1484,14 @@ class SemanticGraph:
                     rows.append(
                         {
                             "id": self._episode_cache_ids[i],
-                            "content": "",
+                            "content": self._episode_cache_contents[i],
                             "score": round(score, 4),
                             "created_at": self._episode_cache_dates[i],
                         }
                     )
                 rows.sort(key=lambda x: x["score"], reverse=True)
-                rows = rows[:top_k]
-
-            # 락 밖: 이후는 id 기준 개별 조회라 캐시 배열(TOCTOU 대상)과 무관
-            if rows:
-                top_ids = [r["id"] for r in rows]
-                content_map: dict[str, str] = {}
-                try:
-                    for ep_id in top_ids:
-                        res2 = await self.async_conn.execute(
-                            "MATCH (e:EpisodeNode {id: $id}) RETURN e.content",
-                            {"id": ep_id},
-                        )
-                        if res2.has_next():
-                            content_map[ep_id] = res2.get_next()[0] or ""
-                except Exception:
-                    pass
-                for r in rows:
-                    r["content"] = content_map.get(r["id"], "")
+                if top_k > 0:
+                    rows = rows[:top_k]
 
             return rows
         except Exception as exc:

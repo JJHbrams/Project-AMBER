@@ -3,7 +3,7 @@ import { Network } from "vis-network";
 import { DataSet } from "vis-data";
 import type { Options, Node, Edge } from "vis-network";
 import { TauriBridge } from "../ipc/tauri_bridge";
-import type { KGNodeData, KGEdgeData, EpisodeNodeData } from "../types/kg";
+import type { KGNodeData, KGEdgeData, EpisodeNodeData, EpisodeEdgeData } from "../types/kg";
 
 const POLL_INTERVAL = 5000;
 const DEFAULT_REPULSION = -60;
@@ -68,15 +68,25 @@ function makeEpisodeNode(n: EpisodeNodeData): Node {
   };
 }
 
-function makeSemanticEdge(e: { from: string; to: string; rel_type: string }, id: string): Edge {
+function makeSemanticEdge(e: EpisodeEdgeData, id: string): Edge {
+  const score = e.score ?? e.weight ?? 0;
+  const provenance = [
+    e.method || e.rel_type,
+    `score: ${score.toFixed(4)}`,
+    e.keywords ? `keywords: ${e.keywords}` : "",
+    e.model ? `model: ${e.model}` : "",
+    e.version ? `version: ${e.version}` : "",
+    e.created_at ? `created: ${e.created_at}` : "",
+  ].filter(Boolean).join("\n");
   return {
     id,
     from: `ep:${e.from}`,
     to: e.to,
     label: "",
+    title: provenance,
     color: { color: "#1a2040", highlight: "#3f51b5" },
     dashes: true,
-    width: 0.5,
+    width: Math.min(4, 0.5 + Math.max(0, score)),
     arrows: { to: { enabled: true, scaleFactor: 0.3 } },
   };
 }
@@ -247,7 +257,8 @@ export function KGGraphPanel({ highlight = [], onNodeCount }: KGGraphPanelProps)
         }
 
         if (showSemanticRef.current && showMemRef.current) {
-          const semId = (e: { from: string; to: string }) => `sem:ep:${e.from}__${e.to}`;
+          const semId = (e: { from: string; to: string; rel_type: string }) =>
+            `sem:ep:${e.from}__${e.to}__${e.rel_type}`;
           const visibleSemEdges = data.ep_edges.filter((e) => visibleEpNodeIds.has(`ep:${e.from}`));
           const incomingSemIds = new Set(visibleSemEdges.map(semId));
           const existingSemIds = new Set(edgesDS.current.getIds().map(String).filter((id) => id.startsWith("sem:")));

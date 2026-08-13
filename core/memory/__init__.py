@@ -15,6 +15,7 @@ from .store import (
     resolve_session_id_by_scope,
     save_memory,
     save_message,
+    search_memory_hits,
     search_memories,
     upsert_working_memory,
 )

@@ -2,6 +2,74 @@
 
 All notable changes to this project are documented in this file.
 
+## Unreleased
+
+## [1.2.0] — 2026-08-13
+
+### Added
+
+- Episode 검색 결과에서 `EP_TO_KG`와 `KG_EDGE`를 최대 2홉까지 순회하는
+  graph-aware retrieval API를 추가했다. Episode 관련도, 링크 신뢰도, KG 엣지
+  가중치, 홉 감쇠를 융합해 점수를 계산하고 최상 근거 경로를 함께 반환한다.
+- 필터를 통과한 Episode에서 도달한 KG 노드와 최상 경로를
+  `<ctx:graph_evidence>`로 컨텍스트에 주입한다. 근거가 없는 질의에는 섹션을
+  생성하지 않고 경로·요약 길이를 설정값으로 제한한다.
+- direct·패러프레이즈·negative-control golden query와 실제 임시 Kuzu 기반 E2E를
+  추가했다. `scripts/kg/evaluate_graph_retrieval.py`로 운영 DB의 Episode/KG hit를
+  재평가하고 JSON 결과 및 실패 exit code를 받을 수 있다.
+- SQLite `memories`를 기준으로 KuzuDB `EpisodeNode` 무결성을 점검하는 관리자 reconcile
+  도구와 CLI를 추가했다. 기본은 dry-run이며 명시적인 apply에서만 stale 노드와 연결을
+  삭제하고, 누락 및 미연결 ID는 생성하지 않고 보고한다.
+- `EP_TO_KG`에 점수, 방식, 모델, 버전, 생성 시각 등 링크 provenance 메타데이터를
+  추가하고 기존 KuzuDB 스키마를 자동 마이그레이션한다.
+- 세션 후 동기화의 실행·단계·오류·드리프트를 원자적 JSON 상태로 보존하고
+  `/health` 요약 및 로컬 `/api/sync/status`에서 조회할 수 있게 했다.
+
+### Fixed
+
+- graph retrieval 운영 평가의 direct golden query를 실제 2홉 제한 결정에 맞추고,
+  최신 Episode가 연결된 메모리 설계 노드도 유효 anchor로 인정하도록 교정했다.
+- raw Copilot CLI 새 세션에서도 `~/.engram/copilot-instructions.md`를 읽도록
+  `COPILOT_CUSTOM_INSTRUCTIONS_DIRS`를 사용자 환경변수로 등록한다. frozen installer도
+  프로토콜 파일을 배포하고, `engram-copilot`은 `--yolo`·`--model` 같은 대화형
+  옵션이 있어도 bootstrap initial prompt를 유지한다.
+- JSON 태그의 구두점과 제목 전용 KG 노드도 일관되게 정규화하여 메모리 키워드 링크가
+  생성되지 않던 문제를 수정했다.
+- 키워드 하나만 겹쳐도 모든 KG 노드에 연결되던 과잉 링크를 막았다. 불용어·숫자를
+  제외하고 최소 2개 일치, 정규화 점수 순 Episode당 최대 3개로 제한한다.
+- MCP 이벤트 루프와 백그라운드 동기화 스레드가 동일한 `asyncio.Lock`을 공유해
+  교착될 수 있던 문제를 cross-loop 안전 락으로 교체했다.
+- SQLite/Kuzu Episode 대조 결과에 따라 뒤처지거나 앞선 memory 체크포인트를 자동
+  보정하고, upsert 실패 행 이후로 체크포인트가 진행되지 않게 했다.
+- `engram_close_session`이 동기화 예약 결과를 별도로 반환해 예약과 실제 완료를
+  구분하며, 실패한 동기화에는 cooldown을 적용하지 않아 다음 세션에서 재시도한다.
+- sync gate/cooldown skip이 마지막 성공·실패 결과를 덮어쓰지 않게 예약 이력을
+  분리하고, 성공 후 drift를 다시 측정해 최종 checkpoint와 Episode count를 확정한다.
+- 프로세스 재시작 시 남은 `scheduled`/`running` 상태를 중단 실패로 복구하고,
+  동시 `close_session` 예약은 원자적 run guard로 하나만 실행되게 했다.
+- Kuzu KG 동기화에 watchdog 취소 신호를 전달해 장시간 노드 동기화를 안전하게
+  중단할 수 있게 했다.
+- `close_session`이 생성한 memory/Episode에 실제 session ID를 보존해 원본
+  user/assistant 턴으로 역추적할 수 있게 했다.
+- 자동 장기기억 검색에서 짧은 테스트 Episode를 제외하고 현재 프로젝트 일치도를
+  반영해 재순위화하며, 낮은 관련도의 타 프로젝트 기억은 컨텍스트에서 억제한다.
+- Episode 검색 후보를 자르기 전에 프로젝트·테스트 필터를 적용하고, portable project
+  anchor를 사용해 경로가 달라져도 같은 프로젝트 KG 범위로 연결한다.
+- `EP_TO_KG` 후보를 프로젝트 경로·노드 타입으로 제한하고, 기존 링크 교체를 단일
+  transaction으로 처리해 후보 계산이나 생성 실패 시 이전 링크를 보존한다.
+- 운영 `memories_sync` endpoint와 배치 CLI가 하드코딩된 임계값 대신
+  `memory.ep_to_kg.semantic_threshold` 설정을 사용하게 했다.
+- 수동 `memories_sync` 성공 후 checkpoint, Episode count, drift를 persistent sync
+  status에 반영해 `/health`가 실제 canonical/Kuzu 상태를 표시하게 했다.
+- Episode에 명시된 `무관 질의` 평가 주제와 현재 질문이 일치하면 해당 평가용 기억을
+  자동 컨텍스트에서 제외해 negative-control 문구 자체가 회상되는 오염을 막았다.
+- 프로젝트 키의 경로 digest를 제외해 동일 프로젝트를 안정적으로 판별하고, 명시적
+  타 프로젝트 Episode 및 한국어 질의에서 실제 토큰 근거가 없는 후보를 제외한다.
+- 괄호·인용부호 뒤에서 분리된 한국어 조사 한 글자가 관련성 근거로 계산되지 않도록
+  semantic 재순위화와 SQLite fallback의 검색 토큰 정규화를 통일했다.
+- 한국어 조사·서술 접미사를 제거해 패러프레이즈의 공통 어근을 인식하고, 최소 두
+  근거 토큰을 요구해 `환경` 같은 일반 단어 하나만 겹친 고점 오탐을 차단한다.
+
 ## [1.1.2] — 2026-08-11
 
 ### Changed

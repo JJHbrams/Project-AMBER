@@ -9,7 +9,7 @@
 ; ============================================================
 
 #define AppName "Engram Overlay"
-#define AppVersion "1.1.2"
+#define AppVersion "1.2.0"
 #define AppPublisher "DRTECH"
 #define AppExeName "engram-overlay.exe"
 
@@ -41,6 +41,7 @@ Name: "autostart"; Description: "Windows 시작 시 자동 실행 (Startup 등�
 [Files]
 ; frozen 번들 전체 (dist\engram-overlay\*)
 Source: "..\dist\engram-overlay\*"; DestDir: "{app}\dist\engram-overlay"; Flags: recursesubdirs createallsubdirs ignoreversion
+Source: "..\config\clients\copilot.md"; DestDir: "{app}\config\clients"; Flags: ignoreversion
 ; 설치타임 구성기
 Source: "configure.ps1"; DestDir: "{app}\installer"; Flags: ignoreversion
 
