@@ -1,5 +1,26 @@
 # Release Notes
 
+## 2026-08-13 - v1.2.1 Portable EXE Hotfix 2
+
+> Executable-only hotfix for an existing **v1.2.1** installation. Hotfix 2 includes Hotfix 1.
+
+### Fixed
+
+- Bubble mode now always injects the Engram bootstrap directive, independent of the optional
+  `session.auto_inject` setting. The first response loads identity, tutorial, and memory context
+  through `engram_get_context_once`, matching the TUI launcher behavior.
+
+### Apply the Hotfix
+
+1. Exit Engram Overlay from its context menu.
+2. Open `%LOCALAPPDATA%\Programs\EngramOverlay\dist\engram-overlay`.
+3. Back up the existing `engram-overlay.exe`.
+4. Replace it with `EngramOverlay_1.2.1_hotfix2.exe`.
+5. Rename the replacement to `engram-overlay.exe`, then start it.
+
+Do not replace the `_internal` directory. This executable is compatible with the v1.2.1 installer
+bundle only.
+
 ## 2026-08-13 - v1.2.1 Portable EXE Hotfix 1
 
 > This is an executable-only hotfix for an existing **v1.2.1** installation. It also contains

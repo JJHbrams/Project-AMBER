@@ -6,6 +6,9 @@ All notable changes to this project are documented in this file.
 
 ### Fixed
 
+- **v1.2.1 portable exe hotfix 2** — 기본 채팅 모드인 bubble에서도
+  `session.auto_inject` 설정과 무관하게 `engram_get_context_once` 부트스트랩 지시문을
+  항상 주입한다. 신규 설치 직후에도 첫 응답 전에 정체성·튜토리얼 컨텍스트를 로드한다.
 - **v1.2.1 portable exe hotfix** — frozen 설치본에서 `~/.engram/engram-overlay.cmd`가
   없어도 현재 `engram-overlay.exe`를 자동 시작 바로가기 대상으로 사용한다. installer가
   이미 만든 바로가기는 설정 저장 시 불필요하게 다시 만들지 않는다.

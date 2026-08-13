@@ -53,9 +53,14 @@ def build_bootstrap_directive(caller: str = "claude-code", scope_key: str = "ove
 
 
 def bubble_bootstrap_prompt(cwd: str) -> str | None:
-    """auto_inject 가 켜졌을 때 bubble 세션 append_system_prompt 에 덧댈 지시문(꺼졌으면 None)."""
-    if not is_auto_inject_enabled():
-        return None
+    """bubble 세션 append_system_prompt 에 덧댈 부트스트랩 지시문.
+
+    TUI 모드(installer/modules/07_shims.ps1의 claude shim)는 auto_inject 설정과
+    무관하게 매번 `--append-system-prompt`로 이 지시문을 무조건 붙인다 — 그래야
+    첫 응답 전에 engram_get_context_once가 불려서 신규 사용자가 튜토리얼 안내를
+    받는다. bubble 모드는 기본 chat_mode인데도 이 지시문을 auto_inject(기본 꺼짐)에
+    묶어둔 탓에, 기본 설정 그대로인 신규 사용자는 부트스트랩이 전혀 안 붙어 튜토리얼
+    안내를 못 받는 비대칭 버그가 있었다 — TUI와 동일하게 항상 붙이도록 고쳤다."""
     return build_bootstrap_directive(caller="claude-code", scope_key="overlay", cwd=cwd)
 
 

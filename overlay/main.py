@@ -1104,7 +1104,8 @@ class OverlayApp:
             stm_bridge=StmBridge(scope_key="overlay"),
             # 확장 사고 예산 — 생각풍선에 실제 추론 텍스트를 보여주기 위함(0이면 끔).
             thinking_tokens=int(bubble_cfg.get("thinking_tokens", 2000)),
-            # session.auto_inject 가 켜졌을 때만 engram 부트스트랩 지시문을 덧댄다(꺼지면 None).
+            # TUI 셔임과 동일하게 auto_inject와 무관하게 항상 부트스트랩 지시문을 덧댄다 —
+            # 그래야 기본 chat_mode(bubble)로 시작하는 신규 사용자도 튜토리얼 안내를 받는다.
             bootstrap_prompt=bubble_bootstrap_prompt(workdir),
         )
         self._bubble_session.start()
