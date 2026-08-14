@@ -35,13 +35,13 @@ class ContextRetrievalQualityTests(unittest.IsolatedAsyncioTestCase):
             {
                 "id": "other",
                 "content": "---\nproject: OtherProject\n---\n\n비슷하지만 다른 프로젝트의 결정",
-                "score": 0.50,
+                "score": 0.83,
                 "created_at": "",
             },
             {
                 "id": "target",
                 "content": "---\nproject: CurrentProject\n---\n\n현재 프로젝트에서 정한 실제 결정",
-                "score": 0.48,
+                "score": 0.82,
                 "created_at": "",
             },
         ]
@@ -61,7 +61,7 @@ class ContextRetrievalQualityTests(unittest.IsolatedAsyncioTestCase):
             {
                 "id": "real",
                 "content": "---\nproject: CurrentProject\n---\n\n실제 세션에서 결정한 회상 기준",
-                "score": 0.50,
+                "score": 0.83,
                 "created_at": "",
             },
         ]
@@ -79,7 +79,7 @@ class ContextRetrievalQualityTests(unittest.IsolatedAsyncioTestCase):
             {
                 "id": "noise",
                 "content": "---\nproject: OtherProject\n---\n\n무관한 프로젝트 기억",
-                "score": 0.42,
+                "score": 0.78,
                 "created_at": "",
             }
         ]
@@ -118,7 +118,7 @@ class ContextRetrievalQualityTests(unittest.IsolatedAsyncioTestCase):
                     "negative control의 무관 기억 허용치는 0건이다. "
                     "직접 질문과 패러프레이즈 모두 같은 결정을 회상해야 한다."
                 ),
-                "score": 0.49,
+                "score": 0.82,
                 "created_at": "",
             }
         ]
@@ -136,7 +136,7 @@ class ContextRetrievalQualityTests(unittest.IsolatedAsyncioTestCase):
             {
                 "id": "noise",
                 "content": "---\nproject: CurrentProject\n---\n\n같은 프로젝트지만 무관한 기억",
-                "score": 0.46,
+                "score": 0.79,
                 "created_at": "",
             }
         ]

@@ -16,6 +16,8 @@
 
 ## During Session
 
+- 코드·파일 수정, 빌드·테스트, Git 작업 → 첫 도구 호출 전에 `engram-task-workflow` skill 실행
+- Wiki 작성·수정 → `engram-wiki-workflow` skill 실행
 - 핵심 인사이트, 문제 해결, 프로젝트 마일스톤 → `engram_save_memory(content, provider="copilot")`
 - STM 메시지 저장 → `engram_save_message(scope_key="<cwd 또는 ENGRAM_SCOPE_KEY>", role="user"|"assistant", content="...")`
 - 관련 과거 경험이 필요할 때 → `engram_search_memories(query)`

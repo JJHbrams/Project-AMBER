@@ -1,13 +1,10 @@
 ﻿<#
 .SYNOPSIS
-    Engram Overlay — 통짜 setup.exe 빌드 (개발자 머신 전용)
-
-    1) (옵션) frozen 번들 재빌드: PyInstaller → dist\engram-overlay\
-    2) Inno Setup(ISCC)로 .iss 컴파일 → installer\Output\EngramOverlay_<ver>_x64-setup.exe
+    Engram Overlay — frozen bundle and Inno Setup release build.
 
 .EXAMPLE
-    .\build-installer.ps1              # 풀 빌드 (frozen 재빌드 + 패키징)
-    .\build-installer.ps1 -SkipBuild   # 기존 dist 재사용, 패키징만
+    .\build-installer.ps1
+    .\build-installer.ps1 -SkipBuild
 #>
 param(
     [switch]$SkipBuild,
@@ -15,14 +12,30 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$Root = Split-Path $PSScriptRoot          # 프로젝트 루트 (build-installer.ps1 은 installer\ 안)
-$Spec = Join-Path $Root "engram-overlay.spec"
-$Iss  = Join-Path $PSScriptRoot "engram-overlay.iss"
-$DistExe = Join-Path $Root "dist\engram-overlay\engram-overlay.exe"
+$Root = Split-Path $PSScriptRoot
+$Iss = Join-Path $PSScriptRoot "engram-overlay.iss"
+$Engine = Join-Path $PSScriptRoot "build-overlay.ps1"
+$DistDir = Join-Path $Root "dist\engram-overlay"
+$DistExe = Join-Path $DistDir "engram-overlay.exe"
+$DashboardExe = Join-Path $DistDir "engram-dashboard.exe"
 
-function Write-Step($m) { Write-Host "`n==> $m" -ForegroundColor Cyan }
-function Write-Ok($m)   { Write-Host "  [OK] $m" -ForegroundColor Green }
-function Write-Err($m)  { Write-Host "  [X] $m" -ForegroundColor Red; exit 1 }
+function Write-Step($Message) { Write-Host "`n==> $Message" -ForegroundColor Cyan }
+function Write-Ok($Message) { Write-Host "  [OK] $Message" -ForegroundColor Green }
+function Write-Err($Message) {
+    Write-Host "  [X] $Message" -ForegroundColor Red
+    exit 1
+}
+
+function Invoke-FrozenRole([string]$Role) {
+    $process = Start-Process -FilePath $DistExe `
+        -ArgumentList @("--role", $Role) `
+        -Wait -PassThru -WindowStyle Hidden
+    return [int]$process.ExitCode
+}
+
+if (-not (Test-Path $Engine)) {
+    Write-Err "Shared overlay build engine not found: $Engine"
+}
 
 # ── ISCC 탐지 ────────────────────────────────────────────────
 $IsccCandidates = @(
@@ -36,50 +49,55 @@ if (-not $Iscc) {
 }
 Write-Ok "ISCC: $Iscc"
 
-# ── 0) 오프라인 임베딩 모델 export ───────────────────────────
-# HuggingFace 서버 의존 제거: 모델을 flat 디렉토리로 미리 저장해 번들에 포함.
-# (기존 HF 캐시 재사용 — 캐시 있으면 네트워크 불필요)
-if (-not $SkipBuild) {
-    Write-Step "임베딩 모델 export (오프라인 번들용)"
-    $ModelDir = Join-Path $Root "resource\embedding-model"
-    if (Test-Path (Join-Path $ModelDir "config.json")) {
-        Write-Ok "이미 export됨: $ModelDir"
-    } else {
-        $exportPy = "from sentence_transformers import SentenceTransformer; SentenceTransformer('paraphrase-multilingual-MiniLM-L12-v2', device='cpu').save(r'$ModelDir')"
-        & conda run -n $CondaEnv python -c $exportPy
-        if ($LASTEXITCODE -ne 0 -or -not (Test-Path (Join-Path $ModelDir "config.json"))) {
-            Write-Err "모델 export 실패 — HF 캐시 확인 필요"
-        }
-        Write-Ok "export 완료: $ModelDir"
+# ── 1) shared frozen bundle engine ───────────────────────────
+if ($SkipBuild) {
+    Write-Step "Validating existing frozen bundle (-SkipBuild)"
+    & $Engine -Mode auto -CondaEnv $CondaEnv -ValidateOnly
+    if ($LASTEXITCODE -ne 0) {
+        Write-Err "-SkipBuild requires a current build-manifest.json and validated inputs"
     }
-}
-
-# ── 1) frozen 번들 빌드 ──────────────────────────────────────
-if (-not $SkipBuild) {
-    Write-Step "PyInstaller — frozen 번들 빌드"
-    Get-Process -Name "engram-overlay" -ErrorAction SilentlyContinue | Stop-Process -Force
-    Start-Sleep -Seconds 1
-    Push-Location $Root
-    try {
-        & conda run -n $CondaEnv python -m PyInstaller --noconfirm $Spec
-        if ($LASTEXITCODE -ne 0) { Write-Err "PyInstaller 빌드 실패" }
-    } finally { Pop-Location }
-    Write-Ok "번들 빌드 완료"
+    Write-Ok "Existing bundle is current and validated"
 } else {
-    Write-Step "frozen 빌드 건너뜀 (-SkipBuild)"
+    Write-Step "Building frozen bundle with shared engine"
+    & $Engine -Mode rebuild -CondaEnv $CondaEnv -NoStart
+    if ($LASTEXITCODE -ne 0) {
+        Write-Err "Shared overlay build failed"
+    }
+    Write-Ok "Frozen bundle build completed"
 }
 
 if (-not (Test-Path $DistExe)) {
-    Write-Err "번들 없음: $DistExe — -SkipBuild 없이 먼저 빌드하세요"
+    Write-Err "번들 없음: $DistExe"
+}
+if (-not (Test-Path $DashboardExe)) {
+    Write-Err "대시보드 sidecar 없음: $DashboardExe"
 }
 Write-Ok "번들 확인: $DistExe"
 
-# ── 2) Inno Setup 컴파일 ─────────────────────────────────────
+# ── 2) release smoke tests ──────────────────────────────────
+Write-Step "Release role smoke tests"
+$embeddingExit = Invoke-FrozenRole "embedding-check"
+$smokeExit = if ($embeddingExit -eq 0) {
+    Invoke-FrozenRole "smoke-check"
+} else {
+    1
+}
+if ($embeddingExit -ne 0 -or $smokeExit -ne 0) {
+    Write-Err "Release smoke tests failed (embedding=$embeddingExit, roles=$smokeExit)"
+}
+$dashboardSmoke = Start-Process -FilePath $DashboardExe `
+    -ArgumentList @("--smoke-check") `
+    -Wait -PassThru -WindowStyle Hidden
+if ($dashboardSmoke.ExitCode -ne 0) {
+    Write-Err "Dashboard sidecar render smoke failed (exit $($dashboardSmoke.ExitCode))"
+}
+Write-Ok "embedding-check, mcp-server, kg-watcher, overlay, and dashboard smoke checks passed"
+
+# ── 3) Inno Setup compile ────────────────────────────────────
 Write-Step "ISCC — setup.exe 패키징"
 & $Iscc $Iss
 if ($LASTEXITCODE -ne 0) { Write-Err "ISCC 컴파일 실패" }
 
-# OutputDir=.. → setup.exe 는 프로젝트 루트에 생성됨
 $Output = Get-ChildItem $Root -Filter "EngramOverlay_*_x64-setup.exe" -ErrorAction SilentlyContinue |
     Sort-Object LastWriteTime -Descending | Select-Object -First 1
 if ($Output) {

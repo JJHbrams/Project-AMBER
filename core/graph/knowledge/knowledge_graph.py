@@ -634,6 +634,62 @@ class KnowledgeGraph:
         except Exception:
             pass
 
+    def append_node_progress_checkpoint(
+        self,
+        node_id: str,
+        *,
+        checkpoint_id: str,
+        timestamp: str,
+        summary: str,
+        open_intents: str = "",
+        daily_node_id: str = "",
+    ) -> bool:
+        """프로젝트 Progress에 자동 체크포인트를 중복 없이 누적한다."""
+        node = self.get_node(node_id)
+        if not node:
+            return False
+        vault_root = node.get("vault_path", "")
+        rel_path = node.get("path", "")
+        if not (vault_root and rel_path):
+            return False
+        md_path = Path(vault_root) / rel_path
+        if not md_path.exists():
+            return False
+
+        text = md_path.read_text(encoding="utf-8", errors="ignore")
+        marker = f"engram-checkpoint:{checkpoint_id}"
+        if marker in text:
+            return False
+
+        lines = [
+            f"<!-- {marker} -->",
+            f"### 자동 체크포인트 — {timestamp}",
+            f"- {summary}",
+        ]
+        if open_intents:
+            lines.append(f"- 다음 작업: {open_intents}")
+        if daily_node_id:
+            lines.append(f"- 일일노트: [[{daily_node_id}]]")
+        entry = "\n".join(lines) + "\n"
+
+        progress_pattern = re.compile(r"(\n## Progress\b[^\n]*\n)(.*?)(?=\n## |\Z)", re.DOTALL)
+        match = progress_pattern.search(text)
+        if match:
+            body = match.group(2).rstrip()
+            replacement = match.group(1) + (body + "\n\n" if body else "\n") + entry
+            text = text[:match.start()] + replacement + text[match.end():]
+        else:
+            text = text.rstrip() + "\n\n## Progress\n\n" + entry
+
+        md_path.write_text(text, encoding="utf-8")
+        docs_root = Path(vault_root)
+        self.sync_file(md_path, docs_root)
+        self.resolve_links(
+            docs_root,
+            restrict_to_paths={str(md_path.relative_to(docs_root))},
+        )
+        return True
+
     # ── 임의 섹션 patch (summary/Progress 외 본문) ─────────
 
     def patch_section(
@@ -723,4 +779,3 @@ def get_kg() -> KnowledgeGraph:
     if _kg_instance is None:
         _kg_instance = KnowledgeGraph()
     return _kg_instance
-

@@ -137,12 +137,17 @@ source: User Todo list.md
 
 > wiki 확인 지침이 실제로 지켜지지 않는 원인 4가지 해결 계획. (분석: 2026-05-03 세션)
 
-- [ ] **Broken reference 수정** (즉시)
-  - [ ] `wiki-governance-trigger`: `kg_read_note("Wiki 관리 지침")` → `kg_read_note("wiki-guide")`
-  - [ ] `wiki-management` directive: 삭제된 `wiki-management-guide` 참조 중 → directive 삭제 또는 `wiki-guide`로 통합
-- [ ] **Self-contained화** — 핵심 규칙 1-3줄 인라인 추가 (wiki 미읽어도 동작하도록)
-  - [ ] wiki 관련 directives: 핵심 규칙 인라인 + `kg_read_note` 는 "작업 전 반드시 호출" 선행 조건으로 표현
-  - [ ] trigger_type `wiki`/`code` → 키워드 없이도 주입되도록 `always` 격상 검토
+- [x] **Broken reference 및 중복 directive 정리**
+  - [x] canonical 문서를 `wiki-guide`로 통일
+  - [x] `wiki-management`, `wiki-reminder-on-task`, reflection 중복 directive 제거
+  - [x] `wiki-governance-trigger`를 `wiki-workflow-dispatch`로 명확화
+- [x] **조건부 workflow 보장**
+  - [x] 기본 directive를 세션 시작 시 항상 주입되는 짧은 정책으로 전환
+  - [x] Wiki 작성 절차를 `engram-wiki-workflow` skill로 승급
+  - [x] 세션 종료·반성 절차를 `engram-close-session` skill로 승급
+  - [x] installer가 Copilot/Claude 사용자 skill 경로에 설치하도록 연결
+- [x] **기존 설치 DB 마이그레이션**
+  - [x] installer 관리 기본값만 갱신하고 사용자 수정 directive는 보존
 
 ---
 
@@ -176,3 +181,7 @@ source: User Todo list.md
 - [ ] 오래된 메모리 가소성 (필요 여부 검토)
 - [ ] 최신 내용과 위배되는 노드 정리
 - [ ] 노드 증가 시 검색 품질 저하 여부 조사
+- [x] 유휴 세션 자동 메모리 체크포인트
+  - [x] 30분 유휴 + 마지막 갱신 이후 사용자 발화 5회 gate
+  - [x] working memory 상시 갱신 + novelty 통과 시 LTM 저장
+  - [x] activity log, Engram daily, vault623 daily, 프로젝트 Progress 상호 연결

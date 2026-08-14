@@ -2,6 +2,7 @@
 
 import sys
 from pathlib import Path
+from PyInstaller.utils.hooks import collect_all
 
 
 def _collect_tcl_tk() -> list[tuple[str, str]]:
@@ -62,7 +63,7 @@ _character_datas = _collect_character_datas()
 def _collect_embedding_model() -> list[tuple[str, str]]:
     """오프라인 임베딩 모델(resource/embedding-model) 을 있으면 번들.
 
-    build-installer.ps1 이 SentenceTransformer.save() 로 미리 export 한다.
+    installer/build-overlay.ps1 이 cache에서 검증·export 한다.
     없으면 빈 리스트 → 런타임에 HuggingFace Hub 폴백(개발 모드).
     """
     root = Path("resource") / "embedding-model"
@@ -81,13 +82,15 @@ def _collect_embedding_model() -> list[tuple[str, str]]:
 
 
 _embedding_model_datas = _collect_embedding_model()
+_streamlit_datas, _streamlit_binaries, _streamlit_hiddenimports = collect_all("streamlit")
+_mcp_datas, _mcp_binaries, _mcp_hiddenimports = collect_all("mcp")
 
 
 a = Analysis(
     ['engram_overlay_entry.py'],
     # scripts/kg 를 추가해 멀티콜 백엔드용 kg_watcher 를 top-level 모듈로 수집한다.
     pathex=['scripts\\kg'],
-    binaries=[],
+    binaries=[*_streamlit_binaries, *_mcp_binaries],
     datas=[
         ('resource\\icon.png', 'resource'),
         ('resource\\overlay.png', 'resource'),
@@ -97,14 +100,20 @@ a = Analysis(
         # runtime_config(core/config/runtime_config.py)가 읽는 파일.
         # 누락 시 resolve_runtime_path 가 못 찾아 tools.disabled 등이 조용히 무시된다.
         ('config\\config.yaml', 'config'),
+        # Streamlit executes the dashboard entry as a raw source file.
+        ('core\\dashboard\\app.py', 'core\\dashboard'),
+        ('core\\dashboard\\assets', 'core\\dashboard\\assets'),
+        *_streamlit_datas,
+        *_mcp_datas,
         *_tcl_tk_datas,
     ],
-    hiddenimports=['core.context.context_builder', 'core.storage.db', 'core.identity', 'core.memory', 'core.context.directives', 'core.identity.reflection', 'core.identity.curiosity', 'core.common.sanitizer', 'core.memory.bus', 'core.config.runtime_config', 'core.config.remote_tokens', 'core.graph.semantic', 'core.graph.semantic.stm_promoter', 'core.observability.activity', 'core.context.project_scope', 'discord_bot', 'discord_bot.bot', 'tkinterweb', 'tkinterweb_tkhtml', 'mcp_server', 'kg_watcher'],
+    hiddenimports=['core.context.context_builder', 'core.storage.db', 'core.identity', 'core.memory', 'core.context.directives', 'core.identity.reflection', 'core.identity.curiosity', 'core.common.sanitizer', 'core.memory.bus', 'core.config.runtime_config', 'core.config.remote_tokens', 'core.graph.semantic', 'core.graph.semantic.stm_promoter', 'core.install.bootstrap', 'core.install.model_manifest', 'core.observability.activity', 'core.context.project_scope', 'core.dashboard.app', 'discord_bot', 'discord_bot.bot', 'tkinterweb', 'tkinterweb_tkhtml', 'mcp_server', 'kg_watcher', 'scripts.kg.kg_lint', *_streamlit_hiddenimports, *_mcp_hiddenimports],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
     excludes=[],
-    noarchive=False,
+    # one-dir 배포에서 지연 import 모듈을 PYZ(zlib)에서 읽다 실패하는 환경을 피한다.
+    noarchive=True,
     optimize=0,
 )
 pyz = PYZ(a.pure)
@@ -129,8 +138,29 @@ exe = EXE(
     icon=['resource\\icon.png'],
 )
 
+dashboard_exe = EXE(
+    pyz,
+    a.scripts,
+    [],
+    name='engram-dashboard',
+    debug=False,
+    bootloader_ignore_signals=False,
+    strip=False,
+    upx=False,
+    upx_exclude=[],
+    runtime_tmpdir=None,
+    console=False,
+    disable_windowed_traceback=False,
+    argv_emulation=False,
+    target_arch=None,
+    codesign_identity=None,
+    entitlements_file=None,
+    icon=['resource\\icon.png'],
+)
+
 coll = COLLECT(
     exe,
+    dashboard_exe,
     a.binaries,
     a.datas,
     strip=False,

@@ -270,19 +270,22 @@ if (Test-Path $ClaudeCommandSource) {
 }
 
 # 7d-2. Engram 말풍선 새 세션 스킬 (agent skill) — claude-code SDK(말풍선)/CLI 및 Copilot 에서 발동
-Write-Step "Engram new-session skill..."
-$NewSessionSkillSrc = Join-Path $ProjectRoot ".github\skills\engram-new-session\SKILL.md"
-if (Test-Path $NewSessionSkillSrc) {
-    foreach ($skillBase in @(
-        (Join-Path $env:USERPROFILE ".claude\skills\engram-new-session"),
-        (Join-Path $env:USERPROFILE ".copilot\skills\engram-new-session")
-    )) {
-        if (-not (Test-Path $skillBase)) { New-Item -Path $skillBase -ItemType Directory -Force | Out-Null }
-        Copy-Item $NewSessionSkillSrc (Join-Path $skillBase "SKILL.md") -Force
-        Write-Ok (Join-Path $skillBase "SKILL.md")
+Write-Step "Engram workflow skills..."
+foreach ($skillName in @("engram-new-session", "engram-task-workflow", "engram-wiki-workflow", "engram-close-session")) {
+    $skillSrc = Join-Path $ProjectRoot ".github\skills\$skillName\SKILL.md"
+    if (Test-Path $skillSrc) {
+        foreach ($skillRoot in @(
+            (Join-Path $env:USERPROFILE ".claude\skills"),
+            (Join-Path $env:USERPROFILE ".copilot\skills")
+        )) {
+            $skillBase = Join-Path $skillRoot $skillName
+            if (-not (Test-Path $skillBase)) { New-Item -Path $skillBase -ItemType Directory -Force | Out-Null }
+            Copy-Item $skillSrc (Join-Path $skillBase "SKILL.md") -Force
+            Write-Ok (Join-Path $skillBase "SKILL.md")
+        }
+    } else {
+        Write-Warn "Skill source not found: $skillSrc"
     }
-} else {
-    Write-Warn "new-session skill source not found: $NewSessionSkillSrc"
 }
 
 # 7e. Subagent skills (planner / coder / servant)

@@ -34,7 +34,7 @@ def _fake_embedding(text: str) -> list[float]:
     return (vec / norm).tolist()
 
 
-async def _fake_compute_embedding(text: str) -> list[float]:
+async def _fake_compute_embedding(text: str, _prefix: str) -> list[float]:
     # sleep(0)으로 실제 이벤트 루프 양보 지점을 보장 — 동시성 테스트가 우연히
     # 순차 실행으로 안 흐르도록(실제 AsyncConnection.execute도 스레드풀 경유라
     # 이 자체로도 양보하지만, 임베딩 단계에서도 명시적으로 보장해둔다).
@@ -50,7 +50,7 @@ class SemanticGraphConcurrencyTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.sg.enabled, "kuzu가 설치되어 있어야 함(테스트 환경 전제)")
 
         self._patcher = patch.object(
-            SemanticGraph, "compute_embedding", side_effect=_fake_compute_embedding
+            SemanticGraph, "_compute_embedding", side_effect=_fake_compute_embedding
         )
         self._patcher.start()
 

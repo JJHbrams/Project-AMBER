@@ -397,6 +397,7 @@ class OverlayApp:
 
         threading.Thread(target=self._claude_code_watchdog_loop, daemon=True, name="overlay-claude-watchdog").start()
         threading.Thread(target=self._stm_transcript_capture_loop, daemon=True, name="overlay-stm-capture").start()
+        threading.Thread(target=self._auto_memory_checkpoint_loop, daemon=True, name="overlay-memory-checkpoint").start()
 
         keyboard.add_hotkey(hotkey, lambda: self.root.after(0, self._hotkey_chat))
 
@@ -487,7 +488,8 @@ class OverlayApp:
         self._terminate_managed_process("_dashboard_proc", "dashboard", "dashboard")
         self._terminate_managed_process("_kg_watcher_proc", "kg_watcher", "kg_watcher")
         self._kg_watcher_proc = self._start_kg_watcher()
-        self._dashboard_proc = self._start_dashboard()
+        if self._is_dashboard_enabled():
+            self._dashboard_proc = self._start_dashboard()
 
     def _recover_mcp_listener(self, reason: str) -> None:
         import time
@@ -770,6 +772,55 @@ class OverlayApp:
                 time.sleep(min(0.5, sleep_left))
                 sleep_left -= 0.5
 
+    def _auto_memory_checkpoint_loop(self) -> None:
+        """유휴 세션을 닫지 않고 working/LTM/daily checkpoint를 갱신한다."""
+        import time
+
+        time.sleep(30.0)
+        while not self._quitting:
+            try:
+                from core.config.runtime_config import get_cfg_value
+
+                if bool(get_cfg_value("memory.auto_checkpoint.enabled", True)) and not self._bubble_turn_active:
+                    from core.graph.semantic import maybe_auto_checkpoint
+
+                    result = maybe_auto_checkpoint(
+                        scope_key="overlay",
+                        cwd=str(get_workdir()),
+                        idle_seconds=int(
+                            get_cfg_value("memory.auto_checkpoint.idle_seconds", 1800)
+                        ),
+                        min_user_turns=int(
+                            get_cfg_value("memory.auto_checkpoint.min_user_turns", 5)
+                        ),
+                        external_daily_dir=str(
+                            get_cfg_value(
+                                "memory.auto_checkpoint.external_daily_dir",
+                                "~/vault623/daily_notes",
+                            )
+                            or ""
+                        ),
+                    )
+                    if result.get("status") not in {"skipped", "busy"}:
+                        log.info("[auto-checkpoint] %s", result)
+                poll_seconds = max(
+                    30,
+                    int(
+                        get_cfg_value(
+                            "memory.auto_checkpoint.poll_seconds",
+                            60,
+                        )
+                    ),
+                )
+            except Exception as exc:
+                log.warning("[auto-checkpoint] loop 실패: %s", exc)
+                poll_seconds = 60
+
+            sleep_left = poll_seconds
+            while sleep_left > 0 and not self._quitting:
+                time.sleep(min(0.5, sleep_left))
+                sleep_left -= 0.5
+
     def _start_mcp_http_server(self) -> "subprocess.Popen | None":
         """Copilot/Gemini CLI를 위한 지속 MCP HTTP(SSE) 서버를 overlay 수명에 맞춰 시작한다."""
         cfg = load_cfg()
@@ -847,7 +898,8 @@ class OverlayApp:
         settings = self._get_mcp_health_settings()
         self._wait_mcp_ready(timeout=float(settings["ready_timeout_secs"]), port=int(settings["port"]))
         self._kg_watcher_proc = self._start_kg_watcher()
-        self._dashboard_proc = self._start_dashboard()
+        if self._is_dashboard_enabled():
+            self._dashboard_proc = self._start_dashboard()
         # 원격 리스너가 떠 있어야 터널이 의미가 있으므로 MCP 준비 이후에 연다.
         self._apply_tunnels()
         # 전역 SessionStart hook 을 현재 auto_inject 설정과 동기화한다(설치/제거 멱등).
@@ -880,56 +932,42 @@ class OverlayApp:
             log.exception("[tunnel] 목록 복원 실패")
 
     def _start_dashboard(self) -> "subprocess.Popen | None":
-        """engram_dashboard.py 를 streamlit으로 시작한다. 이미 실행 중이면 스킵."""
+        """Streamlit dashboard를 시작한다."""
         import subprocess as _sp
 
-        # 이미 실행 중인지 확인
-        try:
-            procs = _sp.run(
-                [
-                    "powershell",
-                    "-Command",
-                    "Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" | Where-Object { $_.CommandLine -like '*engram_dashboard*' } | Select-Object -First 1 -ExpandProperty ProcessId",
-                ],
-                capture_output=True,
-                text=True,
-                timeout=5,
-                creationflags=getattr(_sp, "CREATE_NO_WINDOW", 0),
-            )
-            if procs.stdout.strip().isdigit():
-                log.info("[dashboard] 이미 실행 중 (PID=%s) — 시작 스킵", procs.stdout.strip())
-                return None
-        except Exception:
-            pass
-
-        py = _find_mcp_python()
-        if not py:
-            log.warning("[dashboard] Python을 찾을 수 없어 시작 스킵")
-            return None
-
-        # streamlit 스크립트 경로
-        script = (PROJECT_ROOT / "scripts" / "engram_dashboard.py").resolve()
+        cfg = load_cfg()
+        dashboard_cfg = cfg.get("dashboard") if isinstance(cfg, dict) else None
+        dashboard_cfg = dashboard_cfg if isinstance(dashboard_cfg, dict) else {}
+        port = self._coerce_int(dashboard_cfg.get("port", 8501), 8501)
         if getattr(sys, "frozen", False):
-            streamlit_exe = Path(py).parent / "streamlit.exe"
+            dashboard_exe = Path(sys.executable).parent / "engram-dashboard.exe"
+            if not dashboard_exe.is_file():
+                log.warning("[dashboard] sidecar 없음: %s", dashboard_exe)
+                return None
+            cmd = [str(dashboard_exe), "--port", str(port)]
+            cwd = str(Path(sys.executable).parent)
         else:
+            py = _find_mcp_python()
+            if not py:
+                log.warning("[dashboard] Python을 찾을 수 없어 시작 스킵")
+                return None
+            script = (PROJECT_ROOT / "scripts" / "engram_dashboard.py").resolve()
+            if not script.exists():
+                log.warning("[dashboard] 스크립트 없음: %s", script)
+                return None
             streamlit_exe = Path(py).parent / "streamlit"
-
-        if not script.exists():
-            log.warning("[dashboard] 스크립트 없음: %s", script)
-            return None
+            if streamlit_exe.exists() or Path(str(streamlit_exe) + ".exe").exists():
+                cmd = [str(streamlit_exe), "run", str(script), "--server.headless", "true", "--server.port", str(port)]
+            else:
+                cmd = [py, "-m", "streamlit", "run", str(script), "--server.headless", "true", "--server.port", str(port)]
+            cwd = str(script.parent.parent)
 
         try:
             log_path = Path.home() / ".engram" / "dashboard.log"
             log_fh = open(str(log_path), "a", encoding="utf-8")
-            # streamlit CLI: python -m streamlit run ... or streamlit.exe run ...
-            cmd: list
-            if streamlit_exe.exists() or Path(str(streamlit_exe) + ".exe").exists():
-                cmd = [str(streamlit_exe), "run", str(script), "--server.headless", "true", "--server.port", "8501"]
-            else:
-                cmd = [py, "-m", "streamlit", "run", str(script), "--server.headless", "true", "--server.port", "8501"]
             proc = _sp.Popen(
                 cmd,
-                cwd=str(script.parent.parent),
+                cwd=cwd,
                 stdout=log_fh,
                 stderr=log_fh,
                 creationflags=getattr(_sp, "CREATE_NO_WINDOW", 0),
@@ -939,6 +977,15 @@ class OverlayApp:
         except Exception as exc:
             log.warning("[dashboard] 시작 실패: %s", exc)
             return None
+
+    @staticmethod
+    def _is_dashboard_enabled(cfg: dict | None = None) -> bool:
+        if cfg is None:
+            cfg = load_cfg()
+        dashboard_cfg = cfg.get("dashboard") if isinstance(cfg, dict) else None
+        if not isinstance(dashboard_cfg, dict):
+            return True
+        return bool(dashboard_cfg.get("enabled", True))
 
     def _start_kg_watcher(self) -> "subprocess.Popen | None":
         """MCP server 준비 완료 후 kg_watcher를 overlay 자식 프로세스로 시작한다."""
@@ -1030,6 +1077,12 @@ class OverlayApp:
         bubble_cfg = get_bubble_cfg(cfg)
         self._bubble_manager.update_cfg(bubble_cfg)
         self._bubble_input.update_cfg(bubble_cfg)
+
+        if self._is_dashboard_enabled(cfg):
+            if self._dashboard_proc is None or self._dashboard_proc.poll() is not None:
+                self._dashboard_proc = self._start_dashboard()
+        else:
+            self._terminate_managed_process("_dashboard_proc", "dashboard", "dashboard")
 
         # 능동적 상주 설정 반영 + 모드에 따라 루프 on/off.
         init_cfg = bubble_cfg.get("initiative") if isinstance(bubble_cfg, dict) else None

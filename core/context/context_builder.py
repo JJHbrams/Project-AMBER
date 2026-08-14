@@ -47,7 +47,7 @@ async def _precompute_query_vec(user_query: str) -> "list[float] | None":
         sg = get_semantic_graph()
         if not sg.enabled:
             return None
-        vec = await sg.compute_embedding(user_query)
+        vec = await sg.compute_query_embedding(user_query)
         return vec if vec else None
     except Exception:
         return None

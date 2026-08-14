@@ -29,7 +29,7 @@ async def evaluate_case(sg: SemanticGraph, case: dict) -> dict:
             "error": "query is empty",
         }
 
-    query_vec = await sg.compute_embedding(query)
+    query_vec = await sg.compute_query_embedding(query)
     if not query_vec:
         return {
             "name": str(case.get("name", query)),

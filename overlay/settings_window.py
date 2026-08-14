@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tkinter as tk
 import tkinter.ttk as ttk
+import webbrowser
 from pathlib import Path
 from tkinter import colorchooser, filedialog, messagebox
 from typing import Callable
@@ -391,6 +392,7 @@ class _SettingsWindow:
         self._persona_banner_var = tk.StringVar(value="현재 기본 페르소나가 적용되어 있습니다. 커스텀 페르소나를 적용해 보세요.")
         self._autostart_var = tk.BooleanVar()
         self._auto_inject_var = tk.BooleanVar()
+        self._dashboard_enabled_var = tk.BooleanVar()
         # 능동 발화(initiative) — 빈도/타이밍 knob 들을 GUI 로 노출.
         self._initiative_enabled_var = tk.BooleanVar()
         self._initiative_idle_min_var = tk.IntVar()      # 유휴 대기(분)
@@ -1417,18 +1419,34 @@ class _SettingsWindow:
             foreground="gray",
         ).grid(row=2, column=0, columnspan=2, sticky="w", padx=28, pady=(0, 8))
 
-        ttk.Separator(f, orient="horizontal").grid(row=3, column=0, columnspan=2, sticky="ew", padx=8, pady=4)
+        ttk.Checkbutton(
+            f,
+            text="대시보드 자동 실행",
+            variable=self._dashboard_enabled_var,
+        ).grid(row=3, column=0, sticky="w", padx=16, pady=(2, 0))
+        ttk.Button(
+            f,
+            text="대시보드 보기",
+            command=lambda: webbrowser.open("http://localhost:8501"),
+        ).grid(row=3, column=1, sticky="e", padx=16, pady=(2, 0))
+        ttk.Label(
+            f,
+            text="활성화하면 overlay와 함께 로컬 대시보드 sidecar를 실행합니다.",
+            foreground="gray",
+        ).grid(row=4, column=0, columnspan=2, sticky="w", padx=28, pady=(0, 8))
+
+        ttk.Separator(f, orient="horizontal").grid(row=5, column=0, columnspan=2, sticky="ew", padx=8, pady=4)
 
         # ── 자동 컨텍스트 주입 ──
-        ttk.Label(f, text="세션 설정", font=("", 9, "bold")).grid(row=4, column=0, columnspan=2, sticky="w", padx=8, pady=(4, 2))
+        ttk.Label(f, text="세션 설정", font=("", 9, "bold")).grid(row=6, column=0, columnspan=2, sticky="w", padx=8, pady=(4, 2))
         ttk.Checkbutton(
             f,
             text="CLI 공급자 시작 시 자동으로 engram 컨텍스트 주입",
             variable=self._auto_inject_var,
-        ).grid(row=5, column=0, columnspan=2, sticky="w", padx=16, pady=(2, 0))
+        ).grid(row=7, column=0, columnspan=2, sticky="w", padx=16, pady=(2, 0))
 
         warn_frame = tk.Frame(f, bd=1, relief="solid", bg="#fff8e1")
-        warn_frame.grid(row=6, column=0, columnspan=2, sticky="ew", padx=16, pady=(4, 8))
+        warn_frame.grid(row=8, column=0, columnspan=2, sticky="ew", padx=16, pady=(4, 8))
         tk.Label(
             warn_frame,
             text=(
@@ -1443,19 +1461,19 @@ class _SettingsWindow:
             foreground="#7a5800",
         ).pack(fill="x", padx=8, pady=6)
 
-        ttk.Separator(f, orient="horizontal").grid(row=7, column=0, columnspan=2, sticky="ew", padx=8, pady=4)
+        ttk.Separator(f, orient="horizontal").grid(row=9, column=0, columnspan=2, sticky="ew", padx=8, pady=4)
 
-        ttk.Label(f, text="튜토리얼", font=("", 9, "bold")).grid(row=8, column=0, columnspan=2, sticky="w", padx=8, pady=(4, 2))
+        ttk.Label(f, text="튜토리얼", font=("", 9, "bold")).grid(row=10, column=0, columnspan=2, sticky="w", padx=8, pady=(4, 2))
         ttk.Label(
             f,
             text="튜토리얼 진행 플래그를 초기 상태로 되돌립니다. 기존 메모리/위키 데이터는 삭제되지 않습니다.",
             foreground="gray",
-        ).grid(row=9, column=0, columnspan=2, sticky="w", padx=16, pady=(0, 4))
+        ).grid(row=11, column=0, columnspan=2, sticky="w", padx=16, pady=(0, 4))
         ttk.Button(
             f,
             text="튜토리얼 플래그 초기화",
             command=self._reset_tutorial_flags,
-        ).grid(row=10, column=0, sticky="w", padx=16, pady=(0, 8))
+        ).grid(row=12, column=0, sticky="w", padx=16, pady=(0, 8))
 
         f.columnconfigure(1, weight=1)
 
@@ -1577,6 +1595,7 @@ class _SettingsWindow:
         self._autostart_var.set(_is_autostart_enabled())
         auto_inject = bool(self._engram_user_cfg.get("session", {}).get("auto_inject", False))
         self._auto_inject_var.set(auto_inject)
+        self._dashboard_enabled_var.set(bool(_nested_get(cfg, ["dashboard", "enabled"], True)))
 
         self._load_persona_values()
 
@@ -1911,6 +1930,9 @@ class _SettingsWindow:
         _nested_set(user, ["mcp", "tunnels"], tunnels or None)
         auto_rc = bool(self._tunnel_autoreconnect_var.get())
         _nested_set(user, ["mcp", "tunnel_auto_reconnect"], True if auto_rc else None)
+
+        dashboard_enabled = bool(self._dashboard_enabled_var.get())
+        _nested_set(user, ["dashboard", "enabled"], None if dashboard_enabled else False)
 
         # 파일 쓰기 (overlay.user.yaml)
         _USER_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)

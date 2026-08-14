@@ -29,6 +29,12 @@ _DEFAULT_CFG = {
     "db": {
         "root_dir": "D:/intel_engram",
     },
+    "semantic_graph": {
+        "embedding_model": "intfloat/multilingual-e5-small",
+        "embedding_dimension": 384,
+        "similarity_floor": 0.73,
+        "similarity_ceiling": 0.88,
+    },
     "memory": {
         "scope": {
             "default_main": "default:main",
@@ -54,6 +60,13 @@ _DEFAULT_CFG = {
         "long_term": {
             "search_limit": 2,
             "item_max_chars": 100,
+            "semantic_threshold": 0.78,
+            "raw_min_score": 0.80,
+            "min_score": 0.70,
+            "kg_threshold": 0.81,
+        },
+        "ep_to_kg": {
+            "semantic_threshold": 0.82,
         },
         "graph_retrieval": {
             "enabled": True,
@@ -73,6 +86,11 @@ _DEFAULT_CFG = {
             "mode": "hybrid",
             "pin_top_n": 3,
             "max_items": 8,
+            "pinned_keys": [
+                "task-workflow-dispatch",
+                "wiki-workflow-dispatch",
+                "session-lifecycle-workflow",
+            ],
         },
     },
     "copilot": {
@@ -107,6 +125,10 @@ _USER_TEMPLATE = """# User runtime overrides for Engram.
 #     mode: "hybrid"    # triggered | hybrid | always
 #     pin_top_n: 3       # hybrid 모드에서 강제 주입할 상위 지침 수
 #     max_items: 8       # 주입 지침 상한 (0이면 무제한)
+#     pinned_keys:        # max_items와 무관하게 항상 보존할 workflow dispatcher
+#       - task-workflow-dispatch
+#       - wiki-workflow-dispatch
+#       - session-lifecycle-workflow
 #
 # copilot:
 #   model: "claude-sonnet-4.6"

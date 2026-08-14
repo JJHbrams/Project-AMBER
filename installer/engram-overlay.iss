@@ -9,7 +9,7 @@
 ; ============================================================
 
 #define AppName "Engram Overlay"
-#define AppVersion "1.2.1"
+#define AppVersion "1.3.0"
 #define AppPublisher "DRTECH"
 #define AppExeName "engram-overlay.exe"
 
@@ -44,6 +44,12 @@ Source: "..\dist\engram-overlay\*"; DestDir: "{app}\dist\engram-overlay"; Flags:
 Source: "..\config\overlay.yaml"; DestDir: "{app}\dist\engram-overlay\config"; Flags: ignoreversion
 Source: "..\config\config.yaml"; DestDir: "{app}\dist\engram-overlay\config"; Flags: ignoreversion
 Source: "..\config\clients\copilot.md"; DestDir: "{app}\config\clients"; Flags: ignoreversion
+Source: "templates\*"; DestDir: "{app}\installer\templates"; Flags: recursesubdirs createallsubdirs ignoreversion
+Source: "..\.github\skills\engram\SKILL.md"; DestDir: "{app}\.github\skills\engram"; Flags: ignoreversion
+Source: "..\.github\skills\engram-new-session\SKILL.md"; DestDir: "{app}\.github\skills\engram-new-session"; Flags: ignoreversion
+Source: "..\.github\skills\engram-task-workflow\SKILL.md"; DestDir: "{app}\.github\skills\engram-task-workflow"; Flags: ignoreversion
+Source: "..\.github\skills\engram-wiki-workflow\SKILL.md"; DestDir: "{app}\.github\skills\engram-wiki-workflow"; Flags: ignoreversion
+Source: "..\.github\skills\engram-close-session\SKILL.md"; DestDir: "{app}\.github\skills\engram-close-session"; Flags: ignoreversion
 ; 설치타임 구성기
 Source: "configure.ps1"; DestDir: "{app}\installer"; Flags: ignoreversion
 

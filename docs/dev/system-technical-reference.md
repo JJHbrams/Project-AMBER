@@ -35,6 +35,30 @@
 
 설치 시 다음이 자동으로 구성된다.
 
+### 2.1 Frozen Overlay Build and Release Validation
+
+- 개발 재빌드, source installer의 overlay 단계, release `build-installer.ps1`는
+  `installer/build-overlay.ps1`을 공유한다.
+- `auto`, `rebuild`, `clean`, `skip` 모드를 지원한다. 빌드는 매번 고유한 임시
+  dist에서 수행하고, 성공적인 manifest 생성과 `embedding-check` 및
+  overlay/dashboard smoke 이후에만 `dist` 또는 별도 deploy 대상에 교체한다.
+- `auto`/`rebuild`의 PyInstaller 증분 빌드 실패는 clean 빌드로 한 번 재시도한다.
+  결정적인 manifest/smoke 실패에는 긴 clean 빌드를 반복하지 않는다. 실패하면
+  기존 working artifact를 유지하며, `-NoStart`가 없을 때만 성공 결과를 재시작한다.
+- 번들의 `build-manifest.json`은 Python·PyInstaller·MCP·
+  sentence-transformers 버전, source/config/resource 해시, 임베딩 모델 manifest를
+  기록한다. `build-installer.ps1 -SkipBuild`는 이 검증이 실패하면 패키징하지 않는다.
+- `engram-overlay.exe --role smoke-check`는 listener를 열지 않고 MCP의 실제
+  `mcp.server.fastmcp.FastMCP` import와 mcp-server, kg-watcher, overlay import 및
+  임베딩 로드를 확인한다.
+- `engram-dashboard.exe --smoke-check`는 Streamlit AppTest로 `Overview` 렌더를
+  확인한다. 이어 임시 포트에서 실제 sidecar를 시작해 `/_stcore/health`가 `ok`인지
+  확인하고 정확한 PID만 종료한다. release packaging은 ISCC 전에 렌더 검사를 재실행한다.
+- `resource/embedding-model/manifest.json`은 모델 ID, offline snapshot revision,
+  sentence-transformers 버전, exported file SHA-256을 기록한다. manifest가 유효한
+  cached/exported 모델은 네트워크 다운로드나 재export 없이 사용하고, frozen runtime도
+  파일 hash를 검증한 뒤 로드한다.
+
 - Python 런타임 환경 준비
   - Conda env(`intel_engram`) 우선
   - 불가 시 프로젝트 `.venv`
@@ -57,8 +81,8 @@
 - Copilot skill 배포
   - `.github/skills/engram/SKILL.md` → `~/.copilot/skills/engram/SKILL.md`
 - 오버레이 빌드 시도
-  - `engram-overlay.spec` 기준 PyInstaller 빌드
-  - 빌드 실패 시 로그 저장 후 나머지 설치는 계속 진행
+  - `installer/build-overlay.ps1` 기준 manifest 검증·PyInstaller·역할 smoke 테스트
+  - 빌드 실패 시 기존 artifact를 보존하고 나머지 설치는 계속 진행
 
 **설치 시 건드리지 않는 것:**
 
@@ -275,32 +299,31 @@ DB 스키마는 대개 예외다 — `core/storage/db.py` 가 연결 시 `CREATE
 
 | | `dev-rebuild.ps1` | `INSTALL.ps1` (모듈 09) |
 | --- | --- | --- |
-| PyInstaller 플래그 | `--noconfirm` (증분) | `--noconfirm --clean` |
-| 빌드 대상 | **`dist/` 에 직접** | 임시 distpath → 성공 시 교체 |
-| 실패 시 | dist 가 손상된 채 남을 수 있음 | 기존 dist 보존, 증분 실패 시 clean 으로 1회 자동 재시도 |
+| 엔진 | `installer/build-overlay.ps1` | `installer/build-overlay.ps1` |
+| 빌드 대상 | 고유 임시 distpath → 성공 시 교체 | 고유 임시 distpath → 성공 시 교체 |
+| 실패 시 | 기존 dist 보존, PyInstaller 증분 실패만 clean 으로 1회 자동 재시도 | 기존 dist 보존, PyInstaller 증분 실패만 clean 으로 1회 자동 재시도 |
 | 범위 | 빌드 + 재기동 | 10개 모듈 전체 |
 
 평상시엔 `dev-rebuild.ps1`, 빌드가 꼬이면 `.\INSTALL.ps1 -OverlayBuildMode clean` 으로 정리한다.
 
 ### 10.4 `-OverlayBuildMode` 의미
 
-`INSTALL.ps1` 기본값은 `auto` 이며, `common.ps1::Test-OverlayBuildRequired` 가
-**dist exe 와 소스의 mtime 을 비교**해 빌드 여부를 정한다.
-비교 대상: `engram-overlay.spec`, `engram_overlay_entry.py`, `overlay/`, `core/`,
-`discord_bot/`, `resource/`, `config/overlay.yaml`, `config/overlay.user.yaml`.
+`INSTALL.ps1` 기본값은 `auto` 이며, shared engine의 `build-manifest.json`이
+Python 및 package 버전과 source/config/resource SHA-256을 검증해 빌드 여부를 정한다.
+`build-installer.ps1 -SkipBuild`도 같은 검증을 통과해야 한다.
 
 | 값        | 동작                                        |
 | --------- | ------------------------------------------- |
-| `auto`    | mtime 비교 후 필요할 때만 빌드 (기본값)     |
+| `auto`    | build manifest 검증 후 필요할 때만 빌드 (기본값) |
 | `rebuild` | 항상 증분 빌드                              |
 | `clean`   | 항상 clean 빌드                             |
 | `skip`    | 빌드 생략 (설치의 나머지 단계만)            |
 
 ### 10.5 절차상 주의
 
-- `dev-rebuild.ps1` 은 **실행 중인 overlay 를 전부 종료**한 뒤 첫 인스턴스의 경로를
-  deploy 대상으로 기억한다. dist 와 다르면 `robocopy /MIR` 로 미러링한다 —
-  `/MIR` 이므로 deploy 디렉토리에 수동으로 넣어둔 파일은 삭제된다.
+- shared engine은 **실행 중인 overlay 를 전부 종료**한 뒤 첫 인스턴스의 경로를
+  deploy 대상으로 기억한다. 새 번들은 고유 임시 디렉터리에서 완성·검증한 뒤
+  deploy 디렉터리와 원자적으로 교체하며 실패 시 기존 번들을 복원한다.
 - overlay 종료는 STM 브로커·MCP·kg-watcher 동반 종료를 의미한다. 다른 CLI 세션이
   engram MCP 를 쓰는 중이면 그 세션의 MCP 호출이 실패한다.
 - 사용자 설정은 보존된다. 모듈 09 는 `overlay.user.yaml` 이 **없을 때만** 템플릿을 만든다.

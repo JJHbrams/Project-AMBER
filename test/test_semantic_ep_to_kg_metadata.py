@@ -14,7 +14,7 @@ from core.graph.semantic.semantic_graph import (
 )
 
 
-async def _embedding(text: str) -> list[float]:
+async def _embedding(text: str, _prefix: str) -> list[float]:
     if "unrelated" in text.casefold():
         return [0.0, 1.0]
     return [1.0, 0.0]
@@ -26,7 +26,7 @@ class SemanticEpToKgMetadataTests(unittest.IsolatedAsyncioTestCase):
         self.db_path = str(Path(self._tmpdir.name) / "semantic_graph")
         self.sg = SemanticGraph(db_path=self.db_path, embedding_model="test-model")
         self.assertTrue(self.sg.enabled)
-        self._patcher = patch.object(SemanticGraph, "compute_embedding", side_effect=_embedding)
+        self._patcher = patch.object(SemanticGraph, "_compute_embedding", side_effect=_embedding)
         self._patcher.start()
 
     async def asyncTearDown(self):

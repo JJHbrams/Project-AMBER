@@ -9,15 +9,16 @@ Write-Ok $McpServerScript
 
 # 4. Python dependencies
 Write-Step "Python dependencies..."
-$check = & $PythonExe -c "import mcp, yaml; print('ok')" 2>&1
-if ($check -ne "ok") {
+$check = & $PythonExe -c "from mcp.server.fastmcp import FastMCP; import yaml; print('ok')" 2>&1
+$checkExitCode = $LASTEXITCODE
+if ($checkExitCode -ne 0 -or (($check | ForEach-Object { "$_" }) -notcontains "ok")) {
     Invoke-LiveProcessLog -FilePath $PythonExe -ArgumentList @("-m", "pip", "install", "-r", (Join-Path $ProjectRoot "requirements.txt")) -Activity "pip install requirements" | Out-Null
     Write-Ok "Installed"
 } else { Write-Ok "OK" }
 
 # 4d. Sentence Transformer 임베딩 모델 (semantic search용)
-Write-Step "Sentence Transformer model (paraphrase-multilingual-MiniLM-L12-v2)..."
-$EmbeddingModel = "paraphrase-multilingual-MiniLM-L12-v2"
+Write-Step "Sentence Transformer model (intfloat/multilingual-e5-small)..."
+$EmbeddingModel = "intfloat/multilingual-e5-small"
 
 # 패키지 존재 확인
 $stPkgCheck = try {
@@ -188,32 +189,21 @@ if (-not $stModelOk) {
 }
 
 # 4e. Ollama 모델
-# overlay.yaml 의 cli.ollama_model 값을 읽어 설치 여부 확인 및 다운로드
-$OverlayConfigPath = Join-Path $ProjectRoot "config\overlay.yaml"
-$OllamaOverlayModel = ""
-if ((Test-Path $OverlayConfigPath) -and $PythonExe) {
-    $OllamaOverlayModel = (& $PythonExe -c @"
-import yaml
-try:
-    with open(r'$($OverlayConfigPath -replace '\\', '/')', encoding='utf-8') as f:
-        d = yaml.safe_load(f) or {}
-    print((d.get('cli') or {}).get('ollama_model', ''))
-except Exception:
-    print('')
-"@ 2>$null).Trim()
-}
-# 기본 STM 요약 모델 (overlay.yaml 에 없으면 폴백)
-$OllamaStmModel = "qwen2.5:1.5b"
-
+# Ollama를 명시적으로 선택한 사용자만 모델을 확인한다.
+# STM/working-memory 요약은 Claude Code 단발 호출을 사용하므로 별도 Ollama 모델이 필요 없다.
+$OllamaOverlayModel = if ($SelectedOllamaModel) { $SelectedOllamaModel.Trim() } else { "" }
+$OllamaRequired = $SelectedCliProvider -in @("claude-code-ollama", "ollama")
 $ollamaCmd = $OllamaCmdDetected
-if (-not $ollamaCmd) {
+if (-not $OllamaRequired -and -not $OllamaOverlayModel) {
     Write-Step "Ollama model..."
-    Write-Warn "Ollama 미설치 — provider=ollama 및 STM 자동 요약 기능 비활성화됨."
+    Write-Ok "현재 provider는 Ollama를 사용하지 않음 — 확인/다운로드 스킵"
+} elseif (-not $ollamaCmd) {
+    Write-Step "Ollama model..."
+    Write-Warn "Ollama 미설치 — 선택한 provider를 사용할 수 없음."
     Write-Warn "  설치: https://ollama.ai"
     if ($OllamaOverlayModel) {
         Write-Warn "  설치 후 수동 실행: ollama pull $OllamaOverlayModel"
     }
-    Write-Warn "  설치 후 수동 실행: ollama pull $OllamaStmModel"
 } else {
     # overlay.yaml 에 지정된 provider 모델
     if ($OllamaOverlayModel) {
@@ -241,27 +231,4 @@ if (-not $ollamaCmd) {
         }
     }
 
-    # STM 자동 요약용 모델
-    Write-Step "Ollama model (STM): $OllamaStmModel..."
-    $ollamaList2 = & ollama list 2>&1
-    $stmModelBase = $OllamaStmModel.Split(":")[0]
-    if ($ollamaList2 -match [regex]::Escape($stmModelBase)) {
-        Write-Ok "Already available: $OllamaStmModel"
-    } else {
-        Write-Host "  Pulling $OllamaStmModel (약 1GB, 시간이 걸릴 수 있음)..." -ForegroundColor DarkGray
-        try {
-            & ollama pull $OllamaStmModel 2>&1 | ForEach-Object {
-                if ($_ -and $_.ToString().Trim()) { Write-Host "    $_" -ForegroundColor DarkGray }
-            }
-            $verifyList2 = & ollama list 2>&1
-            if ($verifyList2 -match [regex]::Escape($stmModelBase)) {
-                Write-Ok "Pulled: $OllamaStmModel"
-            } else {
-                Write-Warn "Pull 완료됐으나 목록에서 확인 불가 — 직접 확인: ollama list"
-            }
-        } catch {
-            Write-Warn "ollama pull 실패: $_"
-            Write-Warn "  Ollama 서버 실행 확인 후 수동으로: ollama pull $OllamaStmModel"
-        }
-    }
 }

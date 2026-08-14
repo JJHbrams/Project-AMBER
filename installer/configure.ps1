@@ -40,6 +40,8 @@ $UserConfig    = Join-Path $ShimDir "user.config.yaml"
 $OverlayConfig = Join-Path $ShimDir "overlay.user.yaml"
 $CopilotInstructions = Join-Path $ShimDir "copilot-instructions.md"
 $CopilotInstructionsSource = Join-Path $InstallDir "config\clients\copilot.md"
+$InstallerTemplates = Join-Path $InstallDir "installer\templates"
+$WorkflowSkillsSource = Join-Path $InstallDir ".github\skills"
 $EnvFile       = Join-Path $ShimDir ".env"
 $MCP_HTTP_PORT = 17385
 $Utf8NoBom     = [System.Text.UTF8Encoding]::new($false)
@@ -185,13 +187,52 @@ if (Test-Path $CopilotInstructionsSource) {
     Write-Warn "Copilot session protocol source 없음: $CopilotInstructionsSource"
 }
 
-# ── 6. Identity 이름 (선택) — 첫 실행 시 반영되도록 env 로 전달 ──
+# ── 6. DB / Wiki / Directives bootstrap ─────────────────────
+Write-Step "DB / Wiki / Directives 초기화"
+& $DistExe --role install-bootstrap --db-dir $DbDir --templates-dir $InstallerTemplates
+if ($LASTEXITCODE -ne 0) {
+    Write-Warn "초기화 실패 (exit=$LASTEXITCODE)"
+    exit 1
+}
+Write-Ok "DB schema, wiki starter files, directives"
+
+# ── 7. Copilot / Claude skills ──────────────────────────────
+Write-Step "Engram workflow skills"
+$sharedSkillNames = @("engram-new-session", "engram-task-workflow", "engram-wiki-workflow", "engram-close-session")
+foreach ($skillName in $sharedSkillNames) {
+    $skillSrc = Join-Path $WorkflowSkillsSource "$skillName\SKILL.md"
+    if (-not (Test-Path $skillSrc)) {
+        Write-Warn "Skill source 없음: $skillSrc"
+        continue
+    }
+    foreach ($skillRoot in @(
+        (Join-Path $env:USERPROFILE ".claude\skills"),
+        (Join-Path $env:USERPROFILE ".copilot\skills")
+    )) {
+        $skillDir = Join-Path $skillRoot $skillName
+        if (-not (Test-Path $skillDir)) { New-Item $skillDir -ItemType Directory -Force | Out-Null }
+        Copy-Item $skillSrc (Join-Path $skillDir "SKILL.md") -Force
+        Write-Ok (Join-Path $skillDir "SKILL.md")
+    }
+}
+$copilotEngramSkill = Join-Path $WorkflowSkillsSource "engram\SKILL.md"
+if (Test-Path $copilotEngramSkill) {
+    $skillDir = Join-Path $env:USERPROFILE ".copilot\skills\engram"
+    if (-not (Test-Path $skillDir)) { New-Item $skillDir -ItemType Directory -Force | Out-Null }
+    Copy-Item $copilotEngramSkill (Join-Path $skillDir "SKILL.md") -Force
+    Write-Ok (Join-Path $skillDir "SKILL.md")
+} else {
+    Write-Warn "Skill source 없음: $copilotEngramSkill"
+}
+Write-Warn "이미 열려 있던 CLI는 새 환경변수와 skill 목록을 다시 읽지 않습니다. 터미널과 CLI 세션을 새로 시작하세요."
+
+# ── 8. Identity 이름 (선택) — 첫 실행 시 반영되도록 env 로 전달 ──
 if ($IdentityName) {
     [Environment]::SetEnvironmentVariable("ENGRAM_INSTALL_NAME", $IdentityName, "User")
     Write-Ok "Identity: $IdentityName (첫 실행 시 적용)"
 }
 
-# ── 7. 바로가기 (exe 직접 타깃 → 작업표시줄 고정 가능) ────────
+# ── 9. 바로가기 (exe 직접 타깃 → 작업표시줄 고정 가능) ────────
 Write-Step "바로가기"
 $exeDir = Split-Path $DistExe
 $shell = New-Object -ComObject WScript.Shell
@@ -215,7 +256,7 @@ if ($EnableAutoStart) {
     Write-Ok "자동시작 해제"
 }
 
-# ── 8. 실행 ──────────────────────────────────────────────────
+# ── 10. 실행 ─────────────────────────────────────────────────
 if ($LaunchNow) {
     Write-Step "engram-overlay 실행"
     Get-Process -Name "engram-overlay" -ErrorAction SilentlyContinue | Stop-Process -Force

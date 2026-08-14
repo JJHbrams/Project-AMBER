@@ -2,7 +2,7 @@
 # Python 3.11 (conda: intel_continuum)
 
 # 필수 패키지
-mcp>=1.0.0                      # MCP 서버 (Claude Code 연동)
+mcp>=1.0.0,<2.0.0               # MCP 서버 (Claude Code 연동, FastMCP 1.x API)
 # anthropic SDK 불필요 — claude CLI를 subprocess로 호출
 
 # 표준 라이브러리 (별도 설치 불필요)

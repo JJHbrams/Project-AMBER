@@ -20,6 +20,7 @@ updated: __DATE__
 | `_inbox/` | 미분류 임시 노트 |
 | `_templates/` | 노트 템플릿 |
 | `concepts/` | 핵심 개념 정리 |
+| `daily/` | 자동 메모리 체크포인트 일일노트 |
 | `guides/` | 사용법 · 운영 지침 |
 | `moc/` | 인덱스 · Map of Content |
 | `notes/` | 일반 메모 · 단상 |

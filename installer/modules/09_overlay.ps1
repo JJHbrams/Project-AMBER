@@ -1,123 +1,24 @@
 ﻿#
-# 09_overlay.ps1 — Overlay exe 빌드 (PyInstaller), launcher cmd, overlay.user.yaml, .env 템플릿
+# 09_overlay.ps1 — Overlay exe 빌드, launcher cmd, overlay.user.yaml, .env 템플릿
 #
 
 # 9. Overlay exe
 Write-Step "Overlay build..."
 $DistExe = Join-Path $ProjectRoot "dist\engram-overlay\engram-overlay.exe"
-$specFile = Join-Path $ProjectRoot "engram-overlay.spec"
+$overlayEngine = Join-Path $ProjectRoot "installer\build-overlay.ps1"
 
-# 실행 중인 overlay 를 먼저 종료한다 — 빌드 여부와 무관하게 항상.
-#   - 빌드 시: PyInstaller COLLECT 가 dist 를 삭제하려면 exe 핸들이 풀려야 함
-#   - 빌드 스킵 시: install 마지막의 auto-launch 가 최신 exe 로 재기동하려면
-#     old 인스턴스가 먼저 죽어야 함(단일 인스턴스 가드가 없어 안 죽이면 자동갱신 실패)
-Stop-EngramOverlay | Out-Null
-
-if (-not (Test-Path $specFile)) {
-    Write-Warn "Spec not found — skipping overlay build"
-} elseif ($OverlayBuildMode -eq "skip") {
-    Write-Warn "Overlay build skipped by option: -OverlayBuildMode skip"
+if (-not (Test-Path $overlayEngine)) {
+    Write-Warn "Overlay build engine not found — skipping overlay build"
 } else {
-    $buildDecision = switch ($OverlayBuildMode) {
-        "clean" { @{ Required = $true; Reason = "forced clean build" } }
-        "rebuild" { @{ Required = $true; Reason = "forced rebuild" } }
-        default { Test-OverlayBuildRequired -projectRoot $ProjectRoot -specPath $specFile -distExePath $DistExe }
+    $engineArguments = @{
+        Mode = $OverlayBuildMode
+        CondaEnv = $CondaEnv
+        PythonPath = $PythonExe
+        NoStart = $true
     }
-
-    if (-not [bool]$buildDecision.Required) {
-        Write-Ok "Skip overlay build ($($buildDecision.Reason))"
-    } else {
-        Write-Step "Building overlay exe... ($($buildDecision.Reason))"
-
-        # overlay/자식 프로세스 종료는 모듈 진입 시 Stop-EngramOverlay 로 이미 수행됨.
-        $buildLog = Join-Path $env:TEMP "engram_pyinstaller_build.log"
-        $attemptCleanBuild = ($OverlayBuildMode -eq "clean")
-        $cleanRetried = $false
-
-        # VS Code 파일 워처가 dist\engram-overlay\ 디렉토리 핸들을 유지하면
-        # shutil.rmtree 가 os.rmdir 단계에서 WinError 32 로 실패한다.
-        # 회피책: --distpath 를 %TEMP% 임시 경로로 지정해 빌드 후 최종 위치로 이동.
-        $TempDistPath = Join-Path $env:TEMP "engram-pyinstaller-dist"
-        $TempDistExe  = Join-Path $TempDistPath "engram-overlay\engram-overlay.exe"
-        $DistDir      = Join-Path $ProjectRoot "dist\engram-overlay"
-
-        while ($true) {
-            if ($attemptCleanBuild) {
-                # build/ 캐시 삭제 (--clean 과 동일한 효과)
-                $BuildWorkDir = Join-Path $ProjectRoot "build\engram-overlay"
-                if (Test-Path $BuildWorkDir) {
-                    try {
-                        Get-ChildItem $BuildWorkDir -Recurse | ForEach-Object { $_.Attributes = 'Normal' }
-                        Remove-Item $BuildWorkDir -Recurse -Force -ErrorAction Stop
-                    } catch {
-                        Write-Warn "build/ 사전 정리 실패 (계속 진행): $_"
-                    }
-                }
-                # 임시 dist 도 초기화
-                if (Test-Path $TempDistPath) {
-                    Remove-Item $TempDistPath -Recurse -Force -ErrorAction SilentlyContinue
-                }
-            }
-
-            # Build via conda-run so Tcl/Tk DLLs are resolved from the target env,
-            # not from base miniconda (prevents Tcl 8.6.x version mismatch at runtime).
-            # Note: use `python -m PyInstaller` instead of bare `pyinstaller` because
-            # `conda run` may not expose the env's Scripts/ directory in PATH.
-            # --distpath 를 TEMP 로 지정해 VS Code 워처 락 회피.
-            if ($condaCmd -and $HasNamedCondaEnv) {
-                if ($attemptCleanBuild) {
-                    $buildOutput = & conda run -n $CondaEnv python -m PyInstaller --noconfirm --clean --distpath $TempDistPath $specFile 2>&1
-                } else {
-                    $buildOutput = & conda run -n $CondaEnv python -m PyInstaller --noconfirm --distpath $TempDistPath $specFile 2>&1
-                }
-            } else {
-                Write-Warn "Named conda env unavailable — falling back to python -m PyInstaller"
-                if ($attemptCleanBuild) {
-                    $buildOutput = & $PythonExe -m PyInstaller --noconfirm --clean --distpath $TempDistPath $specFile 2>&1
-                } else {
-                    $buildOutput = & $PythonExe -m PyInstaller --noconfirm --distpath $TempDistPath $specFile 2>&1
-                }
-            }
-            $buildExitCode = $LASTEXITCODE
-
-            # 빌드 로그 저장
-            $buildOutput | Out-File -FilePath $buildLog -Encoding utf8 -Force
-
-            if ($buildExitCode -eq 0 -and (Test-Path $TempDistExe)) {
-                # TEMP → 최종 위치로 복사 (robocopy — rmdir 없이 파일 단위 덮어쓰기)
-                # VS Code 워처가 디렉토리 핸들을 보유해 rmdir 이 실패해도 robocopy 는 파일 단위로 동작하므로 성공.
-                $TempSrc = Join-Path $TempDistPath "engram-overlay"
-                if (-not (Test-Path $DistDir)) { New-Item $DistDir -ItemType Directory -Force | Out-Null }
-                $null = robocopy $TempSrc $DistDir /E /PURGE /NFL /NDL /NJH /NJS /R:2 /W:1
-                $robocopyExit = $LASTEXITCODE
-                if ($robocopyExit -ge 8) {
-                    Write-Warn "robocopy 실패 (exit $robocopyExit) — 빌드 결과: $TempSrc"
-                } else {
-                    $modeLabel = if ($attemptCleanBuild) { "clean" } else { "incremental" }
-                    Write-Ok "Built ($modeLabel): $DistExe"
-                    break
-                }
-            }
-
-            if ($OverlayBuildMode -eq "auto" -and -not $attemptCleanBuild -and -not $cleanRetried) {
-                Write-Warn "Incremental build failed — retrying once with clean build"
-                $attemptCleanBuild = $true
-                $cleanRetried = $true
-                continue
-            }
-
-            Write-Err "Build failed. Log: $buildLog"
-            Write-Host ""
-            Write-Host "  --- PyInstaller output (last 30 lines) ---" -ForegroundColor Yellow
-            $buildOutput | Select-Object -Last 30 | ForEach-Object { Write-Host "  $_" -ForegroundColor DarkYellow }
-            Write-Host "  ------------------------------------------" -ForegroundColor Yellow
-            Write-Host ""
-            Write-Warn "Overlay will not be available. Fix the error above and re-run install.ps1"
-            if ($OverlayBuildMode -ne "clean") {
-                Write-Warn "필요 시 clean 빌드: .\install.ps1 -OverlayBuildMode clean"
-            }
-            break
-        }
+    & $overlayEngine @engineArguments
+    if ($LASTEXITCODE -ne 0) {
+        Write-Warn "Overlay engine failed; existing artifact was preserved"
     }
 }
 

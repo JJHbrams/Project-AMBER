@@ -6,7 +6,7 @@ from unittest.mock import patch
 from core.graph.semantic.semantic_graph import SemanticGraph
 
 
-async def _no_embedding(text: str) -> list[float]:
+async def _no_embedding(text: str, _prefix: str) -> list[float]:
     return []
 
 
@@ -19,7 +19,7 @@ class SemanticGraphIntegrityTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.sg.enabled, "kuzu가 설치되어 있어야 함(테스트 환경 전제)")
         self._patcher = patch.object(
             SemanticGraph,
-            "compute_embedding",
+            "_compute_embedding",
             side_effect=_no_embedding,
         )
         self._patcher.start()

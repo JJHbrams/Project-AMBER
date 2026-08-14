@@ -14,6 +14,21 @@ summary: engram wiki 작성·편집 시 준수할 상세 규칙. 구조·경로�
 # Wiki 작성 관리 규칙
 
 > 상세 지침 원본: [[wiki-guide]] (docs/guides/wiki-guide.md)
+> 실행 진입점은 `engram-wiki-workflow` skill이다. directive는 이 skill을 호출하는 짧은 dispatcher만 유지한다.
+
+## 실행 경계
+
+- directive: 작업 종류를 판별해 skill 호출을 강제하는 짧은 규칙
+- skill: 도구 호출 순서와 실패 처리 등 실행 절차
+- Wiki: 경로·형식·정책의 상세 원문
+- Wiki 링크만 포함한 directive를 실행 완료로 간주하지 않는다.
+
+## 저장 대상 선택
+
+- 현재 프로젝트 context나 최근 세션 노드는 자동 저장 위치가 아니다.
+- 기존 노드는 제목·summary·본문이 새 내용과 직접 일치할 때만 갱신한다.
+- 일치하는 노드가 없으면 적절한 프로젝트 subdir에 전용 노드를 생성한다.
+- active roadmap를 무관한 작업 기록의 fallback 저장소로 사용하지 않는다.
 
 ## 구조 변경 시
 

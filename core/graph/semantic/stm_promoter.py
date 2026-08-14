@@ -1,13 +1,13 @@
 """STM → LTM 승격 파이프라인.
 
-overlay 세션 종료 시 scope='overlay' 최근 대화를 Ollama로 요약 → memories 저장.
+overlay 세션 종료 시 scope='overlay' 최근 대화를 Claude Code로 요약 → memories 저장.
 
 신호 3개 weighted sum (합계 1.0):
   novelty  (0.25): 기존 기억과 얼마나 다른가  — fuzzy triangular membership
   activity (0.30): 대화량 (user 턴 수 기반)
   recency  (0.45): 마지막 승격 이후 경과 시간
 
-score >= 0.5 이면 Ollama(qwen2.5:1.5b) 요약 → save_memory()
+score >= 0.5 이면 Claude Code 단발 요약 → save_memory()
 """
 
 import json
@@ -18,8 +18,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-import requests
-
 from core.storage.db import get_connection
 from core.memory.store import save_memory, upsert_working_memory
 from .semantic_graph import get_semantic_graph, run_sg_coro
@@ -27,36 +25,8 @@ from .semantic_graph import get_semantic_graph, run_sg_coro
 logger = logging.getLogger(__name__)
 
 _PROMOTE_TS_FILE = Path.home() / ".engram" / "_stm_promote_ts.json"
-_OVERLAY_USER_CONFIG = Path.home() / ".engram" / "overlay.user.yaml"
-_OLLAMA_MODEL = "qwen2.5:1.5b"
-_OLLAMA_TIMEOUT = 30
-
-
-def _ollama_base_url() -> str:
-    """~/.engram/overlay.user.yaml의 cli.ollama_base_url을 우선 사용한다.
-
-    overlay가 원격 Ollama(예: DGX)로 설정된 경우 localhost 하드코딩은
-    항상 연결 실패로 이어지므로, 설정된 값을 그대로 따른다.
-    """
-    try:
-        import yaml
-
-        with open(_OVERLAY_USER_CONFIG, encoding="utf-8") as f:
-            data = yaml.safe_load(f) or {}
-        url = (data.get("cli") or {}).get("ollama_base_url")
-        if url:
-            return str(url).rstrip("/")
-    except Exception:
-        pass
-    return "http://localhost:11434"
-
-
-def _ollama_generate_url() -> str:
-    return f"{_ollama_base_url()}/api/generate"
-
-
-def _ollama_tags_url() -> str:
-    return f"{_ollama_base_url()}/api/tags"
+_AUTO_CHECKPOINT_STATE_FILE = Path.home() / ".engram" / "_auto_checkpoint_state.json"
+_AUTO_CHECKPOINT_LOCK = threading.Lock()
 
 
 # ── Triangular membership + COG defuzz ─────────────────────────────────────
@@ -154,12 +124,12 @@ def _compute_novelty(msgs: list[dict]) -> float:
     try:
         text = " ".join(m["content"][:150] for m in msgs[-8:])
         sg = get_semantic_graph()
-        conv_vec = run_sg_coro(sg.compute_embedding(text))
+        conv_vec = run_sg_coro(sg.compute_query_embedding(text))
         if sg.enabled:
             results = run_sg_coro(sg.episode_semantic_search(query_vec=conv_vec, top_k=3))
             if results:
                 max_sim = max(r.get("score", 0.0) for r in results)
-                return _novelty_membership(1.0 - max_sim)
+                return _novelty_membership(sg.novelty_distance(max_sim))
     except Exception as e:
         logger.debug("novelty 계산 실패 (중립 0.5 사용): %s", e)
     return 0.5
@@ -187,17 +157,18 @@ def _compute_score(novelty: float, activity: float, recency: float) -> float:
     return novelty * 0.25 + activity * 0.30 + recency * 0.45
 
 
-# ── Ollama ───────────────────────────────────────────────────────────────────
+# ── Claude Code summary ──────────────────────────────────────────────────────
 
 
-def _ollama_available() -> bool:
-    try:
-        return requests.get(_ollama_tags_url(), timeout=3).status_code == 200
-    except Exception:
-        return False
+def _call_claude_once(prompt: str, timeout: float) -> Optional[str]:
+    """기존 Claude Code OAuth 인증을 사용하는 안전 모드 단발 호출."""
+    from core.identity.reflection_client import call_claude_resumable
+
+    text, _session_id = call_claude_resumable(prompt, timeout=timeout)
+    return text.strip() if text and text.strip() else None
 
 
-def _summarize_with_ollama(msgs: list[dict]) -> Optional[str]:
+def _summarize_with_claude(msgs: list[dict]) -> Optional[str]:
     lines = []
     for m in msgs[-12:]:
         role = "사용자" if m["role"] == "user" else "AI"
@@ -206,23 +177,12 @@ def _summarize_with_ollama(msgs: list[dict]) -> Optional[str]:
         "다음 대화에서 기억할 핵심 정보만 1~2문장으로 정리해줘. "
         "결정사항, 중요한 사실, 새로 알게 된 내용 위주로.\n\n" + "\n".join(lines) + "\n\n요약:"
     )
-    try:
-        resp = requests.post(
-            _ollama_generate_url(),
-            json={"model": _OLLAMA_MODEL, "prompt": prompt, "stream": False},
-            timeout=_OLLAMA_TIMEOUT,
-        )
-        resp.raise_for_status()
-        return resp.json().get("response", "").strip() or None
-    except Exception as e:
-        logger.warning("Ollama 요약 실패 (%s): %s", _OLLAMA_MODEL, e)
-        return None
+    return _call_claude_once(prompt, timeout=60.0)
 
 
 # ── Working memory (세션 종료 시 항상 갱신 — novelty/score 게이팅 없음) ────
 
 
-_WM_OLLAMA_TIMEOUT = 20
 _WM_MAX_MESSAGES = 40
 
 
@@ -243,13 +203,8 @@ def _get_recent_messages_for_scope(scope_key: str, limit: int = _WM_MAX_MESSAGES
     return [{"role": r["role"], "content": r["content"]} for r in reversed(rows)]
 
 
-def _summarize_working_memory_with_ollama(msgs: list[dict]) -> Optional[dict]:
-    """세션 요약 + 다음 작업(open_intents)을 로컬 Ollama로 생성한다.
-
-    engram_close_session이 모델 호출에 의존해 불안정한 것과 달리, 이건
-    watchdog이 세션 종료를 감지한 시점에 자동으로 실행된다 — Claude API
-    토큰 소모 없이 로컬 모델(qwen2.5:1.5b)만 사용.
-    """
+def _summarize_working_memory_with_claude(msgs: list[dict]) -> Optional[dict]:
+    """세션 요약 + 다음 작업(open_intents)을 Claude Code 단발 호출로 생성한다."""
     lines = []
     for m in msgs:
         role = "사용자" if m["role"] == "user" else "AI"
@@ -261,17 +216,7 @@ def _summarize_working_memory_with_ollama(msgs: list[dict]) -> Optional[dict]:
         + "\n".join(lines)
         + "\n\n답변:"
     )
-    try:
-        resp = requests.post(
-            _ollama_generate_url(),
-            json={"model": _OLLAMA_MODEL, "prompt": prompt, "stream": False},
-            timeout=_WM_OLLAMA_TIMEOUT,
-        )
-        resp.raise_for_status()
-        text = resp.json().get("response", "").strip()
-    except Exception as e:
-        logger.warning("working_memory Ollama 요약 실패: %s", e)
-        return None
+    text = _call_claude_once(prompt, timeout=60.0)
     if not text:
         return None
 
@@ -291,16 +236,13 @@ def _summarize_working_memory_with_ollama(msgs: list[dict]) -> Optional[dict]:
 
 
 def update_working_memory_from_recent_session(scope_key: str = "overlay") -> bool:
-    """세션 종료 시 항상 실행 — 로컬 Ollama로 요약해 working_memory를 갱신한다."""
+    """세션 종료 시 항상 실행 — Claude Code로 요약해 working_memory를 갱신한다."""
     msgs = _get_recent_messages_for_scope(scope_key)
     if not msgs:
         logger.debug("working_memory update skip: 메시지 없음 (scope=%s)", scope_key)
         return False
-    if not _ollama_available():
-        logger.warning("Ollama 응답 없음 — working_memory 갱신 스킵 (scope=%s)", scope_key)
-        return False
 
-    result = _summarize_working_memory_with_ollama(msgs)
+    result = _summarize_working_memory_with_claude(msgs)
     if not result:
         return False
 
@@ -318,7 +260,14 @@ def update_working_memory_from_recent_session_async(scope_key: str = "overlay") 
 # ── Main entry point ─────────────────────────────────────────────────────────
 
 
-def maybe_promote(scope_key: str = "overlay") -> bool:
+def maybe_promote(
+    scope_key: str = "overlay",
+    *,
+    summary_override: str = "",
+    project: str = "",
+    session_id: int | None = None,
+    source: str = "save",
+) -> bool:
     """STM → LTM 승격 시도. 승격 발생 시 True 반환."""
     msgs = _get_promotable_messages(scope_key)
     if not msgs:
@@ -344,18 +293,181 @@ def maybe_promote(scope_key: str = "overlay") -> bool:
         logger.debug("promote skip: score=%.2f < 0.5", score)
         return False
 
-    if not _ollama_available():
-        logger.warning("Ollama 응답 없음 — STM 승격 스킵 (score=%.2f)", score)
-        return False
-
-    summary = _summarize_with_ollama(msgs)
+    summary = summary_override.strip() or _summarize_with_claude(msgs)
     if not summary:
         return False
 
-    save_memory(None, f"[overlay] {summary}")
+    save_memory(
+        session_id,
+        f"[overlay] {summary}",
+        source=source,
+        project=project,
+    )
     _set_last_promoted_ts(scope_key)
     logger.info("STM→LTM 승격 완료 (score=%.2f): %s", score, summary[:80])
     return True
+
+
+def _load_auto_checkpoint_state() -> dict:
+    try:
+        data = json.loads(_AUTO_CHECKPOINT_STATE_FILE.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _save_auto_checkpoint_state(data: dict) -> None:
+    _AUTO_CHECKPOINT_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    tmp = _AUTO_CHECKPOINT_STATE_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(tmp, _AUTO_CHECKPOINT_STATE_FILE)
+
+
+def _get_auto_checkpoint_candidate(
+    scope_key: str,
+    *,
+    idle_seconds: int,
+    min_user_turns: int,
+) -> dict | None:
+    state = _load_auto_checkpoint_state().get(scope_key, {})
+    last_message_id = int(state.get("last_message_id", 0) or 0)
+    conn = get_connection()
+    try:
+        session = conn.execute(
+            """SELECT id FROM sessions
+               WHERE scope_key = ? AND ended_at IS NULL
+               ORDER BY started_at DESC LIMIT 1""",
+            (scope_key,),
+        ).fetchone()
+        if not session:
+            return None
+        memory_watermark = conn.execute(
+            """SELECT MAX(ts) AS ts FROM (
+                   SELECT MAX(created_at) AS ts FROM memories WHERE session_id = ?
+                   UNION ALL
+                   SELECT MAX(updated_at) AS ts FROM working_memory WHERE scope_key = ?
+               )""",
+            (session["id"], scope_key),
+        ).fetchone()
+        cutoff_ts = str(memory_watermark["ts"] or "") if memory_watermark else ""
+        rows = conn.execute(
+            """SELECT id, role, content, timestamp
+               FROM messages
+               WHERE session_id = ? AND id > ?
+                 AND (? = '' OR timestamp > ?)
+               ORDER BY id DESC LIMIT 200""",
+            (session["id"], last_message_id, cutoff_ts, cutoff_ts),
+        ).fetchall()
+    finally:
+        conn.close()
+    rows = list(reversed(rows))
+    if not rows or rows[-1]["role"] != "assistant":
+        return None
+    user_turns = sum(1 for row in rows if row["role"] == "user")
+    if user_turns < min_user_turns:
+        return None
+    try:
+        idle_for = (datetime.now() - datetime.fromisoformat(rows[-1]["timestamp"])).total_seconds()
+    except (TypeError, ValueError):
+        return None
+    if idle_for < idle_seconds:
+        return None
+    return {
+        "session_id": int(session["id"]),
+        "last_message_id": int(rows[-1]["id"]),
+        "messages": [{"role": row["role"], "content": row["content"]} for row in rows],
+        "user_turns": user_turns,
+    }
+
+
+def maybe_auto_checkpoint(
+    scope_key: str = "overlay",
+    *,
+    cwd: str = "",
+    idle_seconds: int = 1800,
+    min_user_turns: int = 5,
+    external_daily_dir: str = "",
+) -> dict:
+    """유휴 중인 열린 세션을 닫지 않고 기억·일지를 체크포인트한다."""
+    if not _AUTO_CHECKPOINT_LOCK.acquire(blocking=False):
+        return {"status": "busy"}
+    try:
+        candidate = _get_auto_checkpoint_candidate(
+            scope_key,
+            idle_seconds=max(60, int(idle_seconds)),
+            min_user_turns=max(1, int(min_user_turns)),
+        )
+        if candidate is None:
+            return {"status": "skipped"}
+
+        result = _summarize_working_memory_with_claude(candidate["messages"])
+        if not result:
+            return {"status": "summary_failed"}
+
+        from core.context.project_scope import resolve_kg_node_id, resolve_project_key
+        from core.memory.daily_checkpoint import append_daily_checkpoint
+        from core.observability.activity import log_activity
+
+        project_key = resolve_project_key(cwd=cwd)
+        project_node_id = resolve_kg_node_id(project_key) if project_key else None
+        upsert_working_memory(
+            scope_key,
+            result["summary"],
+            open_intents=result["open_intents"],
+        )
+        promoted = maybe_promote(
+            scope_key,
+            summary_override=result["summary"],
+            project=project_key,
+            session_id=candidate["session_id"],
+            source="auto-checkpoint",
+        )
+        checkpoint_id = (
+            f"{scope_key}-{candidate['session_id']}-{candidate['last_message_id']}"
+        )
+        note_result = append_daily_checkpoint(
+            checkpoint_id=checkpoint_id,
+            now=datetime.now().astimezone(),
+            summary=result["summary"],
+            open_intents=result["open_intents"],
+            project_key=project_key,
+            project_node_id=project_node_id,
+            external_daily_dir=external_daily_dir,
+        )
+        log_activity(
+            actor="auto-checkpoint",
+            project=project_key,
+            action=result["summary"],
+            detail=(
+                f"checkpoint={checkpoint_id}; user_turns={candidate['user_turns']}; "
+                f"ltm_promoted={promoted}"
+            ),
+        )
+        state = _load_auto_checkpoint_state()
+        state[scope_key] = {
+            "last_message_id": candidate["last_message_id"],
+            "checkpoint_id": checkpoint_id,
+            "updated_at": datetime.now().astimezone().isoformat(),
+        }
+        _save_auto_checkpoint_state(state)
+        logger.info(
+            "auto checkpoint 완료 scope=%s turns=%d promoted=%s checkpoint=%s",
+            scope_key,
+            candidate["user_turns"],
+            promoted,
+            checkpoint_id,
+        )
+        return {
+            "status": "checkpointed",
+            "checkpoint_id": checkpoint_id,
+            "ltm_promoted": promoted,
+            **note_result,
+        }
+    except Exception:
+        logger.exception("auto checkpoint 실패 (scope=%s)", scope_key)
+        return {"status": "failed"}
+    finally:
+        _AUTO_CHECKPOINT_LOCK.release()
 
 
 def maybe_promote_async(scope_key: str = "overlay") -> threading.Thread:
@@ -632,5 +744,3 @@ def flag_reflection_event_from_recent_session(scope_key: str = "overlay") -> boo
         )
         logger.info("reflection event 감지 → curiosity 등록 (scope=%s): %s", scope_key, note[:80])
         return True
-
-

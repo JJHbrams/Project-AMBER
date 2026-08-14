@@ -40,9 +40,9 @@ updated: __DATE__
 
 - 최대 3계층 깊이
 - 디렉토리명: **소문자 kebab-case** (예: `projects/karpathy/`, `research/medical-imaging/`)
-- 새 디렉토리: `kg_add_note(note_type="projects/my-project")` 트릭 사용 후 frontmatter `type`을 `moc`으로 수정
-  (이건 moc 타입을 표준 위치가 아닌 곳에 강제 배치하는 좁은 용도 전용 — 일반적으로
-  기존 디렉토리 하위에 노트를 넣을 때는 아래 `subdir` 파라미터를 쓸 것, note_type은 안 건드림)
+- 새 프로젝트 디렉토리: 먼저 `note_type="moc"` 인 index 노드를 만들고, 프로젝트 하위
+  노트는 `note_type="project", subdir="<project-name>/<subdir>"`로 배치한다.
+- `note_type`에 경로를 넣지 않는다. 경로와 분류를 섞으면 DB type이 오염된다.
 
 | 디렉토리 | 용도 |
 |----------|------|
@@ -55,7 +55,7 @@ updated: __DATE__
 | note_type | 저장 디렉토리 | 용도 |
 |---|---|---|
 | concept | concepts/ | 개념·기술 정리 |
-| protocol | protocols/ | 운영 규칙·지침 |
+| protocol  | protocols/    | 운영 규칙·지침                                                     |
 | research | research/ | **외부** 논문·서비스 조사 결과 (프로젝트 내부 노트는 project 사용) |
 | project | projects/ | 프로젝트 노트 (개발·설계·진행·회고) |
 | tool | tools/ | 도구·라이브러리 레퍼런스 |
@@ -63,6 +63,8 @@ updated: __DATE__
 | person | people/ | 인물 노트 |
 | moc | moc/ | 지도 노트 (목차·인덱스) |
 | fleeting | _inbox/ | 임시 메모 |
+
+`daily/`는 자동 체크포인트 전용 특수 디렉터리이며 `note_type="concept"`로 인덱싱한다.
 
 > ⚠️ 프로젝트 내부 개발/설계 노트 → `note_type="project"`, `projects/<프로젝트명>/` 하위 디렉토리 먼저 확인
 

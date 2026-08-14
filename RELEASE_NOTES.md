@@ -1,5 +1,49 @@
 # Release Notes
 
+## 2026-08-14 - v1.3.0: Reliable Installer Builds, Dashboard Sidecar, and E5 Memory Migration
+
+> Minor release. Install with the attached setup executable; portable v1.2.1 hotfix replacement is
+> not sufficient because the frozen bundle, dashboard sidecar, installer workflow, and embedding
+> model metadata have changed.
+
+### Highlights
+
+- **Installer builds are now reproducible and fail-safe.** A shared build engine creates artifacts
+  in a temporary directory, validates a build manifest and frozen roles, and replaces the release
+  bundle only after every smoke check succeeds. Installer-only packaging can safely reuse a
+  validated bundle without rebuilding thousands of files.
+- **The dashboard is included as a dedicated frozen sidecar.** `engram-dashboard.exe` no longer
+  depends on an external Python process. Settings can control automatic dashboard startup and open
+  the dashboard directly.
+- **Semantic memory now uses multilingual E5 embeddings.** Queries and stored passages use their
+  required role prefixes, model identity is stamped on vectors, and stale legacy vectors are
+  excluded until the next KG synchronization re-embeds them from SQLite source data.
+- **Long-running sessions create automatic memory checkpoints.** Eligible idle sessions update
+  working memory and connect activity, daily notes, and project progress without requiring the
+  session to close.
+- **Agent workflows are installed consistently.** Task, Wiki, reflection, and session-close skills
+  are deployed for supported Copilot and Claude Code environments, with protected-branch and
+  worktree guidance included.
+
+### Fixed
+
+- Frozen dashboard and backend roles now have valid output streams even in windowed executables,
+  and smoke failures are written to a temporary diagnostic log instead of disappearing.
+- Source installation no longer checks or downloads Ollama models unless an Ollama provider was
+  selected.
+- Conditional directives no longer disappear at session start because the initial query is empty;
+  essential workflow dispatch remains available independently of the normal directive limit.
+- Frozen installers include the Copilot `/engram` and new-session skills that were previously
+  omitted.
+
+### Upgrade Notes
+
+- Exit the running overlay before installing.
+- Existing memory records remain in SQLite. The first KG synchronization after upgrade may take
+  longer while legacy semantic vectors are recreated with the E5 model.
+- Start a new terminal or CLI session after installation so updated skills and environment settings
+  are discovered.
+
 ## 2026-08-13 - v1.2.1 Portable EXE Hotfix 2
 
 > Executable-only hotfix for an existing **v1.2.1** installation. Hotfix 2 includes Hotfix 1.

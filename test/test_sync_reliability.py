@@ -46,13 +46,21 @@ class _MemoryConnection:
 
 
 class _SemanticGraph:
-    def __init__(self, report, fail_id=None):
+    def __init__(self, report, fail_id=None, stale_embeddings=0):
         self.report = report
         self.fail_id = fail_id
+        self.stale_embeddings = stale_embeddings
         self.upserted = []
 
     async def reconcile_episodes(self, canonical_ids, apply=False):
         return self.report
+
+    async def embedding_staleness(self):
+        return {
+            "model": "intfloat/multilingual-e5-small",
+            "kg_nodes": 0,
+            "episodes": self.stale_embeddings,
+        }
 
     async def upsert_episode(self, **kwargs):
         episode_id = int(kwargs["episode_id"])
@@ -203,6 +211,14 @@ class SyncReliabilityTests(unittest.IsolatedAsyncioTestCase):
             result = await server._scan_memory_drift(sg)
         self.assertEqual(result["checkpoint_id"], 47)
         self.assertEqual(result["drift"]["missing_ids"], ["48", "63"])
+
+    async def test_stale_embedding_model_rewinds_full_memory_index(self):
+        self._write_checkpoint(74)
+        sg = _SemanticGraph(_report(count=74), stale_embeddings=74)
+        with patch.object(server, "get_connection", return_value=_ScanConnection(range(1, 75))):
+            result = await server._scan_memory_drift(sg)
+        self.assertEqual(result["checkpoint_id"], 0)
+        self.assertEqual(result["drift"]["stale_embedding_episodes"], 74)
 
     async def test_checkpoint_ahead_is_clamped(self):
         self._write_checkpoint(100)

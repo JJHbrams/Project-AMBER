@@ -13,6 +13,9 @@ installer/Output/
 
 # 오프라인 임베딩 모델 export (빌드 산출물, ~458MB — build-installer.ps1 이 생성)
 resource/embedding-model/
+!resource/embedding-model/
+resource/embedding-model/*
+!resource/embedding-model/manifest.json
 
 # IDE
 .vscode/

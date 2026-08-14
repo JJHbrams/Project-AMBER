@@ -136,6 +136,7 @@ $TemplateTargets = @(
     # Protocol guides
     @{ Src = "protocols\_protocol-wiki-management-guide.md";   Dest = "$DbDir\docs\protocols\wiki-management-guide.md" },
     @{ Src = "protocols\_protocol-git-branch-guide.md";        Dest = "$DbDir\docs\protocols\git-branch-guide.md" },
+    @{ Src = "protocols\_protocol-agent-collaboration-guide.md"; Dest = "$DbDir\docs\protocols\agent-collaboration-guide.md" },
     @{ Src = "protocols\_protocol-wiki-reminder-guide.md";     Dest = "$DbDir\docs\protocols\wiki-reminder-guide.md" },
     @{ Src = "protocols\_protocol-activity-log-guide.md";      Dest = "$DbDir\docs\protocols\activity-log-guide.md" },
     @{ Src = "protocols\_protocol-narrative-update-guide.md";  Dest = "$DbDir\docs\protocols\narrative-update-guide.md" },
@@ -237,7 +238,7 @@ if ((-not $GuideExists) -or $OverwriteWikiStarters) {
     else { Write-Ok "Created: $WikiGuide" }
 } else { Write-Ok "Exists:  $WikiGuide" }
 
-# 6c. Directives 템플릿 시딩 (INSERT OR IGNORE — 기존 커스터마이징 보존)
+# 6c. Directives 템플릿 시딩/마이그레이션
 Write-Step "Seeding default directives..."
 $dirTemplPath = Join-Path $ProjectRoot "installer\templates\directives.json"
 if (Test-Path $dirTemplPath) {
@@ -245,29 +246,14 @@ if (Test-Path $dirTemplPath) {
 import sys, os, json
 sys.path.insert(0, r'$($ProjectRoot -replace '\\', '/')')
 os.environ['ENGRAM_DB_DIR'] = r'$($DbDir -replace '\\', '/')'
-from core.storage.db import initialize_db, get_connection
-initialize_db()
-template_path = r'$($dirTemplPath -replace '\\', '/')'
-vault_dir = r'$($DbDir -replace '\\', '/')'
-with open(template_path, encoding='utf-8') as f:
-    directives = json.load(f)
-conn = get_connection()
-seeded = 0
-with conn:
-    for d in directives:
-        content = d['content'].replace('__VAULT_DIR__', vault_dir)
-        cursor = conn.execute(
-            'INSERT OR IGNORE INTO directives (key, content, source, scope, priority, trigger_type) VALUES (?, ?, ?, ?, ?, ?)',
-            (d['key'], content, 'install', d.get('scope', 'all'), d.get('priority', 0), d.get('trigger_type', 'always'))
-        )
-        if cursor.rowcount > 0:
-            seeded += 1
-conn.close()
-print(f'directives seeded: {seeded}')
+from pathlib import Path
+from core.install.bootstrap import bootstrap_install
+result = bootstrap_install(Path(r'$($DbDir -replace '\\', '/')'), Path(r'$((Split-Path $dirTemplPath) -replace '\\', '/')'))
+print(json.dumps(result))
 "@
     $seedResult = Invoke-PythonScriptText -PythonPath $PythonExe -ScriptText $dirSeedScript
-    if ($seedResult -match "seeded: (\d+)") {
-        Write-Ok "Directives seeded: $($Matches[1]) new (existing preserved)"
+    if ($seedResult -match '"directives_seeded":\s*(\d+)') {
+        Write-Ok "Directives migrated: $seedResult"
     } else {
         Write-Warn "Directive seeding: $seedResult"
     }

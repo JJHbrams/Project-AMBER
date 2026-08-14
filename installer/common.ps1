@@ -400,27 +400,24 @@ function Stop-EngramOverlay {
 }
 
 function Test-OverlayBuildRequired([string]$projectRoot, [string]$specPath, [string]$distExePath) {
-    if (-not (Test-Path $distExePath)) {
-        return @{ Required = $true; Reason = "dist exe missing" }
+    $engine = Join-Path $projectRoot "installer\build-overlay.ps1"
+    if (-not (Test-Path $engine)) {
+        return @{ Required = $true; Reason = "shared overlay build engine missing" }
     }
-
-    $distTime = (Get-Item $distExePath).LastWriteTimeUtc
-    $inputs = @(
-        $specPath,
-        (Join-Path $projectRoot "engram_overlay_entry.py"),
-        (Join-Path $projectRoot "overlay"),
-        (Join-Path $projectRoot "core"),
-        (Join-Path $projectRoot "discord_bot"),
-        (Join-Path $projectRoot "resource"),
-        (Join-Path $projectRoot "config\overlay.yaml"),
-        (Join-Path $projectRoot "config\overlay.user.yaml")
+    $shell = Get-Command powershell.exe -ErrorAction SilentlyContinue
+    if (-not $shell) {
+        return @{ Required = $true; Reason = "PowerShell executable missing" }
+    }
+    $output = @(
+        & $shell.Source -NoProfile -ExecutionPolicy Bypass -File $engine `
+            -Mode auto -ValidateOnly 2>&1
     )
-    $latestSourceTime = Get-LatestWriteTimeUtc $inputs
-    if ($latestSourceTime -gt $distTime) {
-        return @{ Required = $true; Reason = "overlay sources changed" }
+    if ($LASTEXITCODE -eq 0) {
+        return @{ Required = $false; Reason = "validated build manifest matches current inputs" }
     }
-
-    return @{ Required = $false; Reason = "dist exe up-to-date" }
+    $reason = ($output | ForEach-Object { $_.ToString().Trim() } | Where-Object { $_ } | Select-Object -Last 1)
+    if (-not $reason) { $reason = "overlay build manifest is stale or invalid" }
+    return @{ Required = $true; Reason = $reason }
 }
 
 # Goose CLI Windows 바이너리 자동 다운로드

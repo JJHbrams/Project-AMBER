@@ -73,6 +73,17 @@ def _directive_max_items() -> int:
     return 0 if value == 0 else max(1, value)
 
 
+def _directive_pinned_keys() -> set[str]:
+    raw = get_cfg_value("directives.enforcement.pinned_keys", [])
+    if isinstance(raw, str):
+        values = raw.split(",")
+    elif isinstance(raw, (list, tuple, set)):
+        values = raw
+    else:
+        return set()
+    return {str(value).strip() for value in values if str(value).strip()}
+
+
 def add_directive(
     key: str,
     content: str,
@@ -135,20 +146,21 @@ def get_directives(
 
     directives = [dict(r) for r in rows]
     enforcement_mode = _directive_enforcement_mode()
+    configured_pins = _directive_pinned_keys()
 
     if enforcement_mode == "always":
         result = directives
     else:
         # trigger 필터
         active_triggers = _active_triggers(user_query)
-        pinned_keys: set[str] = set()
+        pinned_keys = set(configured_pins)
         if enforcement_mode == "hybrid":
             pin_top_n = _directive_pin_top_n()
-            pinned_keys = {
+            pinned_keys.update({
                 str(d.get("key", "")).strip()
                 for d in directives[:pin_top_n]
                 if str(d.get("key", "")).strip()
-            }
+            })
 
         result = []
         for d in directives:
@@ -159,7 +171,25 @@ def get_directives(
 
     max_items = _directive_max_items()
     if max_items > 0:
-        result = result[:max_items]
+        pinned = [d for d in result if str(d.get("key", "")).strip() in configured_pins]
+        slots = max(0, max_items - len(pinned))
+        selected_keys = {
+            str(d.get("key", "")).strip()
+            for d in pinned
+        }
+        for directive in result:
+            key = str(directive.get("key", "")).strip()
+            if key in selected_keys:
+                continue
+            if slots <= 0:
+                break
+            selected_keys.add(key)
+            slots -= 1
+        result = [
+            directive
+            for directive in result
+            if str(directive.get("key", "")).strip() in selected_keys
+        ]
 
     return result
 
@@ -192,6 +222,7 @@ def update_directive(
         params.append(trigger_type)
     if not updates:
         return False
+    updates.append("source = 'user'")
     updates.append("updated_at = datetime('now','localtime')")
     params.append(key)
 
@@ -230,4 +261,3 @@ def render_directives_prompt(caller: str = "all", user_query: str = "") -> str:
         scope_tag = f" [{d['scope']}]" if d["scope"] != "all" else ""
         lines.append(f"• {d['content']}{scope_tag}")
     return header + "\n" + "\n".join(lines)
-

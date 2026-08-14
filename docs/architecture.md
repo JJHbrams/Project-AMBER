@@ -92,11 +92,12 @@ DB 루트는 `~/.engram/user.config.yaml`의 `db.root_dir`에서 정하며,
 ┌──────────────────────────────────────────────────────────────────┐
 │    <db.root_dir>\semantic_graph\  (KuzuDB embedded)              │
 │                                                                   │
-│  KGNode ── id, title, type, tags, summary, embedding, hash       │
+│  KGNode ── id, title, type, tags, summary, embedding, model, hash│
+│  EpisodeNode ─ id, content, keywords, embedding, model           │
 │  KG_EDGE ─ FROM KGNode TO KGNode, rel_type, weight               │
 │                                                                   │
-│  임베딩: paraphrase-multilingual-MiniLM-L12-v2 (로컬, 다국어)    │
-│  content_hash 비교로 변경된 노드만 재임베딩                        │
+│  임베딩: intfloat/multilingual-e5-small (query/passage 역할 분리) │
+│  content/model hash 변경 시 재임베딩, stale 벡터는 검색에서 제외  │
 └───────────────────────────────┬──────────────────────────────────┘
                                 │ ↕ kg_sync / kg_watcher.py
 ┌──────────────────────────────────────────────────────────────────┐

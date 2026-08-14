@@ -1,0 +1,17 @@
+{
+  "files": {
+    "1_Pooling/config.json": "bb80272f7adad76ce93073c25e18113ee66be1e91f60bcdd72aa41d05b28247e",
+    "README.md": "d9c82367acdd3c641fbfb7fa16142b3948f4941a593bc63e988d22942ef83d3b",
+    "config.json": "a935cd0d14fe99ec2a40687a9dec463611481e28f7ea181c746bae8775133297",
+    "config_sentence_transformers.json": "d3a94e623d61a201cbfc79b4df7fa12f108eb61b153a92857e65e3b0f2982513",
+    "model.safetensors": "82f0a0642cd3f04c23b038c7d8e85aaaa2ca24202dd9bb58cf54a5270dd33db8",
+    "modules.json": "5286260f53f0f5d318eb02f1565fd30f7ec7c6d305f41ad29e2bb3ec974046a6",
+    "sentence_bert_config.json": "5fee3fcdc4a727fad422f0fed0c867b0921eefa9051de221521956ed42eb4c19",
+    "tokenizer.json": "cd98e5698b201ba914efb8c18b6709fa8735ab71dcad8d2b431e52e8bf68d932",
+    "tokenizer_config.json": "be2462a580a0e3c97681d1ba877caeb2748344d6002dff51f1bc0240f2ab4441"
+  },
+  "model_id": "intfloat/multilingual-e5-small",
+  "resolved_revision": "614241f622f53c4eeff9890bdc4f31cfecc418b3",
+  "schema_version": 1,
+  "sentence_transformers_version": "5.7.0"
+}

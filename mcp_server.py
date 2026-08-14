@@ -1373,7 +1373,13 @@ def engram_list_curiosities(limit: int = 5) -> list:
 
 @engramMCP.tool()
 def engram_address_curiosity(curiosity_id: int) -> dict:
-    """궁금증이 대화를 통해 해소되었음을 표시합니다."""
+    """궁금증이 대화를 통해 해소되었음을 표시합니다.
+
+    주의: 이 도구를 단독으로 호출하지 말 것. curiosity를 다루는 건 반성(reflection)
+    절차의 일부다 — 먼저 engram_prepare_reflection으로 맥락을 모으고 1인칭으로
+    판단한 뒤, engram_apply_reflection(addressed_curiosity_ids=[curiosity_id], ...)
+    으로 narrative/persona 판단과 함께 처리하라. 이 도구만 따로 부르면 반성 자체를
+    생략하는 지름길이 되어, persona 수치가 사실상 갱신되지 않는 문제가 있었다."""
     address_curiosity(curiosity_id)
     return {"status": "addressed", "id": curiosity_id}
 
@@ -1651,8 +1657,11 @@ async def _scan_memory_drift(sg) -> dict:
     sqlite_max = max(canonical_ids, default=0)
     saved_checkpoint = _load_memories_sync_checkpoint()
     reconciliation = await sg.reconcile_episodes([str(memory_id) for memory_id in canonical_ids], apply=False)
+    embedding_staleness = await sg.embedding_staleness()
     missing_ids = sorted(int(memory_id) for memory_id in reconciliation.get("missing_ids", []))
-    if missing_ids:
+    if int(embedding_staleness.get("episodes", 0)) > 0:
+        effective_checkpoint = 0
+    elif missing_ids:
         effective_checkpoint = max(0, min(missing_ids) - 1)
     else:
         effective_checkpoint = sqlite_max
@@ -1669,6 +1678,9 @@ async def _scan_memory_drift(sg) -> dict:
             "unlinked_episode_ids": [
                 str(memory_id) for memory_id in reconciliation.get("unlinked_episode_ids", [])
             ],
+            "embedding_model": embedding_staleness.get("model", ""),
+            "stale_embedding_kg_nodes": int(embedding_staleness.get("kg_nodes", 0)),
+            "stale_embedding_episodes": int(embedding_staleness.get("episodes", 0)),
         },
     }
 
@@ -2340,12 +2352,19 @@ def engram_apply_reflection(
     new_narrative: str,
     reflection_summary: str,
     persona_observations: str = "",
+    addressed_curiosity_ids: list[int] | None = None,
 ) -> dict:
     """반성 결과를 적용합니다.
     - 자기 서술을 업데이트
     - 세션 요약을 저장
     - 테마 가중치를 감쇠
-    - persona_observations(JSON)이 있으면 페르소나에 EMA 블렌딩 적용"""
+    - persona_observations(JSON)이 있으면 페르소나에 EMA 블렌딩 적용
+    - addressed_curiosity_ids가 있으면 그 궁금증들도 이 자리에서 함께 해소 처리
+
+    curiosity를 다룰 때는 engram_address_curiosity를 단독으로 부르지 말고, 이 도구에
+    addressed_curiosity_ids로 넘겨서 반성 절차(narrative/persona 판단)와 항상 같이
+    가게 한다 — 따로 부르면 "궁금증만 처리하고 반성은 생략"하는 지름길이 생겨서,
+    persona_observations가 실제로는 거의 채워지지 않는 문제가 있었다."""
     update_narrative(new_narrative)
 
     persona_updated = False
@@ -2356,8 +2375,18 @@ def engram_apply_reflection(
             obs = _json.loads(persona_observations)
             update_persona(obs)
             persona_updated = True
-        except (_json.JSONDecodeError, TypeError):
-            pass
+        except (_json.JSONDecodeError, TypeError) as e:
+            logging.getLogger(__name__).warning("apply_reflection: persona_observations 파싱/적용 실패: %s", e)
+
+    addressed_ok: list[int] = []
+    addressed_failed: list[int] = []
+    for cid in (addressed_curiosity_ids or []):
+        try:
+            address_curiosity(cid)
+            addressed_ok.append(cid)
+        except Exception as e:
+            logging.getLogger(__name__).warning("apply_reflection: curiosity %s 해소 실패: %s", cid, e)
+            addressed_failed.append(cid)
 
     conn = get_connection()
     with conn:
@@ -2373,6 +2402,8 @@ def engram_apply_reflection(
         "narrative_updated": True,
         "persona_updated": persona_updated,
         "themes_decayed": True,
+        "curiosities_addressed": addressed_ok,
+        "curiosities_failed": addressed_failed,
     }
 
 
@@ -2562,7 +2593,7 @@ async def kg_add_note(
     마크다운 파일을 vault에 생성하고 DB에 등록합니다.
 
     ⚠️ 위키 작성 전 반드시 작성 지침 확인:
-      kg_read_note("wiki-management-guide") — 디렉토리 규칙, 파일명, frontmatter, 섹션 포맷 등
+      kg_read_note("wiki-guide") — 디렉토리 규칙, 파일명, frontmatter, 섹션 포맷 등
 
     파라미터:
     - title: 노트 제목 (간결하게, 지침의 파일명 규칙 참조). 슬래시로 서브디렉토리
@@ -2717,7 +2748,7 @@ async def kg_sync(verbose: bool = False) -> dict:
 @engramMCP.tool()
 async def kg_semantic_search(query: str, top_k: int = 5, threshold: float = 0.30) -> list:
     """시맨틱 유사도 기반으로 지식 그래프 노드를 검색합니다.
-    키워드가 없어도 의미적으로 유사한 노드를 찾습니다. (sentence-transformers, all-MiniLM-L6-v2)
+    키워드가 없어도 의미적으로 유사한 노드를 찾습니다. (multilingual-e5-small)
     - query: 검색할 문장이나 개념
     - top_k: 반환할 최대 노드 수 (기본 5)
     - threshold: 유사도 임계값 0~1 (기본 0.30, 낮을수록 더 많이 반환)"""
@@ -2760,7 +2791,7 @@ async def kg_wiki_reminder(
     if not sg.enabled:
         return {"status": "disabled", "wiki_hits": [], "episode_hits": []}
 
-    query_vec = await sg.compute_embedding(query)
+    query_vec = await sg.compute_query_embedding(query)
     if not query_vec:
         return {"status": "embedding_failed", "wiki_hits": [], "episode_hits": []}
 

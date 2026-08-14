@@ -5,7 +5,9 @@ SQLite kg_nodes/kg_edges 를 KuzuDB 에 미러링하여 시맨틱 검색을 지�
 connectomeLLM_AGA 의 LongTermMemory 패턴을 Knowledge Graph 에 맞게 포팅.
 
 DB 위치: {db_root}/semantic_graph  (KuzuDB embedded, 파일 기반)
-임베딩 모델: paraphrase-multilingual-MiniLM-L12-v2  (한국어/영어 다국어 지원)
+임베딩 모델: intfloat/multilingual-e5-small
+저장 문서는 passage prefix, 검색 질의는 query prefix를 사용한다. 각 벡터에는
+모델 스탬프를 저장해 같은 차원의 구형 모델 벡터도 검색에서 제외한다.
 
 동시성: kuzu.Connection 하나를 여러 스레드가 공유하는 대신, KuzuDB 자신이 지원하는
 kuzu.AsyncConnection(Connection 풀 + asyncio 디스패치)을 사용한다. 이 클래스의 공개
@@ -29,6 +31,7 @@ from typing import Any, Callable, Iterable, TypedDict
 
 from core.config.runtime_config import get_cfg_value, get_db_root_dir
 from core.context.project_scope import resolve_kg_node_id
+from core.install.model_manifest import validate_manifest
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +90,7 @@ CREATE NODE TABLE IF NOT EXISTS KGNode (
     tags         STRING,
     summary      STRING,
     embedding    STRING,
+    embedding_model STRING DEFAULT '',
     content_hash STRING,
     updated_at   STRING
 );
@@ -101,6 +105,7 @@ CREATE NODE TABLE IF NOT EXISTS EpisodeNode (
     keywords   STRING,
     session_id STRING,
     embedding  STRING,
+    embedding_model STRING DEFAULT '',
     created_at STRING
 );
 CREATE REL TABLE IF NOT EXISTS EP_TO_KG (
@@ -119,6 +124,8 @@ CREATE REL TABLE IF NOT EXISTS EP_TO_KG (
 # 기존 DB에 content_hash 컬럼이 없을 경우 마이그레이션
 MIGRATION_DDL = (
     ("KGNode.content_hash", "ALTER TABLE KGNode ADD content_hash STRING DEFAULT ''"),
+    ("KGNode.embedding_model", "ALTER TABLE KGNode ADD embedding_model STRING DEFAULT ''"),
+    ("EpisodeNode.embedding_model", "ALTER TABLE EpisodeNode ADD embedding_model STRING DEFAULT ''"),
     ("EP_TO_KG.weight", "ALTER TABLE EP_TO_KG ADD weight DOUBLE DEFAULT 0.0"),
     ("EP_TO_KG.keywords", "ALTER TABLE EP_TO_KG ADD keywords STRING DEFAULT ''"),
     ("EP_TO_KG.score", "ALTER TABLE EP_TO_KG ADD score DOUBLE DEFAULT 0.0"),
@@ -129,6 +136,10 @@ MIGRATION_DDL = (
 )
 
 EP_TO_KG_LINK_VERSION = "1"
+DEFAULT_EMBEDDING_MODEL = "intfloat/multilingual-e5-small"
+EMBEDDING_FORMAT_VERSION = "e5-query-passage-v1"
+_QUERY_PREFIX = "query: "
+_PASSAGE_PREFIX = "passage: "
 EP_TO_KG_KEYWORD_STOPWORDS = {
     "assistant",
     "close",
@@ -158,9 +169,14 @@ def _now_iso() -> str:
     return datetime.now(tz=timezone.utc).isoformat()
 
 
-def _content_hash(title: str, summary: str, tags: str) -> str:
+def _content_hash(
+    title: str,
+    summary: str,
+    tags: str,
+    embedding_model: str = "",
+) -> str:
     """노드 콘텐츠의 sha256 앞 16자 — 변경 감지용"""
-    raw = f"{title}|{summary}|{tags}"
+    raw = f"{title}|{summary}|{tags}|{embedding_model}|{EMBEDDING_FORMAT_VERSION}"
     return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
 
@@ -285,7 +301,7 @@ class SemanticGraph:
     def __init__(
         self,
         db_path: str | None = None,
-        embedding_model: str = "paraphrase-multilingual-MiniLM-L12-v2",
+        embedding_model: str | None = None,
         read_only: bool = False,
     ) -> None:
         self._write_lock = CrossLoopAsyncLock()
@@ -293,7 +309,16 @@ class SemanticGraph:
         self._encoder_lock = CrossLoopAsyncLock()  # 임베딩 모델 lazy-load 이중 실행 방지
         self._read_only = read_only
         self._enabled = False
-        self._embedding_model_name = embedding_model
+        self._embedding_model_name = (
+            str(
+                embedding_model
+                or get_cfg_value(
+                    "semantic_graph.embedding_model",
+                    DEFAULT_EMBEDDING_MODEL,
+                )
+            ).strip()
+            or DEFAULT_EMBEDDING_MODEL
+        )
         self._encoder: Any = None
         self.db: Any = None
         self.async_conn: Any = None
@@ -403,7 +428,12 @@ class SemanticGraph:
         vecs: list[Any] = []
 
         try:
-            res = await self.async_conn.execute("MATCH (n:KGNode) WHERE n.embedding <> '' " "RETURN n.id, n.title, n.type, n.summary, n.embedding")
+            res = await self.async_conn.execute(
+                "MATCH (n:KGNode) "
+                "WHERE n.embedding <> '' AND n.embedding_model = $model "
+                "RETURN n.id, n.title, n.type, n.summary, n.embedding",
+                {"model": self._embedding_model_name},
+            )
             while res.has_next():
                 row = res.get_next()
                 try:
@@ -451,13 +481,31 @@ class SemanticGraph:
 
             # frozen 번들(통짜 installer)에 동봉된 오프라인 모델을 최우선으로 사용한다.
             # → HuggingFace 서버 연결 없이 로드(설치·구동 시 네트워크 불필요).
-            model_ref = self._embedding_model_name
             import sys as _sys
+            from pathlib import Path as _Path
+
+            model_ref = self._embedding_model_name
             if getattr(_sys, "frozen", False):
-                from pathlib import Path as _Path
                 _bundled = _Path(getattr(_sys, "_MEIPASS", "")) / "resource" / "embedding-model"
                 if (_bundled / "config.json").exists():
+                    valid, reason = validate_manifest(
+                        _bundled,
+                        expected_model_id=self._embedding_model_name,
+                    )
+                    if not valid:
+                        raise RuntimeError(f"bundled embedding manifest invalid: {reason}")
                     model_ref = str(_bundled)
+            else:
+                _source_model = _Path(__file__).resolve().parents[3] / "resource" / "embedding-model"
+                if (_source_model / "config.json").exists():
+                    valid, reason = validate_manifest(
+                        _source_model,
+                        expected_model_id=self._embedding_model_name,
+                    )
+                    if valid:
+                        model_ref = str(_source_model)
+                    else:
+                        logger.warning("source embedding manifest invalid: %s", reason)
 
             try:
                 try:
@@ -479,17 +527,32 @@ class SemanticGraph:
                     await asyncio.to_thread(self._load_encoder_blocking)
         return self._encoder if self._encoder is not False else None
 
-    async def compute_embedding(self, text: str) -> list[float]:
-        """텍스트를 384-dim 정규화 벡터로 변환. 실패 시 빈 리스트 반환."""
+    async def _compute_embedding(self, text: str, prefix: str) -> list[float]:
+        """역할 prefix를 적용해 384-dim 정규화 벡터로 변환한다."""
         enc = await self._get_encoder()
         if enc is None:
             return []
         try:
-            vec = await asyncio.to_thread(enc.encode, text.strip()[:512], normalize_embeddings=True, show_progress_bar=False)
+            vec = await asyncio.to_thread(
+                enc.encode,
+                prefix + text.strip()[:512],
+                normalize_embeddings=True,
+                show_progress_bar=False,
+            )
             return vec.tolist()
         except Exception as exc:
-            logger.warning("compute_embedding 실패: %s", exc)
+            logger.warning("embedding 계산 실패: %s", exc)
             return []
+
+    async def compute_query_embedding(self, text: str) -> list[float]:
+        return await self._compute_embedding(text, _QUERY_PREFIX)
+
+    async def compute_passage_embedding(self, text: str) -> list[float]:
+        return await self._compute_embedding(text, _PASSAGE_PREFIX)
+
+    async def compute_embedding(self, text: str) -> list[float]:
+        """하위 호환 query 임베딩. 저장 벡터에는 passage API를 사용한다."""
+        return await self.compute_query_embedding(text)
 
     # ── 노드 upsert ───────────────────────────────────────────────────────────
 
@@ -520,26 +583,41 @@ class SemanticGraph:
                 return False
             now = _now_iso()
             tags_str = json.dumps(tags, ensure_ascii=False) if isinstance(tags, list) else tags
-            new_hash = _content_hash(title, summary, tags_str)
+            new_hash = _content_hash(
+                title,
+                summary,
+                tags_str,
+                self._embedding_model_name,
+            )
 
             # 기존 노드의 hash + embedding 조회
             old_hash = ""
             old_emb = ""
+            old_model = ""
             try:
                 res = await self.async_conn.execute(
-                    "MATCH (n:KGNode {id: $id}) RETURN n.content_hash, n.embedding",
+                    "MATCH (n:KGNode {id: $id}) "
+                    "RETURN n.content_hash, n.embedding, n.embedding_model",
                     {"id": node_id},
                 )
                 if res.has_next():
                     row = res.get_next()
                     old_hash = row[0] or ""
                     old_emb = row[1] or ""
+                    old_model = row[2] or ""
             except Exception:
                 pass
 
             recomputed = False
-            if force_reembed or old_hash != new_hash or not old_emb:
-                emb = await self.compute_embedding(self._node_text(title, summary, tags))
+            if (
+                force_reembed
+                or old_hash != new_hash
+                or old_model != self._embedding_model_name
+                or not old_emb
+            ):
+                emb = await self.compute_passage_embedding(
+                    self._node_text(title, summary, tags)
+                )
                 emb_str = json.dumps(emb) if emb else ""
                 recomputed = True
             else:
@@ -549,9 +627,11 @@ class SemanticGraph:
                 await self.async_conn.execute(
                     "MERGE (n:KGNode {id: $id}) "
                     "ON CREATE SET n.title=$title, n.type=$type, n.tags=$tags, "
-                    "n.summary=$summary, n.embedding=$emb, n.content_hash=$hash, n.updated_at=$now "
+                    "n.summary=$summary, n.embedding=$emb, n.embedding_model=$model, "
+                    "n.content_hash=$hash, n.updated_at=$now "
                     "ON MATCH SET n.title=$title, n.type=$type, n.tags=$tags, "
-                    "n.summary=$summary, n.embedding=$emb, n.content_hash=$hash, n.updated_at=$now",
+                    "n.summary=$summary, n.embedding=$emb, n.embedding_model=$model, "
+                    "n.content_hash=$hash, n.updated_at=$now",
                     {
                         "id": node_id,
                         "title": title,
@@ -559,6 +639,7 @@ class SemanticGraph:
                         "tags": tags_str,
                         "summary": summary,
                         "emb": emb_str,
+                        "model": self._embedding_model_name,
                         "hash": new_hash,
                         "now": now,
                     },
@@ -678,7 +759,7 @@ class SemanticGraph:
         if not self._enabled:
             return []
         if query_vec is None:
-            query_vec = await self.compute_embedding(query)
+            query_vec = await self.compute_query_embedding(query)
         if not query_vec:
             return []
         async with self._write_lock:
@@ -973,21 +1054,24 @@ class SemanticGraph:
             return False
         if not created_at:
             created_at = _now_iso()
-        emb = await self.compute_embedding(content.strip()[:512])
+        emb = await self.compute_passage_embedding(content.strip()[:512])
         emb_str = json.dumps(emb) if emb else ""
         try:
             await self.async_conn.execute(
                 "MERGE (e:EpisodeNode {id: $id}) "
                 "ON CREATE SET e.content=$content, e.keywords=$keywords, "
-                "e.session_id=$session_id, e.embedding=$emb, e.created_at=$created_at "
+                "e.session_id=$session_id, e.embedding=$emb, e.embedding_model=$model, "
+                "e.created_at=$created_at "
                 "ON MATCH SET e.content=$content, e.keywords=$keywords, "
-                "e.session_id=$session_id, e.embedding=$emb, e.created_at=$created_at",
+                "e.session_id=$session_id, e.embedding=$emb, e.embedding_model=$model, "
+                "e.created_at=$created_at",
                 {
                     "id": episode_id,
                     "content": content,
                     "keywords": keywords,
                     "session_id": session_id,
                     "emb": emb_str,
+                    "model": self._embedding_model_name,
                     "created_at": created_at,
                 },
             )
@@ -1319,8 +1403,10 @@ class SemanticGraph:
 
         try:
             res = await self.async_conn.execute(
-                "MATCH (e:EpisodeNode) WHERE e.embedding <> '' "
-                "RETURN e.id, e.content, e.created_at, e.embedding"
+                "MATCH (e:EpisodeNode) "
+                "WHERE e.embedding <> '' AND e.embedding_model = $model "
+                "RETURN e.id, e.content, e.created_at, e.embedding",
+                {"model": self._embedding_model_name},
             )
             while res.has_next():
                 row = res.get_next()
@@ -1391,6 +1477,27 @@ class SemanticGraph:
                 "episode_count_after": len(episode_ids_after),
             }
 
+    async def embedding_staleness(self) -> dict[str, int | str]:
+        """현재 모델과 다른 KG/Episode 임베딩 수를 반환한다."""
+        if not self._enabled:
+            raise RuntimeError("SemanticGraph is disabled")
+        async with self._write_lock:
+            counts: dict[str, int | str] = {
+                "model": self._embedding_model_name,
+                "kg_nodes": 0,
+                "episodes": 0,
+            }
+            for key, label in (("kg_nodes", "KGNode"), ("episodes", "EpisodeNode")):
+                res = await self.async_conn.execute(
+                    f"MATCH (n:{label}) "
+                    "WHERE n.embedding <> '' AND n.embedding_model <> $model "
+                    "RETURN count(n)",
+                    {"model": self._embedding_model_name},
+                )
+                if res.has_next():
+                    counts[key] = int(res.get_next()[0])
+            return counts
+
     def _delete_stale_episodes_transaction(self, stale_ids: list[str]) -> None:
         conn = self.async_conn.acquire_connection()
         try:
@@ -1445,7 +1552,7 @@ class SemanticGraph:
         if not self._enabled:
             return []
         if query_vec is None:
-            query_vec = await self.compute_embedding(query)
+            query_vec = await self.compute_query_embedding(query)
         if not query_vec:
             return []
         try:
@@ -1538,6 +1645,21 @@ class SemanticGraph:
     @property
     def enabled(self) -> bool:
         return self._enabled
+
+    @property
+    def embedding_model_name(self) -> str:
+        return self._embedding_model_name
+
+    def novelty_distance(self, similarity: float) -> float:
+        """모델별 cosine 분포를 0..1 novelty distance로 정규화한다."""
+        if self._embedding_model_name == DEFAULT_EMBEDDING_MODEL:
+            floor = float(get_cfg_value("semantic_graph.similarity_floor", 0.73))
+            ceiling = float(get_cfg_value("semantic_graph.similarity_ceiling", 0.88))
+            if ceiling <= floor:
+                raise ValueError("semantic_graph similarity_ceiling must exceed similarity_floor")
+            normalized = (float(similarity) - floor) / (ceiling - floor)
+            return 1.0 - max(0.0, min(1.0, normalized))
+        return 1.0 - float(similarity)
 
 
 # ── 싱글턴 ────────────────────────────────────────────────────────────────────

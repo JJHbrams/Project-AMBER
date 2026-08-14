@@ -55,6 +55,11 @@ terminal:
   base_font_size: 8 # 1080p 기준 폰트 크기
   ref_screen_height: 1080 # 기준 해상도 높이
 
+dashboard:
+  # 설정 > 전역에서 켜고 끌 수 있다.
+  enabled: true
+  port: 8501
+
 bubble:
   # 말풍선 모드(chat_mode: bubble)의 도구 사용 권한 수준
   # - auto: 전부 자동 승인, 승인 풍선 없음 (기본값 — 말풍선 모드는 가볍게 쓰는 게 목적)

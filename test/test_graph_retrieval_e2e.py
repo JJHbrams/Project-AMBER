@@ -8,7 +8,7 @@ from core.graph.semantic.semantic_graph import SemanticGraph
 from scripts.kg.evaluate_graph_retrieval import evaluate_case
 
 
-async def _golden_embedding(text: str) -> list[float]:
+async def _golden_embedding(text: str, _prefix: str) -> list[float]:
     normalized = text.casefold()
     if "medical" in normalized or "emotional intelligence" in normalized:
         return [0.0, 1.0]
@@ -23,7 +23,7 @@ class GraphRetrievalEndToEndTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.sg.enabled)
         self._embedding_patcher = patch.object(
             SemanticGraph,
-            "compute_embedding",
+            "_compute_embedding",
             side_effect=_golden_embedding,
         )
         self._embedding_patcher.start()
@@ -59,7 +59,9 @@ class GraphRetrievalEndToEndTests(unittest.IsolatedAsyncioTestCase):
             "CREATE (e:EpisodeNode {id: '77', "
             "content: 'Graph retrieval is bounded to two hops. Related knowledge uses score fusion.', "
             "keywords: 'graph retrieval score fusion', session_id: 'session', "
-            "embedding: '[1.0, 0.0]', created_at: '2026-08-12T00:00:00+00:00'})"
+            "embedding: '[1.0, 0.0]', "
+            f"embedding_model: '{self.sg.embedding_model_name}', "
+            "created_at: '2026-08-12T00:00:00+00:00'})"
         )
         await self.sg.cypher_query(
             "MATCH (e:EpisodeNode {id: '77'}), "

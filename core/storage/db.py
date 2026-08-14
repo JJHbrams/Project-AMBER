@@ -13,8 +13,8 @@ def _get_db_dir() -> Path:
     return Path(get_db_root_dir())
 
 
-def get_connection() -> sqlite3.Connection:
-    db_dir = _get_db_dir()
+def get_connection(db_dir: "str | Path | None" = None) -> sqlite3.Connection:
+    db_dir = Path(db_dir) if db_dir is not None else _get_db_dir()
     db_path = db_dir / "engram.db"
     db_dir.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(db_path))
@@ -24,9 +24,9 @@ def get_connection() -> sqlite3.Connection:
     return conn
 
 
-def initialize_db():
+def initialize_db(db_dir: "str | Path | None" = None):
     """최초 1회 테이블 생성 + 마이그레이션"""
-    conn = get_connection()
+    conn = get_connection(db_dir)
     with conn:
         conn.executescript("""
             CREATE TABLE IF NOT EXISTS identity (

@@ -4,8 +4,52 @@ All notable changes to this project are documented in this file.
 
 ## Unreleased
 
+## [1.3.0] — 2026-08-14
+
+### Added
+
+- Overlay 빌드 경로를 `installer/build-overlay.ps1` 단일 엔진으로 통합했다.
+  임시 dist, build manifest, PyInstaller 실패 시 clean 재시도, 역할별 smoke-check를 사용하며
+  성공한 결과만 dist/deploy 대상에 교체한다. `build-installer.ps1 -SkipBuild`는
+  검증되지 않은 오래된 번들을 거부한다.
+- Streamlit dashboard를 외부 Python 대신 전용 `engram-dashboard.exe` sidecar로
+  번들한다. overlay가 설정에 따라 sidecar를 시작·종료하며, 컨텍스트 설정의
+  `대시보드 자동 실행`과 `대시보드 보기`로 동작을 제어한다. 빌드 시 AppTest 렌더와
+  임시 포트 health smoke를 모두 통과해야 배포된다.
+- 오프라인 임베딩 모델에 `resource/embedding-model/manifest.json`과 파일별 SHA-256을
+  추가했다. 기존에 일치하는 모델은 재다운로드·재export하지 않으며, MCP FastMCP 1.x
+  import 호환성도 설치·번들 smoke 단계에서 확인한다.
+- 시맨틱 임베딩을 `intfloat/multilingual-e5-small`로 전환하고 저장 문서에는 `passage:`,
+  검색 질의에는 `query:` 역할 prefix를 적용한다. KGNode/EpisodeNode에 모델 스탬프를
+  저장해 같은 384차원의 구형 벡터도 감지하며, mismatch 벡터는 검색에서 즉시 제외하고
+  다음 KG sync에서 SQLite 원본으로 전체 재임베딩한다. frozen installer도 모델 manifest와
+  파일 hash를 검증하고 모델 ID·384차원을 확인한다.
+- 열린 세션이 30분간 유휴 상태이고 마지막 체크포인트 이후 사용자 발화가 5회 이상이면
+  세션을 닫지 않고 자동 메모리 체크포인트를 생성한다. working memory는 항상 갱신하고
+  novelty gate 통과 시에만 LTM으로 승격하며, activity log·Engram `docs/daily`·
+  `~/vault623/daily_notes`·연관 프로젝트 Progress를 같은 ID로 상호 연결한다.
+- Wiki 작성·수정과 세션 종료·반성을 각각 `engram-wiki-workflow`,
+  `engram-close-session` skill로 승급했다. source/frozen installer 모두 Copilot과
+  Claude Code 사용자 skill 경로에 설치한다.
+- 저장소 변경 작업의 Wiki 선행 기록 확인, 보호 브랜치 이탈, 검증, activity 기록을
+  `engram-task-workflow` skill로 통합했다. 핵심 workflow dispatcher는 directive 항목
+  상한과 무관하게 항상 컨텍스트에 남도록 명시적으로 고정한다.
+- 다중 에이전트 병렬 작업, 기존 dirty worktree와 다른 성격의 작업, 장시간 실험은
+  작업별 branch+worktree로 격리한다. installer가 협업 가이드도 신규 Wiki에 배포한다.
+
 ### Fixed
 
+- frozen installer가 Copilot의 `/engram` 및 `engram-new-session` skill을 번들·사용자
+  skill 경로에 배포하지 않던 누락을 수정했다. 설치 직후 이미 실행 중인 CLI는
+  환경변수와 skill registry를 갱신하지 못하므로 새 터미널/세션이 필요하다는 안내도
+  추가했다.
+- source installer가 Ollama를 사용하지 않는 provider에서도 `overlay.yaml` 예시 모델과
+  폐기된 STM 요약 모델을 확인·다운로드하던 문제를 제거했다. Ollama 모델 처리는
+  `ollama`/`claude-code-ollama`를 명시적으로 선택했을 때만 수행한다.
+- 조건부 directive가 세션 시작의 빈 query 때문에 주입되지 않던 구조를 제거했다.
+  기본 directive를 항상 보이는 짧은 정책·workflow dispatch로 정리하고, 중복 Wiki 및
+  reflection directive를 제거했다. installer 관리 기본값은 기존 DB에도 마이그레이션하되
+  사용자 수정 directive는 보존한다.
 - **v1.2.1 portable exe hotfix 2** — 기본 채팅 모드인 bubble에서도
   `session.auto_inject` 설정과 무관하게 `engram_get_context_once` 부트스트랩 지시문을
   항상 주입한다. 신규 설치 직후에도 첫 응답 전에 정체성·튜토리얼 컨텍스트를 로드한다.
