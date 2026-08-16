@@ -30,6 +30,11 @@ db:
 
 workdir: "$WorkDir"
 
+# Optional external human-readable daily note folder.
+# memory:
+#   auto_checkpoint:
+#     external_daily_dir: "D:/Notes/daily"
+
 # watch_workspaces: git 프로젝트들이 모여있는 상위 디렉토리 목록.
 # 하위 git repo를 자동 탐색하여 개념 파일(README, architecture 등) 변경 시
 # wiki의 docs/projects/<repo-name>/ 에 자동으로 반영됩니다.
@@ -216,6 +221,25 @@ if ($geminiCmd) {
     }
 } else {
     Write-Warn "Gemini CLI not found — skipping Gemini MCP setup"
+}
+
+# 5bc. MCP config (Codex CLI) — 기존 사용자 정의 engram 항목은 보존
+Write-Step "MCP config (Codex CLI)..."
+if ($CodexCmdDetected) {
+    & codex mcp get engram *> $null
+    if ($LASTEXITCODE -eq 0) {
+        Write-Ok "Codex MCP server 'engram' already configured (preserved)"
+    } else {
+        $codexMcpOut = & codex mcp add engram --url "http://127.0.0.1:$MCP_HTTP_PORT/mcp" 2>&1
+        if ($LASTEXITCODE -eq 0) {
+            Write-Ok "Codex user MCP server registered: engram (HTTP)"
+        } else {
+            Write-Warn "Codex MCP 등록 실패: $codexMcpOut"
+            Write-Warn "수동 등록: codex mcp add engram --url `"http://127.0.0.1:$MCP_HTTP_PORT/mcp`""
+        }
+    }
+} else {
+    Write-Warn "Codex CLI not found — skipping Codex MCP setup"
 }
 
 # 5c. MCP config (VSCode Copilot Chat — workspace)

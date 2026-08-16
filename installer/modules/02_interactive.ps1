@@ -34,6 +34,7 @@ if ((Test-Path $OverlayUserConfigPath) -and $PythonExe) {
 $ProviderAvailability = @{
     "copilot" = ($null -ne $CopilotCmdDetected)
     "gemini" = ($null -ne $GeminiCmdDetected)
+    "codex" = ($null -ne $CodexCmdDetected)
     "claude-code" = ($null -ne $ClaudeCliCmdDetected)
     "claude-code-ollama" = (($null -ne $ClaudeCliCmdDetected) -and ($null -ne $OllamaCmdDetected))
     "ollama" = ($null -ne $OllamaCmdDetected)
@@ -111,10 +112,11 @@ Write-Host "         Python 환경 구성 결과에 따라 자동으로 설정�
 $CliProviderDefault = Resolve-AvailableCliProvider $ExistingCliProvider $ProviderAvailability
 Write-Host ""
 Write-Host "  [설정] 기본 CLI 서비스 — 오버레이에서 기본으로 사용할 provider" -ForegroundColor White
-$_providerItems  = @("copilot", "gemini", "claude-code", "claude-code(ollama)", "ollama")
+$_providerItems  = @("copilot", "gemini", "codex", "claude-code", "claude-code(ollama)", "ollama")
 $_providerBadges = @(
     $(if ($ProviderAvailability['copilot'])     { 'installed' } else { 'missing' }),
     $(if ($ProviderAvailability['gemini'])      { 'installed' } else { 'missing' }),
+    $(if ($ProviderAvailability['codex'])       { 'installed' } else { 'missing' }),
     $(if ($ProviderAvailability['claude-code']) { 'installed' } else { 'missing' }),
     $(if ($ProviderAvailability['claude-code-ollama']) { 'installed' } else { 'missing' }),
     $(if ($ProviderAvailability['ollama'])      { 'installed' } else { 'missing' })

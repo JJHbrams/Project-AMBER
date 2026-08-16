@@ -3,6 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+import json
 
 from core.install.bootstrap import bootstrap_install
 from core.context.directives import update_directive
@@ -46,13 +47,48 @@ class InstallBootstrapTest(unittest.TestCase):
             conn = get_connection(db_dir)
             try:
                 rows = conn.execute(
-                    "SELECT key, source, trigger_type FROM directives ORDER BY key"
+                    """
+                    SELECT key, source, trigger_type, enforcement_level,
+                           trigger_data, workflow_skill_id, guard_id
+                    FROM directives
+                    ORDER BY key
+                    """
                 ).fetchall()
             finally:
                 conn.close()
             self.assertTrue(rows)
             self.assertTrue(all(row["source"] == "install-managed" for row in rows))
             self.assertTrue(all(row["trigger_type"] == "always" for row in rows))
+            rows_by_key = {row["key"]: row for row in rows}
+            self.assertEqual(rows_by_key["task-workflow-dispatch"]["enforcement_level"], "workflow")
+            self.assertEqual(
+                rows_by_key["task-workflow-dispatch"]["workflow_skill_id"],
+                "engram-task-workflow",
+            )
+            self.assertEqual(rows_by_key["wiki-workflow-dispatch"]["enforcement_level"], "workflow")
+            self.assertEqual(
+                rows_by_key["session-lifecycle-workflow"]["workflow_skill_id"],
+                "engram-close-session",
+            )
+            self.assertEqual(rows_by_key["persona-voice"]["enforcement_level"], "advisory")
+            self.assertEqual(
+                json.loads(rows_by_key["task-workflow-dispatch"]["trigger_data"])["actions_any"][0],
+                "build",
+            )
+            self.assertEqual(rows_by_key["protected-branch-guard"]["enforcement_level"], "blocking")
+            self.assertEqual(rows_by_key["protected-branch-guard"]["guard_id"], "protected-branch")
+            self.assertEqual(
+                json.loads(rows_by_key["protected-branch-guard"]["trigger_data"])["action_modes_any"],
+                ["repo-write"],
+            )
+            self.assertFalse(
+                json.loads(rows_by_key["protected-branch-guard"]["trigger_data"])["render_in_prompt"]
+            )
+            self.assertEqual(rows_by_key["dirty-worktree-guard"]["guard_id"], "dirty-worktree")
+            self.assertIn(
+                "new-independent-task",
+                json.loads(rows_by_key["dirty-worktree-guard"]["trigger_data"])["action_tags_any"],
+            )
 
     def test_migrates_unmodified_install_directives_and_preserves_user_edits(self):
         templates = Path(__file__).resolve().parents[1] / "installer" / "templates"

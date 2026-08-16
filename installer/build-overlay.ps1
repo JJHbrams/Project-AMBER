@@ -96,10 +96,22 @@ function Invoke-OverlayPython {
 
 function Stop-OverlayProcesses {
     $runningPath = ""
+    $stoppedDesktopProcess = $false
     $processes = @(Get-Process -Name "engram-overlay" -ErrorAction SilentlyContinue)
     if ($processes.Count -gt 0) {
         try { $runningPath = $processes[0].Path } catch {}
-        $processes | Stop-Process -Force
+        $processes | Stop-Process -Force -ErrorAction SilentlyContinue
+        $stoppedDesktopProcess = $true
+    }
+    # The frozen dashboard lives beside the overlay artifact and keeps its exe
+    # open while Streamlit is running. It must be stopped before the staged
+    # artifact can replace that directory, but it is not a restart target.
+    $dashboardProcesses = @(Get-Process -Name "engram-dashboard" -ErrorAction SilentlyContinue)
+    if ($dashboardProcesses.Count -gt 0) {
+        $dashboardProcesses | Stop-Process -Force -ErrorAction SilentlyContinue
+        $stoppedDesktopProcess = $true
+    }
+    if ($stoppedDesktopProcess) {
         Start-Sleep -Milliseconds 800
     }
     foreach ($pattern in @("mcp_server.py", "engram_dashboard.py", "kg_watcher.py")) {
@@ -124,7 +136,15 @@ function Invoke-OverlayRole {
     $smokeLog = Join-Path ([IO.Path]::GetTempPath()) `
         ("engram-smoke-" + [Guid]::NewGuid().ToString("N") + ".log")
     $previousLog = $env:ENGRAM_SMOKE_LOG
+    $previousSmokeDb = $env:ENGRAM_SMOKE_DB_DIR
+    $smokeDb = $null
     $env:ENGRAM_SMOKE_LOG = $smokeLog
+    if ($Role -eq "smoke-check") {
+        $smokeDb = Join-Path ([IO.Path]::GetTempPath()) `
+            ("engram-smoke-db-" + [Guid]::NewGuid().ToString("N"))
+        New-Item -ItemType Directory -Path $smokeDb -Force | Out-Null
+        $env:ENGRAM_SMOKE_DB_DIR = $smokeDb
+    }
     try {
         $process = Start-Process -FilePath $Executable `
             -ArgumentList @("--role", $Role) `
@@ -135,6 +155,10 @@ function Invoke-OverlayRole {
         return [int]$process.ExitCode
     } finally {
         $env:ENGRAM_SMOKE_LOG = $previousLog
+        $env:ENGRAM_SMOKE_DB_DIR = $previousSmokeDb
+        if ($smokeDb) {
+            Remove-Item $smokeDb -Recurse -Force -ErrorAction SilentlyContinue
+        }
         Remove-Item $smokeLog -Force -ErrorAction SilentlyContinue
     }
 }

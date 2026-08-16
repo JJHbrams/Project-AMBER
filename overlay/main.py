@@ -48,8 +48,12 @@ from .bubble.stm_bridge import StmBridge
 from core.integrations.engram_bootstrap import (
     bubble_bootstrap_prompt,
     is_auto_inject_enabled,
+    is_policy_guidance_enabled,
+    sync_claude_pretool_hook,
+    sync_codex_pretool_hook,
     sync_sessionstart_hook,
 )
+from core.integrations.policy_guidance_state import sync_policy_guidance_disabled_marker
 
 # Claude 모델 alias — 이 외 이름은 Ollama 로컬 모델로 간주
 _CLAUDE_MODEL_ALIASES = {
@@ -254,6 +258,11 @@ def _make_tray_icon(app: "OverlayApp"):
                     "Gemini CLI",
                     lambda: app._set_provider_model("gemini", None),
                     checked=lambda _: app.get_cli_provider() == "gemini",
+                ),
+                pystray.MenuItem(
+                    "Codex CLI",
+                    lambda: app._set_provider_model("codex", None),
+                    checked=lambda _: app.get_cli_provider() == "codex",
                 ),
                 pystray.MenuItem(
                     "Claude Code",
@@ -796,7 +805,7 @@ class OverlayApp:
                         external_daily_dir=str(
                             get_cfg_value(
                                 "memory.auto_checkpoint.external_daily_dir",
-                                "~/vault623/daily_notes",
+                                "",
                             )
                             or ""
                         ),
@@ -907,6 +916,14 @@ class OverlayApp:
             sync_sessionstart_hook(is_auto_inject_enabled())
         except Exception:
             log.exception("[overlay] SessionStart hook 동기화 실패")
+        guidance_enabled = is_policy_guidance_enabled()
+        for name, result in (
+            ("policy marker", sync_policy_guidance_disabled_marker(guidance_enabled)),
+            ("Claude PreToolUse", sync_claude_pretool_hook(guidance_enabled)),
+            ("Codex PreToolUse", sync_codex_pretool_hook(guidance_enabled)),
+        ):
+            if not result.get("ok"):
+                log.error("[overlay] %s 동기화 실패: %s", name, result.get("error", "unknown error"))
 
     def _apply_tunnels(self) -> None:
         """설정의 mcp.tunnels 목록만 복원한다. 연결은 하지 않는다.
@@ -1059,6 +1076,11 @@ class OverlayApp:
 
     def _reload_config(self):
         """설정 저장 후 overlay config를 다시 읽어 반영한다."""
+        # CharacterOverlay owns image/profile caches, so saving from the GUI must
+        # replace them now rather than waiting for the filesystem watcher tick.
+        if not self.character.reload_config():
+            log.warning("[overlay] settings reload rejected; keeping last good runtime configuration")
+            return
         cfg = load_cfg()
         new_provider = get_cli_provider(cfg)
         self._chat_mode = get_chat_mode(cfg)
@@ -1181,6 +1203,7 @@ class OverlayApp:
         # 응답 말풍선은 입력창과 무관하게 자기 위치(마지막 드래그 위치 또는 캐릭터 옆
         # 상단 기본)에 별도로 뜬다 — 내 입력이 응답으로 출력되는 것처럼 보이던 문제 해결.
         self._bubble_last_activity = time.monotonic()
+        self.character.notify_input()
         self._bubble_turn_active = True  # 턴 시작 — 응답이 끝날(turn_end/error/result) 때까지 발화 억제
         # 자율발화에 대한 답장일 때만 engaged 로 친다. 예전엔 모든 입력에서 무조건
         # notify_engaged 를 불렀는데, 그러면 자율발화와 무관한 평소 대화가 백오프를
@@ -1204,6 +1227,10 @@ class OverlayApp:
         if kind in ("turn_end", "error", "result"):
             self._bubble_turn_active = False
         self._bubble_manager.handle_event(ev)
+        try:
+            self.character.handle_bubble_event(ev)
+        except Exception:
+            log.debug("[overlay] character state event skipped", exc_info=True)
 
     def _bubble_screen_clear(self) -> bool:
         """지금 능동 발화를 띄워도 되는가 — bubble 모드 · 입력창 닫힘 · 턴 진행 안 함 ·
@@ -1424,6 +1451,10 @@ class OverlayApp:
         if self._quitting:
             return
         self._quitting = True
+        try:
+            self.character.cancel_config_watch()
+        except Exception:
+            pass
         log.info("[overlay] quit 진입: reason=%s", self._quit_reason)
 
         if self._discord_bot:

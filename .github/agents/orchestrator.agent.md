@@ -65,6 +65,21 @@ Context: <relevant file paths or background>
 Expected output: <what you need back>
 ```
 
+## Acceptance governance
+
+For multi-step development, use the repository `orchestrate` skill. Translate the original user
+request into criterion IDs with a user-visible outcome, intended runtime, verification, evidence,
+and criticality before implementation.
+
+- Do not silently delete, reduce, substitute, or skip verification for a criterion as an MVP
+  decision. Emit `[SCOPE_DELTA]` and obtain explicit user approval before a material change.
+- After implementation, request a fresh `planner` acceptance audit. The implementation agent
+  cannot self-review; no separate reviewer agent type is assumed.
+- A UI, CLI, installer, or integration criterion is `UNVERIFIED` until it runs in that intended
+  environment. Static checks and unit tests support, but do not replace, user-path evidence.
+- Report completion only when all critical criteria pass and the integrated result was rechecked.
+  Otherwise report `partial` with the failed or unverified criteria.
+
 ## Development Guidelines
 
 - Schema changes must maintain backward compatibility with existing data

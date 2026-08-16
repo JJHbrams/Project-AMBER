@@ -1,0 +1,11 @@
+schema_version: 1
+id: engram
+display_name: Engram
+character: character.png
+effects:
+  idle:
+    asset: effects/idle.png
+    thickness_px: 2
+  click:
+    asset: effects/click.png
+    thickness_px: 3

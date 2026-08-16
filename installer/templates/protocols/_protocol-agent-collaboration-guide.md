@@ -20,9 +20,22 @@ summary: 다중 에이전트의 역할 분리, 작업별 branch+worktree 격리,
 | 역할 | 책임 |
 | --- | --- |
 | Orchestrator | 작업 분해, 의존성 판단, worktree 할당, 결과 통합 |
-| Planner | 실행 가능한 Task Spec 작성 |
+| Planner | 실행 가능한 Task Spec 작성, fresh acceptance audit (읽기 전용) |
 | Coder | 할당된 worktree와 branch에서만 구현 |
-| Reviewer | 변경 검토와 통합 전 검증 |
+| Fresh planner acceptance reviewer | 구현과 분리되어 criterion별 증거를 판정 |
+
+## 완료 판정
+
+1. 조정자는 원 사용자 요청을 criterion별 acceptance contract로 만든다. 각 criterion에는
+   사용자에게 보이는 결과, intended runtime, 검증 방법, 증거, critical 여부를 적는다.
+2. criterion을 삭제·축소·대체하거나 검증을 생략하려면 `[SCOPE_DELTA]`로 영향과 이유를
+   공개한다. material delta는 사용자 승인 전 실행하지 않는다.
+3. 구현 후에는 구현자가 아닌 fresh Planner가 `[ACCEPTANCE_AUDIT]`에서 각 criterion을
+   `PASS` / `FAIL` / `UNVERIFIED`로 판정한다. 구현자와 조정자가 자기검수로 대체하지 않는다.
+4. UI, CLI, installer, integration은 intended runtime에서 실제 실행하지 않았다면
+   `UNVERIFIED`다. 파일 존재, diff, AST, unit test는 사용자 경로의 대체 증거가 아니다.
+5. critical criterion이 모두 `PASS`이고 통합 후 재검증했을 때만 완료로 보고한다. 그 외에는
+   `partial`과 남은 검증을 보고한다.
 
 ## Worktree 판단
 

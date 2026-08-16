@@ -57,8 +57,19 @@ OBSOLETE_INSTALL_DIRECTIVE_KEYS = {
 }
 
 
+def _replace_placeholder(value, replacement: str):
+    if isinstance(value, str):
+        return value.replace("__VAULT_DIR__", replacement)
+    if isinstance(value, list):
+        return [_replace_placeholder(item, replacement) for item in value]
+    if isinstance(value, dict):
+        return {key: _replace_placeholder(item, replacement) for key, item in value.items()}
+    return value
+
+
 def _seed_directives(db_dir: Path, directives: list[dict]) -> tuple[int, int, int]:
     from core.storage.db import get_connection
+    from core.context.directive_policy import coerce_directive_record
 
     seeded = 0
     updated = 0
@@ -67,24 +78,39 @@ def _seed_directives(db_dir: Path, directives: list[dict]) -> tuple[int, int, in
     try:
         with conn:
             for directive in directives:
-                content = directive["content"].replace("__VAULT_DIR__", str(db_dir))
+                materialized = _replace_placeholder(directive, str(db_dir))
+                record = coerce_directive_record(
+                    {
+                        **materialized,
+                        "source": INSTALL_MANAGED_SOURCE,
+                    }
+                )
                 existing = conn.execute(
                     "SELECT source, created_at, updated_at FROM directives WHERE key = ?",
-                    (directive["key"],),
+                    (record["key"],),
                 ).fetchone()
                 values = (
-                    content,
+                    record["content"],
                     INSTALL_MANAGED_SOURCE,
-                    directive.get("scope", "all"),
-                    directive.get("priority", 0),
-                    directive.get("trigger_type", "always"),
+                    record.get("scope", "all"),
+                    record.get("priority", 0),
+                    record.get("trigger_type", "always"),
+                    record.get("enforcement_level", "advisory"),
+                    json.dumps(record.get("trigger_data", {}), ensure_ascii=False, sort_keys=True),
+                    record.get("workflow_skill_id", ""),
+                    record.get("guard_id", ""),
+                    json.dumps(record.get("legacy_migration_markers", []), ensure_ascii=False, sort_keys=True),
                 )
                 if existing is None:
                     conn.execute(
                         "INSERT INTO directives "
-                        "(key, content, source, scope, priority, trigger_type) "
-                        "VALUES (?, ?, ?, ?, ?, ?)",
-                        (directive["key"], *values),
+                        "("
+                        "key, content, source, scope, priority, trigger_type, "
+                        "enforcement_level, trigger_data, workflow_skill_id, guard_id, "
+                        "legacy_migration_markers"
+                        ") "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (record["key"], *values),
                     )
                     seeded += 1
                     continue
@@ -97,9 +123,11 @@ def _seed_directives(db_dir: Path, directives: list[dict]) -> tuple[int, int, in
                 if source == INSTALL_MANAGED_SOURCE or unmodified_legacy:
                     conn.execute(
                         "UPDATE directives SET content = ?, source = ?, scope = ?, "
-                        "priority = ?, trigger_type = ?, active = 1, "
+                        "priority = ?, trigger_type = ?, enforcement_level = ?, "
+                        "trigger_data = ?, workflow_skill_id = ?, guard_id = ?, "
+                        "legacy_migration_markers = ?, active = 1, "
                         "updated_at = datetime('now','localtime') WHERE key = ?",
-                        (*values, directive["key"]),
+                        (*values, record["key"]),
                     )
                     updated += 1
 

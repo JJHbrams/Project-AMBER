@@ -1,12 +1,34 @@
 """설정 로딩 — 기본값 + 사용자 오버라이드 + 런타임 상태를 순서대로 병합."""
 
 import copy
+import os
 import sys
+import tempfile
+import threading
 from pathlib import Path
 
 import yaml
 
 _DEFAULT_REL = "config/overlay.yaml"
+
+
+def _editable_project_root(start: Path) -> Path | None:
+    """Find a real checkout without treating arbitrary copied installs as one."""
+    try:
+        candidates = (start, *start.parents)
+    except OSError:
+        return None
+    for candidate in candidates:
+        if (candidate / "INSTALL.ps1").is_file() and (candidate / "overlay" / "config.py").is_file():
+            return candidate
+    return None
+
+
+def editable_project_root() -> Path | None:
+    """Source checkout next to a frozen install, if it can be validated safely."""
+    if not getattr(sys, "frozen", False):
+        return Path(__file__).parent.parent
+    return _editable_project_root(_get_base_dir())
 
 
 def _get_base_dir() -> Path:
@@ -31,6 +53,24 @@ def resolve_path(rel: str) -> Path:
     return _get_bundle_dir() / rel
 
 
+def resolve_editable_overlay_path(rel: str) -> Path:
+    """Resolve editable overlay/character resources without redirecting other bundles.
+
+    An explicit file beside the exe still wins.  A frozen install nested in a
+    verified Project_Engram checkout can then use that checkout's live files;
+    temporary PyInstaller extraction and copied installs stay bundle-only.
+    """
+    external = _get_base_dir() / rel
+    if external.exists():
+        return external
+    project = editable_project_root()
+    if project is not None:
+        candidate = project / rel
+        if candidate.exists():
+            return candidate
+    return _get_bundle_dir() / rel
+
+
 def resolve_external_path(rel: str) -> Path:
     """실행 위치 기준 외부 경로를 반환한다(쓰기 가능한 대상 경로 계산용)."""
     return _get_base_dir() / rel
@@ -49,8 +89,9 @@ def _deep_merge(base: dict, override: dict) -> dict:
 
 _USER_CONFIG_PATH = Path.home() / ".engram" / "overlay.user.yaml"
 _STATE_PATH = Path.home() / ".engram" / "overlay.state.yaml"
+_STATE_LOCK = threading.RLock()
 _ENGRAM_USER_CONFIG_PATH = Path.home() / ".engram" / "user.config.yaml"
-_SUPPORTED_CLI_PROVIDERS = {"copilot", "gemini", "claude-code", "claude-code-ollama", "ollama"}
+_SUPPORTED_CLI_PROVIDERS = {"copilot", "gemini", "codex", "claude-code", "claude-code-ollama", "ollama"}
 _SUPPORTED_CHAT_MODES = {"tui", "bubble"}
 _SUPPORTED_PERMISSION_LEVELS = {"auto", "confirm_risky", "confirm_always"}
 _CLI_PROVIDER_ALIASES = {
@@ -78,6 +119,8 @@ _USER_TEMPLATE = """\
 #   char_height_ratio: 0.125
 #   chat_mode: "bubble"  # bubble(기본) | tui
 #   character:
+#     source_mode: "sprite_grid"  # static | sequence | sprite_grid
+#     set: "engram"  # ~/.engram/character/sets/<id>/ 우선, 없으면 bundled set
 #     name: "smoke_chroma"
 #     sequence:
 #       enabled: true
@@ -88,6 +131,28 @@ _USER_TEMPLATE = """\
 #       interval_min_sec: 0.2
 #       interval_max_sec: 3.0
 #       idle_check_interval_sec: 1.0
+#     effects:
+#       enabled: true
+#       idle_asset: "resource/character/sets/engram/effects/idle.png"
+#       click_asset: "resource/character/sets/engram/effects/click.png"
+#       chroma_key: "#010101"
+#       idle_interval_ms: 2400
+#       click_frame_ms: 420
+#       idle_thickness_px: 2
+#       click_thickness_px: 3
+#     reactions:
+#       enabled: true  # engram 전용 state sheet. 공개 bubble event만 반응에 사용.
+#       pack: "engram"  # ~/.engram/character/reactions/engram/manifest.yaml 우선
+#       apply_to_custom: false
+#       sprite_sheet: "resource/character/reactions/engram/states.png"
+#       chroma_key: "#00FF00"
+#       crop_y_offset_px: 0
+#       columns: 6
+#       rows: 4
+#       scale_ratio: 0.38
+#       dwell_ms: 2400
+#       debounce_ms: 450
+#       allow_text_keywords: true
 
 # bubble:
 #   permission_level: "auto"  # auto | confirm_risky | confirm_always
@@ -98,9 +163,10 @@ _USER_TEMPLATE = """\
 #   height_ratio: 0.60
 
 # cli:
-#   provider: "copilot"   # copilot | gemini | claude-code | claude-code-ollama | ollama
-#   # gemini/claude-code는 ~/.engram 전용 shim을 우선 사용
+#   provider: "copilot"   # copilot | gemini | codex | claude-code | claude-code-ollama | ollama
+#   # gemini/codex/claude-code는 ~/.engram 전용 shim을 우선 사용
 #   gemini_command: "gemini"
+#   codex_command: "codex"
 #   # claude-code-ollama: 선택된 ollama_model을 Claude Code 백엔드 모델로 사용
 #   # claude-code + ollama_model: claude --model <ollama_model>
 #   # - model이 Claude alias/id가 아니면 ANTHROPIC_BASE_URL을
@@ -150,16 +216,47 @@ _USER_TEMPLATE = """\
 """
 
 
-def _safe_load_yaml(path: Path) -> dict:
+def _safe_load_yaml(path: Path, *, strict: bool = False) -> dict:
     if not path.exists():
         return {}
     try:
         data = yaml.safe_load(path.read_text(encoding="utf-8"))
     except Exception:
+        if strict:
+            raise ValueError(f"invalid YAML: {path}")
         return {}
     if isinstance(data, dict):
         return data
+    if strict:
+        raise ValueError(f"YAML mapping required: {path}")
     return {}
+
+
+def get_overlay_state() -> dict:
+    """Return a defensive copy of the optional runtime state mapping."""
+    with _STATE_LOCK:
+        return copy.deepcopy(_safe_load_yaml(_STATE_PATH))
+
+
+def update_overlay_state(mutator) -> dict:
+    """Atomically merge a small runtime-state update without clobbering peers."""
+    with _STATE_LOCK:
+        state = _safe_load_yaml(_STATE_PATH)
+        result = mutator(state)
+        if isinstance(result, dict):
+            state = result
+        _STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        fd, temporary = tempfile.mkstemp(prefix="overlay.state.", suffix=".tmp", dir=str(_STATE_PATH.parent))
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+                yaml.safe_dump(state, handle, sort_keys=False, allow_unicode=False)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, _STATE_PATH)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
+        return copy.deepcopy(state)
 
 
 def _filter_runtime_state_overrides(state: dict, user: dict) -> dict:
@@ -228,18 +325,11 @@ def _set_user_cli_value(key: str, value: str) -> None:
 def set_cli_provider(provider: str, sync_user: bool = False) -> str:
     """현재 CLI provider를 state에 저장하고, 필요 시 user 설정에도 동기화한다."""
     normalized = normalize_cli_provider(provider)
-    state = _safe_load_yaml(_STATE_PATH)
-    cli_cfg = state.get("cli") if isinstance(state, dict) else None
-    if not isinstance(cli_cfg, dict):
-        cli_cfg = {}
-    cli_cfg["provider"] = normalized
-    state["cli"] = cli_cfg
-
-    _STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    _STATE_PATH.write_text(
-        yaml.safe_dump(state, sort_keys=False, allow_unicode=False),
-        encoding="utf-8",
-    )
+    def update(state: dict) -> None:
+        cli_cfg = state.get("cli") if isinstance(state.get("cli"), dict) else {}
+        cli_cfg["provider"] = normalized
+        state["cli"] = cli_cfg
+    update_overlay_state(update)
     if sync_user:
         _set_user_cli_value("provider", normalized)
     return normalized
@@ -257,26 +347,17 @@ def get_bubble_session_id() -> str | None:
 
 def set_bubble_session_id(session_id: str | None) -> None:
     """resume용 claude 세션 id를 state.yaml에 저장한다(None이면 제거)."""
-    state = _safe_load_yaml(_STATE_PATH)
-    bubble_cfg = state.get("bubble") if isinstance(state, dict) else None
-    if not isinstance(bubble_cfg, dict):
-        bubble_cfg = {}
-
-    if session_id:
-        bubble_cfg["claude_session_id"] = session_id
-    else:
-        bubble_cfg.pop("claude_session_id", None)
-
-    if bubble_cfg:
-        state["bubble"] = bubble_cfg
-    else:
-        state.pop("bubble", None)
-
-    _STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    _STATE_PATH.write_text(
-        yaml.safe_dump(state, sort_keys=False, allow_unicode=False),
-        encoding="utf-8",
-    )
+    def update(state: dict) -> None:
+        bubble_cfg = state.get("bubble") if isinstance(state.get("bubble"), dict) else {}
+        if session_id:
+            bubble_cfg["claude_session_id"] = session_id
+        else:
+            bubble_cfg.pop("claude_session_id", None)
+        if bubble_cfg:
+            state["bubble"] = bubble_cfg
+        else:
+            state.pop("bubble", None)
+    update_overlay_state(update)
 
 
 def get_ollama_model(cfg: dict | None = None) -> str:
@@ -291,18 +372,11 @@ def get_ollama_model(cfg: dict | None = None) -> str:
 def set_ollama_model(model: str, sync_user: bool = False) -> str:
     """ollama_model을 state에 저장하고, 필요 시 user 설정에도 동기화한다."""
     model = str(model or "").strip()
-    state = _safe_load_yaml(_STATE_PATH)
-    cli_cfg = state.get("cli") if isinstance(state, dict) else None
-    if not isinstance(cli_cfg, dict):
-        cli_cfg = {}
-    cli_cfg["ollama_model"] = model
-    state["cli"] = cli_cfg
-
-    _STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    _STATE_PATH.write_text(
-        yaml.safe_dump(state, sort_keys=False, allow_unicode=False),
-        encoding="utf-8",
-    )
+    def update(state: dict) -> None:
+        cli_cfg = state.get("cli") if isinstance(state.get("cli"), dict) else {}
+        cli_cfg["ollama_model"] = model
+        state["cli"] = cli_cfg
+    update_overlay_state(update)
     if sync_user:
         _set_user_cli_value("ollama_model", model)
     return model
@@ -421,16 +495,18 @@ def get_workdir(cfg: dict | None = None) -> Path:
     return Path.home()
 
 
-def load_cfg() -> dict:
+def load_cfg(*, strict: bool = False) -> dict:
     """기본 config 로드 후 user/state 오버라이드를 순서대로 병합."""
-    with open(resolve_path(_DEFAULT_REL), encoding="utf-8") as f:
+    with open(resolve_editable_overlay_path(_DEFAULT_REL), encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
+    if not isinstance(cfg, dict):
+        raise ValueError("default overlay config must be a YAML mapping")
 
     if not _USER_CONFIG_PATH.exists():
         _USER_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
         _USER_CONFIG_PATH.write_text(_USER_TEMPLATE, encoding="utf-8")
 
-    user = _safe_load_yaml(_USER_CONFIG_PATH)
+    user = _safe_load_yaml(_USER_CONFIG_PATH, strict=strict)
     if user:
         cfg = _deep_merge(cfg, user)
 

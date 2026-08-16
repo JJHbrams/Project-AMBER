@@ -1,0 +1,95 @@
+import sys
+import unittest
+import urllib.request
+from pathlib import Path
+from unittest.mock import AsyncMock, patch
+
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+with patch("core.storage.db.initialize_db"), patch.object(
+    urllib.request,
+    "urlopen",
+    side_effect=OSError("isolated test"),
+):
+    import mcp_server as server
+
+
+class MCPDirectiveToolTests(unittest.TestCase):
+    @patch.object(server, "get_directive", return_value={"key": "demo"})
+    @patch.object(server, "update_directive", return_value=True)
+    def test_update_tool_leaves_workflow_and_guard_omitted_when_not_provided(
+        self,
+        mock_update_directive,
+        _mock_get_directive,
+    ):
+        server.engram_update_directive("demo")
+
+        _, kwargs = mock_update_directive.call_args
+        self.assertIsNone(kwargs["workflow_skill_id"])
+        self.assertIsNone(kwargs["guard_id"])
+
+    @patch.object(server, "get_directive", return_value={"key": "demo", "workflow_skill_id": "", "guard_id": ""})
+    @patch.object(server, "update_directive", return_value=True)
+    def test_update_tool_can_clear_workflow_and_guard_with_empty_string(
+        self,
+        mock_update_directive,
+        _mock_get_directive,
+    ):
+        server.engram_update_directive(
+            "demo",
+            workflow_skill_id="",
+            guard_id="",
+        )
+
+        _, kwargs = mock_update_directive.call_args
+        self.assertEqual(kwargs["workflow_skill_id"], "")
+        self.assertEqual(kwargs["guard_id"], "")
+
+    @patch.object(server, "preflight_directives", return_value={"decision": "allow"})
+    def test_preflight_tool_passes_structured_guard_context(self, mock_preflight):
+        server.engram_preflight_directives(
+            action="apply patch",
+            cwd="C:/repo",
+            action_metadata_json='{"mode":"repo-write","tags":["new-independent-task"]}',
+            chore_intent_json='{"is_chore":true,"summary":"dependency bump"}',
+            independent_task_context_json='{"requested":true,"existing_changes_owner":"other-task"}',
+            execute_guards=True,
+        )
+
+        _, kwargs = mock_preflight.call_args
+        self.assertEqual(kwargs["cwd"], "C:/repo")
+        self.assertEqual(kwargs["action_metadata"]["mode"], "repo-write")
+        self.assertEqual(kwargs["action_metadata"]["tags"], ["new-independent-task"])
+        self.assertTrue(kwargs["chore_intent"]["is_chore"])
+        self.assertTrue(kwargs["independent_task_context"]["requested"])
+        self.assertEqual(
+            kwargs["independent_task_context"]["existing_changes_owner"],
+            "other-task",
+        )
+        self.assertTrue(kwargs["execute_guards"])
+
+
+class MCPContextBootstrapTests(unittest.IsolatedAsyncioTestCase):
+    @patch.object(server, "engram_get_context", new_callable=AsyncMock, return_value="context")
+    @patch.object(server, "_stm_post", return_value={"session_id": 42})
+    @patch.object(server, "_context_session_fingerprint", return_value="repo-policy-test")
+    @patch.object(server, "ensure_repo_policy", return_value={"ok": True, "changed": True})
+    async def test_context_once_ensures_repo_policy_before_loading_context(
+        self,
+        ensure_policy,
+        _fingerprint,
+        _stm_post,
+        _get_context,
+    ):
+        with server._CONTEXT_ONCE_LOCK:
+            server._CONTEXT_ONCE_KEYS.clear()
+
+        result = await server.engram_get_context_once(cwd="C:/repo")
+
+        ensure_policy.assert_called_once_with("C:/repo")
+        self.assertIn("session_id=42", result)
+
+
+if __name__ == "__main__":
+    unittest.main()

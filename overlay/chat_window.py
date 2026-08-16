@@ -27,6 +27,7 @@ from overlay.config import get_cli_provider, get_workdir, load_cfg, normalize_cl
 
 ENGRAM_CMD = Path.home() / ".engram" / "engram-copilot.cmd"
 ENGRAM_GEMINI_CMD = Path.home() / ".engram" / "engram-gemini.cmd"
+ENGRAM_CODEX_CMD = Path.home() / ".engram" / "engram-codex.cmd"
 ENGRAM_CLAUDE_CMD = Path.home() / ".engram" / "engram-claude.cmd"
 ENGRAM_GOOSE_CMD = Path.home() / ".engram" / "engram-goose.cmd"
 CLAUDE_CODE_CMD = "claude"
@@ -433,6 +434,12 @@ def _resolve_provider_launch(cfg: dict, provider: str) -> tuple[str, list[str], 
         gemini_command = str(cli_cfg.get("gemini_command") or "gemini").strip() or "gemini"
         label = "gemini"
         return normalized, ["cmd", "/k", gemini_command], label, env_overrides, warnings
+
+    if normalized == "codex":
+        if ENGRAM_CODEX_CMD.exists():
+            return normalized, ["cmd", "/k", str(ENGRAM_CODEX_CMD)], ENGRAM_CODEX_CMD.name, env_overrides, warnings
+        codex_command = str(cli_cfg.get("codex_command") or "codex").strip() or "codex"
+        return normalized, ["cmd", "/k", codex_command], codex_command, env_overrides, warnings
 
     return "copilot", ["cmd", "/k", str(ENGRAM_CMD)], "engram-copilot.cmd", env_overrides, warnings
 

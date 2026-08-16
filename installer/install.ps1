@@ -36,11 +36,140 @@ $ErrorActionPreference = "Stop"
 # ── 공유 변수/함수/Python 탐지 로드 ───────────────────────
 . "$PSScriptRoot\common.ps1"
 
+function Remove-EngramManagedClaudeHooks {
+    $settingsPath = Join-Path $env:USERPROFILE ".claude\settings.json"
+    $markers = @("engram-sessionstart-hook", "engram-claude-pretool-hook")
+    $Utf8NoBom = [System.Text.UTF8Encoding]::new($false)
+    $settingsChanged = $false
+    if (Test-Path $settingsPath) {
+        try {
+            $settings = Get-Content $settingsPath -Raw | ConvertFrom-Json -ErrorAction Stop
+        } catch {
+            throw "Unable to update Claude hooks in $settingsPath because it could not be parsed as JSON. Repair or remove the file, then retry uninstall. Engram-managed hook scripts were preserved."
+        }
+        if ($settings -isnot [pscustomobject]) {
+            throw "Unable to update Claude hooks in $settingsPath because the top-level JSON value is not an object. Repair the file, then retry uninstall. Engram-managed hook scripts were preserved."
+        }
+        if ($settings.PSObject.Properties["hooks"] -and $settings.hooks -and $settings.hooks -isnot [pscustomobject]) {
+            throw "Unable to update Claude hooks in $settingsPath because 'hooks' is not a JSON object. Repair the file, then retry uninstall. Engram-managed hook scripts were preserved."
+        }
+        if ($settings -and $settings.PSObject.Properties["hooks"]) {
+            foreach ($eventName in @("SessionStart", "PreToolUse")) {
+                $entriesRaw = $settings.hooks.$eventName
+                if ($null -eq $entriesRaw) { continue }
+                $kept = New-Object System.Collections.ArrayList
+                foreach ($entry in @($entriesRaw)) {
+                    if (-not ($entry -and $entry.PSObject.Properties["hooks"])) {
+                        [void]$kept.Add($entry)
+                        continue
+                    }
+                    $originalHooks = @($entry.hooks)
+                    $filteredHooks = New-Object System.Collections.ArrayList
+                    $removedHooks = $false
+                    foreach ($hook in $originalHooks) {
+                        $removeHook = $false
+                        $command = ""
+                        if ($hook -and $hook.PSObject.Properties["command"]) {
+                            $command = [string]$hook.command
+                        }
+                        foreach ($marker in $markers) {
+                            if ($command -like "*$marker*") {
+                                $removeHook = $true
+                                $removedHooks = $true
+                                break
+                            }
+                        }
+                        if (-not $removeHook) { [void]$filteredHooks.Add($hook) }
+                    }
+                    if ($filteredHooks.Count -gt 0) {
+                        if ($removedHooks) {
+                            $entry.hooks = @($filteredHooks)
+                            $settingsChanged = $true
+                        }
+                        [void]$kept.Add($entry)
+                    } elseif ($originalHooks.Count -gt 0) {
+                        $settingsChanged = $true
+                    }
+                }
+                if ($kept.Count -gt 0) {
+                    $settings.hooks.$eventName = @($kept)
+                } else {
+                    if ($settings.hooks.PSObject.Properties[$eventName]) {
+                        $settings.hooks.PSObject.Properties.Remove($eventName)
+                        $settingsChanged = $true
+                    }
+                }
+            }
+            if ($settings.hooks.PSObject.Properties.Count -eq 0 -and $settings.PSObject.Properties["hooks"]) {
+                $settings.PSObject.Properties.Remove("hooks")
+                $settingsChanged = $true
+            }
+            if ($settingsChanged) {
+                try {
+                    [System.IO.File]::WriteAllText($settingsPath, (($settings | ConvertTo-Json -Depth 12) + "`n"), $Utf8NoBom)
+                } catch {
+                    throw "Unable to update Claude hooks in $settingsPath. Check file permissions and retry uninstall. Engram-managed hook scripts were preserved."
+                }
+                Write-Ok "Removed Engram-managed Claude hooks"
+            }
+        }
+    }
+}
+
+function Remove-EngramManagedCodexHooks {
+    $hooksPath = Join-Path $env:USERPROFILE ".codex\hooks.json"
+    if (-not (Test-Path $hooksPath)) { return }
+    try {
+        $settings = Get-Content $hooksPath -Raw | ConvertFrom-Json -ErrorAction Stop
+    } catch {
+        throw "Unable to update Codex hooks in $hooksPath because it could not be parsed as JSON. Repair or remove the file, then retry uninstall."
+    }
+    if ($settings -isnot [pscustomobject]) {
+        throw "Unable to update Codex hooks in $hooksPath because the top-level JSON value is not an object."
+    }
+    if (-not ($settings.PSObject.Properties["hooks"] -and $settings.hooks.PSObject.Properties["PreToolUse"])) { return }
+
+    $kept = New-Object System.Collections.ArrayList
+    $changed = $false
+    foreach ($entry in @($settings.hooks.PreToolUse)) {
+        if (-not ($entry -and $entry.PSObject.Properties["hooks"])) {
+            [void]$kept.Add($entry)
+            continue
+        }
+        $filtered = New-Object System.Collections.ArrayList
+        foreach ($hook in @($entry.hooks)) {
+            $command = if ($hook -and $hook.PSObject.Properties["command"]) { [string]$hook.command } else { "" }
+            if ($command -like "*engram-codex-pretool-hook*") {
+                $changed = $true
+            } else {
+                [void]$filtered.Add($hook)
+            }
+        }
+        if ($filtered.Count -gt 0) {
+            $entry.hooks = @($filtered)
+            [void]$kept.Add($entry)
+        }
+    }
+    if (-not $changed) { return }
+    if ($kept.Count -gt 0) {
+        $settings.hooks.PreToolUse = @($kept)
+    } else {
+        $settings.hooks.PSObject.Properties.Remove("PreToolUse")
+    }
+    if ($settings.hooks.PSObject.Properties.Count -eq 0) {
+        $settings.PSObject.Properties.Remove("hooks")
+    }
+    [System.IO.File]::WriteAllText($hooksPath, (($settings | ConvertTo-Json -Depth 12) + "`n"), [System.Text.UTF8Encoding]::new($false))
+    Write-Ok "Removed Engram-managed Codex hooks"
+}
+
 # ── Uninstall ──────────────────────────────────────────────
 if ($Uninstall) {
     Write-Host "
   Engram Uninstaller
   ────────────────" -ForegroundColor Magenta
+    Remove-EngramManagedClaudeHooks
+    Remove-EngramManagedCodexHooks
     if (Test-Path $ShimDir) {
         Remove-Item $ShimDir -Recurse -Force
         Write-Ok "Removed: $ShimDir"

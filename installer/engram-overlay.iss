@@ -9,7 +9,7 @@
 ; ============================================================
 
 #define AppName "Engram Overlay"
-#define AppVersion "1.3.0"
+#define AppVersion "1.5.0"
 #define AppPublisher "DRTECH"
 #define AppExeName "engram-overlay.exe"
 
@@ -46,6 +46,7 @@ Source: "..\config\config.yaml"; DestDir: "{app}\dist\engram-overlay\config"; Fl
 Source: "..\config\clients\copilot.md"; DestDir: "{app}\config\clients"; Flags: ignoreversion
 Source: "templates\*"; DestDir: "{app}\installer\templates"; Flags: recursesubdirs createallsubdirs ignoreversion
 Source: "..\.github\skills\engram\SKILL.md"; DestDir: "{app}\.github\skills\engram"; Flags: ignoreversion
+Source: "..\.github\skills\orchestrate\SKILL.md"; DestDir: "{app}\.github\skills\orchestrate"; Flags: ignoreversion
 Source: "..\.github\skills\engram-new-session\SKILL.md"; DestDir: "{app}\.github\skills\engram-new-session"; Flags: ignoreversion
 Source: "..\.github\skills\engram-task-workflow\SKILL.md"; DestDir: "{app}\.github\skills\engram-task-workflow"; Flags: ignoreversion
 Source: "..\.github\skills\engram-wiki-workflow\SKILL.md"; DestDir: "{app}\.github\skills\engram-wiki-workflow"; Flags: ignoreversion
@@ -78,16 +79,77 @@ begin
     Result := ExpandConstant('{sd}') + '\intel_engram';
 end;
 
-procedure InitializeWizard();
+function DecodeYamlScalar(Value: String): String;
+var
+  L: Integer;
 begin
+  Result := Trim(Value);
+  L := Length(Result);
+  if L >= 2 then
+  begin
+    if ((Result[1] = '"') and (Result[L] = '"')) or
+       ((Result[1] = '''') and (Result[L] = '''')) then
+      Result := Copy(Result, 2, L - 2);
+  end;
+end;
+
+procedure LoadExistingUserPaths(var DbDir: String; var WorkDir: String);
+var
+  ConfigPath: String;
+  Lines: TArrayOfString;
+  I: Integer;
+  Line: String;
+  Clean: String;
+  InDb: Boolean;
+begin
+  ConfigPath := ExpandConstant('{userprofile}\.engram\user.config.yaml');
+  if not LoadStringsFromFile(ConfigPath, Lines) then
+    Exit;
+
+  InDb := False;
+  for I := 0 to GetArrayLength(Lines) - 1 do
+  begin
+    Line := Lines[I];
+    Clean := Trim(Line);
+    if (Clean = '') or (Copy(Clean, 1, 1) = '#') then
+      Continue;
+
+    if Line = Clean then
+    begin
+      InDb := Clean = 'db:';
+      if Pos('workdir:', Clean) = 1 then
+      begin
+        Line := DecodeYamlScalar(Copy(Clean, Length('workdir:') + 1, MaxInt));
+        if Line <> '' then
+          WorkDir := Line;
+      end;
+    end
+    else if InDb and (Pos('root_dir:', Clean) = 1) then
+    begin
+      Line := DecodeYamlScalar(Copy(Clean, Length('root_dir:') + 1, MaxInt));
+      if Line <> '' then
+        DbDir := Line;
+    end;
+  end;
+end;
+
+procedure InitializeWizard();
+var
+  InitialDbDir: String;
+  InitialWorkDir: String;
+begin
+  InitialDbDir := DefaultDbDir();
+  InitialWorkDir := InitialDbDir;
+  LoadExistingUserPaths(InitialDbDir, InitialWorkDir);
+
   { 1) DB / 작업 디렉토리 }
   DirPage := CreateInputDirPage(wpSelectDir,
     'Engram 데이터 위치', 'DB 와 작업 디렉토리를 선택하세요',
     'engram 의 지식 그래프 DB 와 위키가 저장될 위치입니다.', False, '');
   DirPage.Add('DB / 위키 디렉토리');
   DirPage.Add('작업 디렉토리 (engram 실행 시 기준 경로)');
-  DirPage.Values[0] := DefaultDbDir();
-  DirPage.Values[1] := DefaultDbDir();
+  DirPage.Values[0] := InitialDbDir;
+  DirPage.Values[1] := InitialWorkDir;
 
   { 2) CLI provider (라디오) }
   ProviderPage := CreateInputOptionPage(DirPage.ID,
@@ -95,10 +157,11 @@ begin
     '나중에 트레이 메뉴에서 변경할 수 있습니다.', True, False);
   ProviderPage.Add('Copilot CLI');
   ProviderPage.Add('Gemini CLI');
+  ProviderPage.Add('Codex CLI');
   ProviderPage.Add('Claude Code (직접)');
   ProviderPage.Add('Claude Code (Ollama 라우팅)');
   ProviderPage.Add('Ollama (로컬)');
-  ProviderPage.SelectedValueIndex := 2;
+  ProviderPage.SelectedValueIndex := 3;
 
   { 3) Ollama 모델 / Identity 이름 (선택) }
   QueryPage := CreateInputQueryPage(ProviderPage.ID,
@@ -113,9 +176,10 @@ begin
   case ProviderPage.SelectedValueIndex of
     0: Result := 'copilot';
     1: Result := 'gemini';
-    2: Result := 'claude-code';
-    3: Result := 'claude-code-ollama';
-    4: Result := 'ollama';
+    2: Result := 'codex';
+    3: Result := 'claude-code';
+    4: Result := 'claude-code-ollama';
+    5: Result := 'ollama';
   else
     Result := 'claude-code';
   end;

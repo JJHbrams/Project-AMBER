@@ -16,10 +16,11 @@ import ctypes
 
 def _prepare_frozen_streams() -> None:
     """Give console-oriented libraries valid streams in a windowed executable."""
-    for name in ("stdout", "stderr"):
+    for name in ("stdin", "stdout", "stderr"):
         stream = getattr(sys, name)
         if stream is None:
-            setattr(sys, name, open(os.devnull, "w", encoding="utf-8"))
+            mode = "r" if name == "stdin" else "w"
+            setattr(sys, name, open(os.devnull, mode, encoding="utf-8"))
             continue
         try:
             stream.reconfigure(encoding="utf-8")
@@ -126,6 +127,24 @@ def _dispatch_backend_role() -> bool:
         if role == "install-bootstrap":
             from core.install.bootstrap import main as bootstrap_main
             bootstrap_main(rest)
+            return True
+        if role == "policy-preflight":
+            from core.integrations.policy_preflight import main as policy_preflight_main
+
+            policy_preflight_main(rest)
+            return True
+        if role == "agent-policy-hook":
+            from core.integrations.agent_policy_hook import main as agent_policy_hook_main
+
+            raise SystemExit(agent_policy_hook_main(rest))
+        if role == "git-hook":
+            from core.integrations.git_policy_hook import main as git_hook_main
+
+            git_hook_main(rest)
+            return True
+        if role == "install-user-config":
+            from core.install.user_config import main as user_config_main
+            user_config_main(rest)
             return True
         if role == "smoke-check":
             from mcp.server.fastmcp import FastMCP

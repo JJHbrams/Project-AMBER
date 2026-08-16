@@ -57,6 +57,13 @@ _DEFAULT_CFG = {
             "user_clip_chars": 120,
             "assistant_clip_chars": 160,
         },
+        "auto_checkpoint": {
+            "enabled": True,
+            "poll_seconds": 60,
+            "idle_seconds": 1800,
+            "min_user_turns": 5,
+            "external_daily_dir": "",
+        },
         "long_term": {
             "search_limit": 2,
             "item_max_chars": 100,
@@ -91,6 +98,11 @@ _DEFAULT_CFG = {
                 "wiki-workflow-dispatch",
                 "session-lifecycle-workflow",
             ],
+        },
+        "policy": {
+            "audit_default_limit": 20,
+            "audit_max_limit": 100,
+            "guidance_level": "warn",
         },
     },
     "copilot": {
@@ -129,6 +141,10 @@ _USER_TEMPLATE = """# User runtime overrides for Engram.
 #       - task-workflow-dispatch
 #       - wiki-workflow-dispatch
 #       - session-lifecycle-workflow
+#   policy:
+#     audit_default_limit: 20
+#     audit_max_limit: 100
+#     guidance_level: "warn"  # off | warn | enforce_agents
 #
 # copilot:
 #   model: "claude-sonnet-4.6"
@@ -198,6 +214,50 @@ def _read_yaml(path: Path) -> dict[str, Any]:
         return {}
 
 
+def _normalize_legacy_policy_config(layer: dict[str, Any]) -> dict[str, Any]:
+    """Project legacy policy keys into their canonical names per config layer.
+
+    Normalizing before the layers are merged is important: a legacy user-level
+    ``false`` must override the newer project default ``true``.  The source file
+    is intentionally left untouched; the settings UI persists the canonical key
+    when the user next saves it.
+    """
+    normalized = copy.deepcopy(layer)
+    directives = normalized.get("directives")
+    if not isinstance(directives, dict):
+        return normalized
+    policy = directives.get("policy")
+    if not isinstance(policy, dict):
+        return normalized
+    if "guidance_level" not in policy:
+        legacy_value = policy.get("guidance_enabled")
+        if legacy_value is None and "claude_pretool_enforcement" in policy:
+            legacy_value = policy["claude_pretool_enforcement"]
+        if legacy_value is not None:
+            policy["guidance_level"] = normalize_policy_guidance_level(legacy_value)
+    return normalized
+
+
+def normalize_policy_guidance_level(value: Any, default: str = "warn") -> str:
+    if isinstance(value, bool):
+        return "warn" if value else "off"
+    normalized = str(value or "").strip().lower().replace("-", "_")
+    aliases = {
+        "off": "off",
+        "disabled": "off",
+        "false": "off",
+        "warn": "warn",
+        "warning": "warn",
+        "advisory": "warn",
+        "true": "warn",
+        "enforce": "enforce_agents",
+        "enforce_agent": "enforce_agents",
+        "enforce_agents": "enforce_agents",
+    }
+    fallback = aliases.get(str(default or "warn").strip().lower().replace("-", "_"), "warn")
+    return aliases.get(normalized, fallback)
+
+
 def _ensure_user_config_file():
     if _USER_CONFIG_PATH.exists():
         return
@@ -220,9 +280,9 @@ def load_runtime_cfg(force_reload: bool = False) -> dict[str, Any]:
         return copy.deepcopy(_CACHED_CFG)
 
     cfg = copy.deepcopy(_DEFAULT_CFG)
-    cfg = _deep_merge(cfg, _read_yaml(default_path))
-    cfg = _deep_merge(cfg, _read_yaml(_LEGACY_USER_CONFIG_PATH))
-    cfg = _deep_merge(cfg, _read_yaml(_USER_CONFIG_PATH))
+    cfg = _deep_merge(cfg, _normalize_legacy_policy_config(_read_yaml(default_path)))
+    cfg = _deep_merge(cfg, _normalize_legacy_policy_config(_read_yaml(_LEGACY_USER_CONFIG_PATH)))
+    cfg = _deep_merge(cfg, _normalize_legacy_policy_config(_read_yaml(_USER_CONFIG_PATH)))
 
     _CACHED_CFG = cfg
     _CACHED_SIG = sig
@@ -257,6 +317,12 @@ def get_discord_scope_prefix() -> str:
 
 def get_db_root_dir() -> str:
     default = _DEFAULT_CFG["db"]["root_dir"]
+    # Frozen build smoke tests must never initialize or migrate the user's real
+    # database.  This dedicated override is intentionally narrower than the
+    # normal ENGRAM_DB_DIR precedence contract below.
+    smoke_override = os.environ.get("ENGRAM_SMOKE_DB_DIR", "").strip()
+    if smoke_override:
+        return smoke_override
     for path in (_USER_CONFIG_PATH, _LEGACY_USER_CONFIG_PATH):
         loaded = _read_yaml(path)
         if not isinstance(loaded, dict):

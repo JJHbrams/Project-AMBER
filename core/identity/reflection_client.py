@@ -29,6 +29,9 @@ logger = logging.getLogger(__name__)
 
 # SDK message_parser가 아직 인식하지 못하는 CLI 이벤트 타입.
 _PASSTHROUGH_TYPES = frozenset({"rate_limit_event"})
+_MINIMAL_SYSTEM_PROMPT = (
+    "Perform only the task in the user prompt. Return only the requested output."
+)
 
 
 def _make_transport(prompt, options: ClaudeCodeOptions):
@@ -57,6 +60,7 @@ async def _call_async(
     options = ClaudeCodeOptions(
         resume=session_id,
         cwd=str(Path.home()),
+        system_prompt=_MINIMAL_SYSTEM_PROMPT,
         extra_args=extra_args,
     )
 

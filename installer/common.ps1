@@ -14,6 +14,7 @@ $ShimPath = Join-Path $ShimDir "engram-copilot.cmd"
 $EngramDispatcherPath = Join-Path $ShimDir "engram.cmd"
 $LegacyCopilotShimPath = Join-Path $ShimDir "engram.cmd"  # 현재는 dispatcher로 재사용
 $GeminiShimPath = Join-Path $ShimDir "engram-gemini.cmd"
+$CodexShimPath = Join-Path $ShimDir "engram-codex.cmd"
 $ClaudeShimPath = Join-Path $ShimDir "engram-claude.cmd"
 $GooseShimPath  = Join-Path $ShimDir "engram-goose.cmd"
 $ClaudeMcpConfigPath = Join-Path $ShimDir "claude-mcp.json"
@@ -299,6 +300,7 @@ function Normalize-CliProvider([string]$provider) {
     switch ($value) {
         "copilot" { return "copilot" }
         "gemini" { return "gemini" }
+        "codex" { return "codex" }
         "claude" { return "claude-code" }
         "claude-code" { return "claude-code" }
         "claude_code" { return "claude-code" }
@@ -317,7 +319,7 @@ function Resolve-AvailableCliProvider([string]$preferred, [hashtable]$availabili
     if ($availability.ContainsKey($normalized) -and [bool]$availability[$normalized]) {
         return $normalized
     }
-    foreach ($candidate in @("gemini", "claude-code", "claude-code-ollama", "ollama", "copilot")) {
+    foreach ($candidate in @("gemini", "codex", "claude-code", "claude-code-ollama", "ollama", "copilot")) {
         if ($availability.ContainsKey($candidate) -and [bool]$availability[$candidate]) {
             return $candidate
         }

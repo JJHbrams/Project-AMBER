@@ -17,7 +17,7 @@ param(
     [Parameter(Mandatory)][string]$InstallDir,
     [string]$DbDir = "",
     [string]$WorkDir = "",
-    [ValidateSet("copilot", "gemini", "claude-code", "claude-code-ollama", "ollama")]
+    [ValidateSet("copilot", "gemini", "codex", "claude-code", "claude-code-ollama", "ollama")]
     [string]$CliProvider = "claude-code",
     [string]$OllamaModel = "",
     [string]$IdentityName = "",
@@ -48,10 +48,150 @@ $Utf8NoBom     = [System.Text.UTF8Encoding]::new($false)
 
 if (-not (Test-Path $ShimDir)) { New-Item $ShimDir -ItemType Directory -Force | Out-Null }
 
+function Remove-EngramManagedClaudeHooks {
+    $settingsPath = Join-Path $env:USERPROFILE ".claude\settings.json"
+    $markers = @("engram-sessionstart-hook", "engram-claude-pretool-hook")
+    $scripts = @(
+        (Join-Path $ShimDir "engram-sessionstart-hook.ps1"),
+        (Join-Path $ShimDir "engram-claude-pretool-hook.ps1")
+    )
+
+    $settingsChanged = $false
+    if (Test-Path $settingsPath) {
+        try {
+            $settings = Get-Content $settingsPath -Raw | ConvertFrom-Json -ErrorAction Stop
+        } catch {
+            throw "Unable to update Claude hooks in $settingsPath because it could not be parsed as JSON. Repair or remove the file, then retry uninstall. Engram-managed hook scripts were preserved."
+        }
+        if ($settings -isnot [pscustomobject]) {
+            throw "Unable to update Claude hooks in $settingsPath because the top-level JSON value is not an object. Repair the file, then retry uninstall. Engram-managed hook scripts were preserved."
+        }
+        if ($settings.PSObject.Properties["hooks"] -and $settings.hooks -and $settings.hooks -isnot [pscustomobject]) {
+            throw "Unable to update Claude hooks in $settingsPath because 'hooks' is not a JSON object. Repair the file, then retry uninstall. Engram-managed hook scripts were preserved."
+        }
+        if ($settings -and $settings.PSObject.Properties["hooks"]) {
+            foreach ($eventName in @("SessionStart", "PreToolUse")) {
+                $entriesRaw = $settings.hooks.$eventName
+                if ($null -eq $entriesRaw) { continue }
+                $kept = New-Object System.Collections.ArrayList
+                foreach ($entry in @($entriesRaw)) {
+                    if (-not ($entry -and $entry.PSObject.Properties["hooks"])) {
+                        [void]$kept.Add($entry)
+                        continue
+                    }
+                    $originalHooks = @($entry.hooks)
+                    $filteredHooks = New-Object System.Collections.ArrayList
+                    $removedHooks = $false
+                    foreach ($hook in $originalHooks) {
+                        $removeHook = $false
+                        $command = ""
+                        if ($hook -and $hook.PSObject.Properties["command"]) {
+                            $command = [string]$hook.command
+                        }
+                        foreach ($marker in $markers) {
+                            if ($command -like "*$marker*") {
+                                $removeHook = $true
+                                $removedHooks = $true
+                                break
+                            }
+                        }
+                        if (-not $removeHook) { [void]$filteredHooks.Add($hook) }
+                    }
+                    if ($filteredHooks.Count -gt 0) {
+                        if ($removedHooks) {
+                            $entry.hooks = @($filteredHooks)
+                            $settingsChanged = $true
+                        }
+                        [void]$kept.Add($entry)
+                    } elseif ($originalHooks.Count -gt 0) {
+                        $settingsChanged = $true
+                    }
+                }
+                if ($kept.Count -gt 0) {
+                    $settings.hooks.$eventName = @($kept)
+                } else {
+                    if ($settings.hooks.PSObject.Properties[$eventName]) {
+                        $settings.hooks.PSObject.Properties.Remove($eventName)
+                        $settingsChanged = $true
+                    }
+                }
+            }
+            if ($settings.hooks.PSObject.Properties.Count -eq 0 -and $settings.PSObject.Properties["hooks"]) {
+                $settings.PSObject.Properties.Remove("hooks")
+                $settingsChanged = $true
+            }
+            if ($settingsChanged) {
+                try {
+                    [System.IO.File]::WriteAllText($settingsPath, (($settings | ConvertTo-Json -Depth 12) + "`n"), $Utf8NoBom)
+                } catch {
+                    throw "Unable to update Claude hooks in $settingsPath. Check file permissions and retry uninstall. Engram-managed hook scripts were preserved."
+                }
+                Write-Ok "Removed Engram-managed Claude hooks"
+            }
+        }
+    }
+
+    foreach ($scriptPath in $scripts) {
+        if (Test-Path $scriptPath) {
+            Remove-Item $scriptPath -Force
+            Write-Ok "Removed: $scriptPath"
+        }
+    }
+}
+
+function Remove-EngramManagedCodexHooks {
+    $hooksPath = Join-Path $env:USERPROFILE ".codex\hooks.json"
+    if (-not (Test-Path $hooksPath)) { return }
+    try {
+        $settings = Get-Content $hooksPath -Raw | ConvertFrom-Json -ErrorAction Stop
+    } catch {
+        throw "Unable to update Codex hooks in $hooksPath because it could not be parsed as JSON. Repair or remove the file, then retry uninstall."
+    }
+    if ($settings -isnot [pscustomobject]) {
+        throw "Unable to update Codex hooks in $hooksPath because the top-level JSON value is not an object."
+    }
+    if (-not ($settings.PSObject.Properties["hooks"] -and $settings.hooks.PSObject.Properties["PreToolUse"])) { return }
+
+    $kept = New-Object System.Collections.ArrayList
+    $changed = $false
+    foreach ($entry in @($settings.hooks.PreToolUse)) {
+        if (-not ($entry -and $entry.PSObject.Properties["hooks"])) {
+            [void]$kept.Add($entry)
+            continue
+        }
+        $filtered = New-Object System.Collections.ArrayList
+        foreach ($hook in @($entry.hooks)) {
+            $command = if ($hook -and $hook.PSObject.Properties["command"]) { [string]$hook.command } else { "" }
+            if ($command -like "*engram-codex-pretool-hook*") {
+                $changed = $true
+            } else {
+                [void]$filtered.Add($hook)
+            }
+        }
+        if ($filtered.Count -gt 0) {
+            $entry.hooks = @($filtered)
+            [void]$kept.Add($entry)
+        }
+    }
+    if (-not $changed) { return }
+    if ($kept.Count -gt 0) {
+        $settings.hooks.PreToolUse = @($kept)
+    } else {
+        $settings.hooks.PSObject.Properties.Remove("PreToolUse")
+    }
+    if ($settings.hooks.PSObject.Properties.Count -eq 0) {
+        $settings.PSObject.Properties.Remove("hooks")
+    }
+    [System.IO.File]::WriteAllText($hooksPath, (($settings | ConvertTo-Json -Depth 12) + "`n"), [System.Text.UTF8Encoding]::new($false))
+    Write-Ok "Removed Engram-managed Codex hooks"
+}
+
 # ── Uninstall ───────────────────────────────────────────────
 if ($Uninstall) {
     Write-Step "Uninstall — 바로가기/환경변수 정리 (DB·config 보존)"
     Get-Process -Name "engram-overlay" -ErrorAction SilentlyContinue | Stop-Process -Force
+    Remove-EngramManagedClaudeHooks
+    Remove-EngramManagedCodexHooks
     foreach ($lnk in @(
         (Join-Path ([Environment]::GetFolderPath("Programs")) "Engram Overlay.lnk"),
         (Join-Path ([Environment]::GetFolderPath("Startup")) "engram-overlay.lnk")
@@ -93,13 +233,26 @@ db:
 
 workdir: "$($WorkDir -replace '\\','/')"
 
+# Optional external human-readable daily note folder.
+# memory:
+#   auto_checkpoint:
+#     external_daily_dir: "D:/Notes/daily"
+
 # watch_workspaces:
 #   - C:/Users/yourname/Desktop/Workspace
 "@
     [System.IO.File]::WriteAllText($UserConfig, $u, $Utf8NoBom)
     Write-Ok "Created: $UserConfig"
 } else {
-    Write-Ok "Exists (보존): $UserConfig"
+    & $DistExe --role install-user-config `
+        --config-path $UserConfig `
+        --db-dir $DbDir `
+        --workdir $WorkDir
+    if ($LASTEXITCODE -ne 0) {
+        Write-Warn "사용자 설정 경로 갱신 실패 (exit=$LASTEXITCODE)"
+        exit 1
+    }
+    Write-Ok "Updated: $UserConfig (db.root_dir, workdir)"
 }
 
 # ── 2. overlay.user.yaml (provider/모델/mcp 포트) ────────────
@@ -164,6 +317,16 @@ if (Get-Command gemini -ErrorAction SilentlyContinue) {
     & gemini mcp add --scope user --transport http engram $mcpUrl *> $null
     if ($LASTEXITCODE -eq 0) { Write-Ok "Gemini CLI" } else { Write-Warn "Gemini MCP 등록 실패 (수동: gemini mcp add --scope user --transport http engram $mcpUrl)" }
 }
+# Codex CLI (기존 사용자 정의 engram 항목은 보존)
+if (Get-Command codex -ErrorAction SilentlyContinue) {
+    & codex mcp get engram *> $null
+    if ($LASTEXITCODE -eq 0) {
+        Write-Ok "Codex CLI (existing engram MCP preserved)"
+    } else {
+        & codex mcp add engram --url $mcpUrl *> $null
+        if ($LASTEXITCODE -eq 0) { Write-Ok "Codex CLI" } else { Write-Warn "Codex MCP 등록 실패 (수동: codex mcp add engram --url $mcpUrl)" }
+    }
+}
 
 # ── 4. .env 템플릿 ───────────────────────────────────────────
 if (-not (Test-Path $EnvFile)) {
@@ -198,7 +361,7 @@ Write-Ok "DB schema, wiki starter files, directives"
 
 # ── 7. Copilot / Claude skills ──────────────────────────────
 Write-Step "Engram workflow skills"
-$sharedSkillNames = @("engram-new-session", "engram-task-workflow", "engram-wiki-workflow", "engram-close-session")
+$sharedSkillNames = @("orchestrate", "engram-new-session", "engram-task-workflow", "engram-wiki-workflow", "engram-close-session")
 foreach ($skillName in $sharedSkillNames) {
     $skillSrc = Join-Path $WorkflowSkillsSource "$skillName\SKILL.md"
     if (-not (Test-Path $skillSrc)) {
@@ -206,6 +369,7 @@ foreach ($skillName in $sharedSkillNames) {
         continue
     }
     foreach ($skillRoot in @(
+        (Join-Path $env:USERPROFILE ".agents\skills"),
         (Join-Path $env:USERPROFILE ".claude\skills"),
         (Join-Path $env:USERPROFILE ".copilot\skills")
     )) {
