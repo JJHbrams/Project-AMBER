@@ -1,5 +1,51 @@
 # Release Notes
 
+## 2026-08-17 - v1.5.0: Character Reactions, Installer Reconfiguration, and Agent Policy
+
+> Minor release. This public AMBER release also includes the previously unreleased v1.4 line.
+> Install with the attached setup executable; existing DB and Wiki data remain untouched unless
+> the installer is explicitly pointed at a different DB/Wiki directory.
+
+### Highlights
+
+- **The desktop character now has state-based sprites and reactions.** Bundled character and
+  reaction packs provide idle/click effects, while Settings can select a character source, edit
+  sprite states, and hot-reload valid changes without restarting the overlay. Placement, scale,
+  and sprite fit remain stable across monitor changes.
+- **Reinstalling now respects the paths shown in the wizard.** Existing `db.root_dir` and
+  `workdir` values are loaded into the installer, and the user's final selections are merged back
+  into `user.config.yaml`. Choosing a new DB/Wiki directory initializes a fresh v1.5 store there;
+  the old DB and Wiki are not moved or modified.
+- **Codex is a first-class CLI provider.** Provider selection, launch shims, and MCP registration
+  are available alongside Copilot, Gemini, Claude Code, and Ollama.
+- **Directive guidance can be enforced consistently across agents.** Managed Claude/Codex hooks
+  and a repo-local pre-commit advisor evaluate structured policy, preserve existing custom hooks,
+  and fail open when the policy backend is unavailable. Repository merge policy favors explicit
+  non-fast-forward integration.
+- **Agent orchestration has explicit planning and acceptance gates.** The bundled workflow can
+  split complex work into planner, coder, and servant roles while keeping final acceptance with
+  the root session.
+
+### Fixed
+
+- Frozen builds explicitly bundle and initialize Tcl/Tk so Settings and overlay windows start on
+  clean machines.
+- Build publication releases dashboard-side file locks before replacing an overlay artifact, and
+  frozen smoke tests use an isolated database instead of the user's live store.
+- Legacy policy switches no longer override a user's explicit OFF selection, and partial hook
+  synchronization failures are visible in Settings.
+- External Obsidian Daily Note output is opt-in and no longer defaults to a machine-specific path.
+- KG vault synchronization is scoped by vault path so one vault cannot prune or relink another.
+
+### Upgrade Notes
+
+- Exit the running overlay before installing.
+- To keep using the current DB/Wiki and workspace, leave the prefilled installer paths unchanged.
+- Selecting a different DB/Wiki directory starts a fresh store with the v1.5 templates. It does
+  not migrate or delete the previous directory.
+- Start a new terminal or CLI session after installation so updated hooks, skills, and environment
+  settings are discovered. Codex may ask you to approve newly installed user hooks via `/hooks`.
+
 ## 2026-08-14 - v1.3.0: Reliable Installer Builds, Dashboard Sidecar, and E5 Memory Migration
 
 > Minor release. Install with the attached setup executable; portable v1.2.1 hotfix replacement is

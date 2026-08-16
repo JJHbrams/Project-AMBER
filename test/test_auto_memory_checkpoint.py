@@ -71,6 +71,31 @@ class AutoMemoryCheckpointTest(unittest.TestCase):
             self.assertIn("[[graph-memory-roadmap]]", text)
             fake_kg.resolve_links.assert_called()
 
+    def test_daily_checkpoint_skips_external_note_when_not_configured(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_root = Path(tmp) / "engram"
+            fake_kg = unittest.mock.MagicMock()
+            with patch(
+                "core.memory.daily_checkpoint.get_db_root_dir",
+                return_value=str(db_root),
+            ), patch(
+                "core.memory.daily_checkpoint.get_kg",
+                return_value=fake_kg,
+            ):
+                result = append_daily_checkpoint(
+                    checkpoint_id="overlay-2-20",
+                    now=datetime(2026, 8, 14, 10, 0).astimezone(),
+                    summary="외부 볼트 없는 사용자",
+                    open_intents="",
+                    project_key="general",
+                    project_node_id=None,
+                    external_daily_dir="",
+                )
+
+            self.assertTrue(result["engram_written"])
+            self.assertFalse(result["external_written"])
+            self.assertEqual(result["external_path"], "")
+
 
 if __name__ == "__main__":
     unittest.main()

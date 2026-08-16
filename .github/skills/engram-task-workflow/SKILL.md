@@ -19,16 +19,38 @@ argument-hint: "수행할 개발 작업"
    - 현재 worktree에 다른 작업의 미커밋 변경이 있다.
    - 장시간 빌드·테스트 또는 실험이 기존 작업 상태를 방해할 수 있다.
 4. `main`, `master`, `dev`에서 작업 중이면 `kg_read_note("git-branch-guide")`를 읽는다.
-5. 작업이 단순 chore가 아니면 변경 전에 작업 성격에 맞는 브랜치를 생성한다.
+5. 다음의 **단순 유지보수**는 현재 브랜치를 유지하고 새 branch/worktree를 만들지 않는다.
+   - `docs/**`, 루트 `README*.md`, `CHANGELOG.md`의 오탈자·표현·링크 같은 작은 문서 수정
+   - 런타임 동작, 테스트, 빌드, 의존성, CI, 배포, agent 정책에 영향을 주지 않는 소규모 chore
+   - `AGENTS.md`, `.github/**`, workflow/skill, 설정·의존성·빌드 파일은 이름이 docs/chore여도 단순 유지보수로 보지 않는다.
+6. 단순 유지보수가 아닌 작업은 변경 전에 작업 성격에 맞는 브랜치를 생성한다.
    - 신규 기능: `feat/<slug>`
    - 버그 수정: `fix/<slug>`
    - 리팩토링: `refactor/<slug>`
    - 문서 전용: `docs/<slug>`
    - 테스트 전용: `test/<slug>`
-6. 기존 미커밋 변경이 있으면 삭제·stash·reset하지 않는다.
+7. 기존 미커밋 변경이 있으면 삭제·stash·reset하지 않는다.
    - 새 작업이 기존 변경과 같은 작업이면 새 브랜치가 변경을 그대로 승계할 수 있다.
    - 다른 작업이면 깨끗한 기준 브랜치에서 별도 worktree를 만든다.
    - dirty 변경을 새 worktree로 임의 복사하거나 patch 적용하지 않는다.
+
+## Repository policy advisor
+
+세션 bootstrap은 현재 cwd가 Git 저장소이고 정책 가이드가 켜져 있으면 Engram Git advisor를
+멱등 설치하고 repo-local `merge.ff=false`를 관리한다.
+
+- frozen: `engram-overlay.exe --role git-hook install --repo <path>`
+- source: `python engram_overlay_entry.py --role git-hook install --repo <path>`
+- 조회·제거: 같은 명령의 `install`을 `status` 또는 `uninstall`로 교체한다.
+- `uninstall`은 공용 Git 디렉터리에 opt-out marker를 남긴다. 명시적 `install`만 marker를
+  제거하므로 다음 세션에 원치 않게 재설치되지 않는다.
+- 정책 가이드 OFF 또는 uninstall 시 Engram이 적용하기 전의 repo-local `merge.ff`를 복원한다.
+- Agent의 branch 통합은 `git merge --no-ff <branch>`를 사용한다. `--ff-only`는 금지한다.
+- 기존 사용자 `pre-commit`이나 custom `core.hooksPath`가 있으면 덮어쓰지 않고 중단한다.
+- managed wrapper는 Git Bash·WSL·Linux에서 동작하며 runtime/backend 오류가 나도 commit을 허용한다.
+- 보호 브랜치에서도 경고·추천·audit만 제공하고 사람이나 agent의 commit을 차단하지 않는다.
+- 명시적 maintenance 맥락을 기록하려면 해당 호출에 `ENGRAM_CHORE_INTENT=1`과 선택적
+  `ENGRAM_CHORE_REASON`을 전달한다. commit message만으로 맥락을 추론하지 않는다.
 
 ## 병렬 worktree
 
@@ -49,6 +71,7 @@ argument-hint: "수행할 개발 작업"
 ## 금지
 
 - `main`, `master`, `dev`에서 feat/fix/refactor/test 작업을 직접 수행하거나 커밋하지 않는다.
+- 단순 유지보수 예외를 코드·설정·CI·빌드·의존성·agent 정책 변경에 확대 적용하지 않는다.
 - 독립 작업을 기존 dirty worktree에 섞지 않는다.
 - 같은 branch를 여러 worktree나 에이전트가 공동 소유하게 하지 않는다.
 - Wiki 문서 경로만 보고 절차를 추측하지 않는다. 필요한 원문은 MCP 도구로 읽는다.

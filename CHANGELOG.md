@@ -4,6 +4,73 @@ All notable changes to this project are documented in this file.
 
 ## Unreleased
 
+## [1.5.0] — 2026-08-17
+
+### Added
+
+- 캐릭터 표시를 단일 이미지에서 상태 기반 sprite/reaction 시스템으로 확장했다.
+  기본 캐릭터·reaction asset pack을 번들하고, 설정 GUI에서 캐릭터 소스와 상태별
+  sprite를 편집하며 저장 즉시 overlay에 반영할 수 있다. 모니터 이동·크기 변경 뒤에도
+  표시 비율과 위치를 안정적으로 유지한다.
+- 복합 개발 작업을 planner/coder/servant 계층으로 분리하고 독립 검수 gate를 적용하는
+  orchestrate workflow를 추가했다.
+- overlay의 대화형 CLI 공급자에 Codex를 추가했다. 설정 GUI와 tray/character 메뉴에서
+  `codex`를 선택할 수 있고, installer가 CLI를 감지해 `~/.engram/engram-codex.cmd` shim,
+  dispatcher 분기, 기존 사용자 항목을 보존하는 Engram MCP 등록을 구성한다.
+- directive preflight에 deterministic Git guard 실행을 추가했다. `protected-branch`와
+  `dirty-worktree`를 structured action/chore/task context로 평가하고, MCP preflight와
+  audit에 guard evidence/final status를 함께 기록한다.
+- local policy preflight CLI/backend role과 Claude Code·Codex `PreToolUse` 관리 hook을 추가했다.
+  repo-write 범위의 `Write`/`Edit`/`MultiEdit`/`NotebookEdit`/`apply_patch` 및 명시적 Git 작업을
+  preflight로 평가한다. 설정 GUI의 `directives.policy.guidance_level`에서 `off`, `warn`,
+  `enforce_agents`를 선택할 수 있다. `enforce_agents`는 Claude·Codex의 유효한 정책 위반
+  tool call만 차단하고 사람의 Git commit은 계속 경고 후 허용하며, backend 오류는 fail-open한다.
+  overlay 시작·설정 저장·installer uninstall 시 Engram 관리 hook만 멱등 동기화한다.
+  Codex user hook은 설치·변경 뒤 `/hooks`에서 사용자가 신뢰 승인해야 한다.
+- provider와 무관하게 `git commit`을 검사하는 repo-local managed `pre-commit`
+  hook을 추가했다. 세션 bootstrap이 Git 저장소를 감지하면 멱등 설치하고,
+  `git-hook install|status|uninstall --repo <path>`로도 명시적으로 관리할 수 있다.
+  uninstall은 공용 Git 디렉터리에 opt-out marker를 남겨 다음 세션의 자동 재설치를 막으며,
+  명시적 install은 marker를 제거하고 다시 활성화한다.
+  관리 중에는 repo-local `merge.ff=false`를 적용하고 OFF/uninstall 시 이전 값을 복원한다.
+  Agent의 `git merge`는 `--no-ff`를 명시해야 하며 `--ff-only`는 정책 위반으로 분류한다.
+  기존 사용자 hook이나 custom `core.hooksPath`는 덮어쓰지 않는다. 보호 브랜치의
+  commit도 통과시키되 위험과 권장 branch/worktree를 안내하고 policy audit에 기록한다.
+  hook launcher는 PowerShell 의존성을 제거해 Git Bash·WSL·Linux에서 동작하며, backend
+  부재·실행 실패·경로 오류를 포함한 모든 managed wrapper 실패를 경고 후 허용한다.
+
+### Fixed
+
+- frozen 빌드에 Tcl/Tk runtime을 명시적으로 포함하고 초기화 경로를 고정해 새 설치에서
+  설정창과 overlay UI가 시작되지 않는 회귀를 막았다.
+- dashboard sidecar가 남긴 파일 잠금을 해제한 뒤 overlay artifact를 교체하도록 빌드
+  순서를 수정하고, smoke test가 실제 사용자 DB 대신 격리 DB를 사용하게 했다.
+- legacy `guidance_enabled`와 `claude_pretool_enforcement`를 config layer merge 전에
+  canonical `guidance_level`로 투영해 업그레이드 후 사용자의 OFF 선택이 뒤집히지 않게 했다.
+- 정책 가이드 OFF marker를 추가해 설치된 repo advisor가 backend 프로세스도 시작하지 않게 했다.
+- hook 동기화 실패를 숨기지 않고 설정 GUI에 partial failure로 표시한다.
+- frozen installer 재설치 화면이 기존 `user.config.yaml`의 DB/Wiki 및 작업
+  디렉토리를 초기값으로 표시하고, 사용자가 확정한 두 경로만 기존 사용자 설정에
+  병합하도록 수정했다. 기존 DB와 Wiki 데이터는 이동하거나 변경하지 않는다.
+
+## [1.4.0] — 2026-08-14
+
+### Changed
+
+- STM/LTM 요약, working memory 체크포인트, 반성 판정, 능동 발화 프레이징에
+  사용하는 격리 Claude 단발 호출이 Claude Code 기본 시스템 프롬프트 대신 최소
+  전용 시스템 프롬프트를 사용하도록 변경했다. CLAUDE.md·skills·tools 차단은
+  유지하면서 호출당 기본 입력 오버헤드를 약 3,000토큰에서 약 470토큰으로 줄였다.
+- 외부 인간용 daily note 폴더는 더 이상 특정 사용자 경로를 기본값으로 사용하지
+  않는다. 설정창에서 경로를 선택한 경우에만 Engram Wiki daily note와 함께 추가
+  기록한다.
+
+### Fixed
+
+- KG sync의 `prune_missing`, `get_path_mtimes`, 전체 `resolve_links`를 `vault_path`
+  기준으로 제한해 한 볼트의 동기화가 다른 볼트의 노드와 링크를 삭제하거나 건너뛰지
+  않도록 수정했다. 볼트 경로를 정규화하고 단일 볼트의 기존 빈 경로는 자동 보정한다.
+
 ## [1.3.0] — 2026-08-14
 
 ### Added
@@ -36,6 +103,11 @@ All notable changes to this project are documented in this file.
   상한과 무관하게 항상 컨텍스트에 남도록 명시적으로 고정한다.
 - 다중 에이전트 병렬 작업, 기존 dirty worktree와 다른 성격의 작업, 장시간 실험은
   작업별 branch+worktree로 격리한다. installer가 협업 가이드도 신규 Wiki에 배포한다.
+- directive policy 엔진 기반을 추가했다. directives 스키마에 structured policy
+  metadata·workflow/guard 식별자·legacy migration marker를 보존하고, installer seed를
+  workflow/advisory 규칙으로 승격했다. deterministic preflight evaluator와 audit
+  조회 MCP 도구는 실제 hook 실행 없이 allow/workflow_required/blocked 요구사항만
+  보고한다.
 
 ### Fixed
 
@@ -142,7 +214,6 @@ All notable changes to this project are documented in this file.
 - **말풍선 대화 모드를 기본값으로 전환** — 신규 설치 및 사용자 오버라이드가 없는
   환경은 이제 `overlay.chat_mode: bubble`로 시작한다. 설정에서 TUI 모드를 명시적으로
   선택하면 `overlay.user.yaml`에 `tui`를 저장해 기본값 변경 이후에도 선택을 유지한다.
-
 ## [1.1.1] — 2026-08-07
 
 말풍선 두 건. 하나는 진짜 버그였고, 하나는 우리 버그가 아니었다.

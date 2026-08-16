@@ -4,6 +4,7 @@
 
 $CopilotCmdDetected = Get-Command copilot -ErrorAction SilentlyContinue
 $GeminiCmdDetected = Get-Command gemini -ErrorAction SilentlyContinue
+$CodexCmdDetected = Get-Command codex -ErrorAction SilentlyContinue
 $ClaudeCliCmdDetected = Get-Command claude -ErrorAction SilentlyContinue
 $OllamaCmdDetected = Get-Command ollama -ErrorAction SilentlyContinue
 $GooseCmdDetected  = Get-Command goose -ErrorAction SilentlyContinue
@@ -18,6 +19,7 @@ Write-DepStatus "Conda (Miniconda/Anaconda)" ($null -ne $condaCmd) $false "https
 Write-DepStatus "Python runtime" ($null -ne $PythonExe) $true "권장: conda create -n $CondaEnv python=3.11 -y"
 Write-DepStatus "Copilot CLI" ($null -ne $CopilotCmdDetected) $false "https://docs.github.com/copilot/how-tos/copilot-cli (유료 구독 필요)"
 Write-DepStatus "Gemini CLI" ($null -ne $GeminiCmdDetected) $false "https://ai.google.dev/gemini-api/docs/cli"
+Write-DepStatus "Codex CLI" ($null -ne $CodexCmdDetected) $false "https://developers.openai.com/codex/cli"
 Write-DepStatus "Claude Code CLI" ($null -ne $ClaudeCliCmdDetected) $false "https://docs.anthropic.com"
 Write-DepStatus "Ollama CLI" ($null -ne $OllamaCmdDetected) $false "https://ollama.ai"
 Write-DepStatus "Goose (MCP agent)" ($null -ne $GooseCmdDetected) $false "https://block.github.io/goose — Ollama MCP 연동용"
@@ -26,7 +28,7 @@ Write-DepStatus "Git" ($null -ne $GitCmdDetected) $false "https://git-scm.com/do
 Write-Host ""
 
 # ── 필수 의존성 조기 검증 ────────────────────────────────────
-$AnyProviderAvailable = ($null -ne $CopilotCmdDetected) -or ($null -ne $GeminiCmdDetected) -or ($null -ne $ClaudeCliCmdDetected) -or ($null -ne $OllamaCmdDetected) -or ($null -ne $GooseCmdDetected)
+$AnyProviderAvailable = ($null -ne $CopilotCmdDetected) -or ($null -ne $GeminiCmdDetected) -or ($null -ne $CodexCmdDetected) -or ($null -ne $ClaudeCliCmdDetected) -or ($null -ne $OllamaCmdDetected) -or ($null -ne $GooseCmdDetected)
 if (-not $AnyProviderAvailable) {
     Write-Warn "CLI provider가 하나도 감지되지 않았습니다."
     Write-Host "      구독 없이 무료로 시작하려면 Gemini CLI를 권장합니다:" -ForegroundColor DarkGray

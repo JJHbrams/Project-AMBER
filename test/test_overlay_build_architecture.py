@@ -14,6 +14,17 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class OverlayBuildArchitectureTests(unittest.TestCase):
+    def test_spec_collects_tk_runtime_without_hook_probe(self):
+        spec = (ROOT / "engram-overlay.spec").read_text(encoding="utf-8")
+        self.assertIn("_collect_tk_python_runtime", spec)
+        self.assertIn("Path(sys.prefix) / 'Lib' / 'tkinter'", spec)
+        self.assertIn("Path(sys.prefix) / 'DLLs' / '_tkinter.pyd'", spec)
+        self.assertIn("installer\\\\pyi_rth_engram_tk.py", spec)
+
+        hook = (ROOT / "installer" / "pyi_rth_engram_tk.py").read_text(encoding="utf-8")
+        self.assertIn('os.environ["TCL_LIBRARY"]', hook)
+        self.assertIn('os.environ["TK_LIBRARY"]', hook)
+
     def test_public_builders_delegate_to_shared_engine(self):
         dev = (ROOT / "dev-rebuild.ps1").read_text(encoding="utf-8-sig")
         module = (ROOT / "installer" / "modules" / "09_overlay.ps1").read_text(
@@ -113,6 +124,14 @@ class OverlayBuildArchitectureTests(unittest.TestCase):
         self.assertIn("dashboard title missing", entry)
         self.assertIn("streamlit_bootstrap.load_config_options(options)", entry)
         self.assertIn("dashboard_exe = EXE(", spec)
+
+    def test_publish_stops_dashboard_sidecar_without_using_it_as_restart_path(self):
+        build = (ROOT / "installer" / "build-overlay.ps1").read_text(encoding="utf-8-sig")
+
+        self.assertIn('Get-Process -Name "engram-dashboard"', build)
+        self.assertIn('$dashboardProcesses | Stop-Process -Force -ErrorAction SilentlyContinue', build)
+        self.assertIn('try { $runningPath = $processes[0].Path } catch {}', build)
+        self.assertNotIn('$runningPath = $dashboardProcesses', build)
 
     def test_dashboard_setting_is_exposed_in_global_settings(self):
         defaults = (ROOT / "config" / "overlay.yaml").read_text(encoding="utf-8")

@@ -12,6 +12,8 @@
   - `--overlay`, `--overlay-stop` 파싱
 - `~/.engram/engram-gemini.cmd`
   - Gemini CLI 진입점
+- `~/.engram/engram-codex.cmd`
+  - Codex CLI 진입점
 - `~/.engram/engram-claude.cmd`
   - Claude Code CLI 진입점
 - `~/.engram/engram-overlay.cmd`
@@ -64,6 +66,7 @@
   - 불가 시 프로젝트 `.venv`
 - MCP 설정 생성
   - `~/.copilot/mcp-config.json` (Copilot CLI)
+  - `~/.codex/config.toml` (`codex mcp add`, 기존 `engram` 항목 보존)
   - `~/.claude.json` (Claude Code)
   - `~/.engram/claude-mcp.json` (Claude Code shim용)
   - `%APPDATA%/Code/User/mcp.json` (VSCode 전역)
@@ -72,6 +75,37 @@
 - 사용자 설정/템플릿
   - `~/.engram/user.config.yaml`
   - `~/.engram/overlay.user.yaml`
+- Claude Code managed hooks
+  - `~/.claude/settings.json`의 Engram 관리 `SessionStart` / `PreToolUse` 항목만 멱등 동기화
+  - `~/.engram/engram-sessionstart-hook.ps1`
+  - `~/.engram/engram-claude-pretool-hook.ps1`
+  - `SessionStart`는 `session.auto_inject=true`일 때만 설치
+  - `PreToolUse`는 `directives.policy.guidance_level != off`일 때 설치된다.
+  - `warn`은 repo-write 위험을 경고·추천·audit만 하고, `enforce_agents`는 유효한
+    정책 위반 tool call을 `permissionDecision: deny`로 차단한다.
+- Codex managed hooks
+  - `~/.codex/hooks.json`의 Engram 관리 `PreToolUse` handler만 멱등 동기화
+  - `Bash`와 `apply_patch` repo-write를 공통 policy preflight로 평가
+  - `warn` 위험은 `hookSpecificOutput.additionalContext`, `enforce_agents`의 유효한
+    정책 위반은 `permissionDecision: deny`로 전달
+  - user hook은 Codex `/hooks`에서 최초 및 내용 변경 시 신뢰 승인이 필요
+- Repository managed Git advisor
+  - `engram_get_context_once` 세션 bootstrap은 cwd가 Git 저장소이고 정책 가이드가 켜져
+    있으면 공용 Git 디렉터리의 managed advisor를 멱등 설치한다.
+  - `engram-overlay.exe --role git-hook install|status|uninstall --repo <path>`로 명시 관리도 가능하다.
+  - uninstall은 공용 Git 디렉터리에 opt-out marker를 남기며, 명시적 install만 이를 제거한다.
+  - advisor 활성화 중에는 repo-local `merge.ff=false`를 적용하고, 정책 가이드 OFF 또는
+    uninstall 시 관리 전 값을 복원한다.
+  - Claude·Codex agent hook은 `git merge`에 `--no-ff`를 요구하고 `--ff-only`를 거부한다.
+  - 기존 non-Engram `pre-commit` 또는 custom `core.hooksPath`가 있으면 설치를 거부한다.
+  - 관리 hook은 POSIX `sh` wrapper에서 provider-neutral backend role을 직접 호출한다.
+    PowerShell에 의존하지 않으며 Git Bash·WSL·native Linux를 지원한다.
+  - 정상 설치된 managed wrapper의 repo 경로/backend/권한/실행 오류는 모두 경고 후
+    `exit 0`으로 처리한다. 사용자가 hook 파일 자체를 교체·손상한 경우는 보장 범위 밖이다.
+  - 보호 브랜치 위험은 콘솔에 안내하고 audit에 기록한다. 명시적 maintenance 맥락은
+    선택적으로 `ENGRAM_CHORE_INTENT=1`과 `ENGRAM_CHORE_REASON`으로 남길 수 있다.
+  - 설정 GUI에서 정책 가이드를 끄면 `~/.engram/policy-guidance.disabled` marker를 먼저
+    생성해 설치된 repo advisor가 backend를 시작하지 않고 검사·audit도 건너뛴다.
 - DB 초기화
   - `<db.root_dir>/engram.db`
 - Wiki vault 초기화
@@ -148,6 +182,10 @@
 - `memory.scope.*`
 - `memory.short_term.*`
 - `memory.working.*`
+- `directives.policy.guidance_level` (`off` | `warn` | `enforce_agents`)
+  - `enforce_agents`도 사람의 repo-local Git advisor는 차단하지 않는다.
+  - legacy `guidance_enabled`와 `claude_pretool_enforcement`는 layer별 merge 전에
+    canonical level로 읽기 호환
 - `copilot.model`
 - `copilot.allow_all_tools`
 
@@ -272,6 +310,8 @@ frozen 빌드에서는 **같은 exe 가 `--role` 인자에 따라 백엔드까�
 | overlay   | `engram-overlay.exe`                        | `python engram_overlay_entry.py`  |
 | MCP 서버  | `sys.executable --role mcp-server`          | `<conda python> mcp_server.py`    |
 | kg-watcher| `sys.executable --role kg-watcher`          | `<conda python>` 스크립트 실행    |
+| policy preflight | `sys.executable --role policy-preflight` | `python engram_overlay_entry.py --role policy-preflight` |
+| Git hook manager | `sys.executable --role git-hook <op> --repo <path>` | `python engram_overlay_entry.py --role git-hook <op> --repo <path>` |
 
 따라서 `overlay/` 든 `core/` 든 **모든 Python 소스가 이 exe 하나에 번들된다.**
 exe 를 교체하면 overlay·MCP·kg-watcher 가 한 번에 갱신된다.

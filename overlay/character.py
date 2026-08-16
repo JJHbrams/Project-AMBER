@@ -3,20 +3,40 @@
 import random
 import re
 import tkinter as tk
+import time
+import logging
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable
 
 from PIL import Image, ImageTk
+import yaml
 
-from overlay.config import resolve_path, load_cfg, set_flip_horizontal
+from overlay.bubble import geometry as bubble_geometry
+
+from overlay.character_assets import (
+    USER_CHARACTER_SETS_DIR,
+    USER_REACTION_PACKS_DIR,
+    ReactionPackResolution,
+    inline_reaction_pack,
+    resolve_character_set,
+    resolve_legacy_asset,
+    resolve_reaction_pack,
+)
+from overlay.reaction_badge import crop_sprite, key_chroma, public_event
+from overlay.config import (
+    _USER_CONFIG_PATH, resolve_path, resolve_editable_overlay_path, load_cfg,
+    get_overlay_state, set_flip_horizontal, update_overlay_state,
+)
 
 USER_CONFIG_DIR = Path.home() / ".engram"
 USER_OVERLAY_RESOURCE = USER_CONFIG_DIR / "overlay.png"
 USER_CHARACTER_DIR = USER_CONFIG_DIR / "character"
-RESOURCE_OVERLAY = resolve_path("resource/overlay.png")
-CHARACTER_DIR = resolve_path("resource/character")
+RESOURCE_OVERLAY = resolve_editable_overlay_path("resource/overlay.png")
+CHARACTER_DIR = resolve_editable_overlay_path("resource/character")
 _CHROMA = "#010101"
 _SMALL_MODEL_RE = re.compile(r"\b[0-4](?:\.\d+)?b\b", re.IGNORECASE)
+log = logging.getLogger(__name__)
 
 
 def _clamp_float(value, minimum: float, maximum: float, default: float) -> float:
@@ -33,6 +53,119 @@ def _clamp_int(value, minimum: int, maximum: int, default: int) -> int:
     except (TypeError, ValueError):
         return default
     return max(minimum, min(maximum, num))
+
+
+def clamp_overlay_position(x: int, y: int, width: int, height: int) -> tuple[int, int]:
+    """Keep a restored window within the work area nearest its saved position."""
+    work = bubble_geometry.get_monitor_work_rect(x + width // 2, y + height // 2)
+    return bubble_geometry.clamp_rect(x, y, width, height, work)
+
+
+def _parse_chroma_key(value: object, default: tuple[int, int, int] = (1, 1, 1)) -> tuple[int, int, int]:
+    text = str(value or "").strip().lstrip("#")
+    if len(text) != 6:
+        return default
+    try:
+        return (int(text[0:2], 16), int(text[2:4], 16), int(text[4:6], 16))
+    except ValueError:
+        return default
+
+
+def _key_chroma_background(image: Image.Image, chroma_key: tuple[int, int, int], tolerance: int = 20) -> Image.Image:
+    """Return an RGBA effect image with near-chroma pixels made transparent."""
+    rgba = image.convert("RGBA")
+    pixels = list(rgba.getdata())
+    keyed = [
+        (red, green, blue, 0 if max(abs(red - chroma_key[0]), abs(green - chroma_key[1]), abs(blue - chroma_key[2])) <= tolerance else alpha)
+        for red, green, blue, alpha in pixels
+    ]
+    rgba.putdata(keyed)
+    return rgba
+
+
+def _with_opacity(image: Image.Image, opacity: float) -> Image.Image:
+    result = image.copy()
+    alpha = result.getchannel("A").point(lambda value: int(value * max(0.0, min(1.0, opacity))))
+    result.putalpha(alpha)
+    return result
+
+
+def _thicken_effect_pixels(image: Image.Image, thickness_px: int) -> Image.Image:
+    """Expand colored RGBA effect pixels after downscaling without touching the base sprite."""
+    thickness_px = _clamp_int(thickness_px, 1, 6, 1)
+    if thickness_px == 1:
+        return image
+
+    radius = thickness_px - 1
+    expanded = Image.new("RGBA", image.size)
+    for offset_y in range(-radius, radius + 1):
+        for offset_x in range(-radius, radius + 1):
+            if offset_x * offset_x + offset_y * offset_y <= radius * radius:
+                expanded.alpha_composite(image, (offset_x, offset_y))
+    return expanded
+
+
+def _render_effect_frame(
+    base: Image.Image,
+    effect: Image.Image | None,
+    opacity: float = 0.0,
+    scale_x: float = 1.0,
+    scale_y: float = 1.0,
+    offset_y: int = 0,
+    offset_x: int = 0,
+    effect_thickness_px: int = 1,
+) -> Image.Image:
+    """Compose a cached RGBA VFX layer without changing the character canvas size."""
+    base = base.convert("RGBA")
+    width, height = base.size
+    transformed = Image.new("RGBA", base.size)
+    scaled_size = (max(1, round(width * scale_x)), max(1, round(height * scale_y)))
+    scaled = base.resize(scaled_size, Image.LANCZOS)
+    transformed.alpha_composite(scaled, ((width - scaled.width) // 2 + offset_x, (height - scaled.height) // 2 + offset_y))
+    if effect is not None and opacity > 0:
+        # VFX is pixel art: LANCZOS turns its one-pixel lines into sub-pixel alpha at overlay size.
+        layer = effect.resize(base.size, Image.NEAREST)
+        layer = _thicken_effect_pixels(layer, effect_thickness_px)
+        transformed.alpha_composite(_with_opacity(layer, opacity))
+    return transformed
+
+
+def _animation_state(click_started_ms: float | None, now_ms: float, click_frame_ms: int) -> str:
+    if click_started_ms is not None and now_ms - click_started_ms < click_frame_ms:
+        return "click"
+    return "idle"
+
+
+def apply_sprite_crop_y_offset(image: Image.Image, offset_px: int) -> Image.Image:
+    """Remove only a declared top gutter before scaling the remaining complete sprite."""
+    if offset_px <= 0:
+        return image
+    offset = min(offset_px, image.height - 1)
+    return image.crop((0, offset, image.width, image.height))
+
+
+def target_height_for_work_area(work_size: tuple[int, int], ratio: float) -> int:
+    """Calculate the shared static/sprite height from one monitor work area."""
+    width, height = work_size
+    return max(120, int(min(width, height) * ratio))
+
+
+def file_fingerprint(path: Path) -> tuple[int, int] | None:
+    """Small, stable change token suitable for UI-thread polling."""
+    try:
+        stat = path.stat()
+        return (stat.st_mtime_ns, stat.st_size)
+    except OSError:
+        return None
+
+
+def fingerprint_paths(paths: set[Path]) -> tuple[tuple[str, tuple[int, int] | None], ...]:
+    return tuple(sorted((str(path), file_fingerprint(path)) for path in paths))
+
+
+def bottom_anchored_geometry(x: int, y: int, old_height: int, width: int, height: int) -> str:
+    """Resize a borderless overlay while keeping its bottom edge stationary."""
+    return f"{width}x{height}+{x}+{y + old_height - height}"
 
 
 def _discover_numbered_frames(base_name: str, search_dirs: tuple[Path, ...]) -> dict[int, Path]:
@@ -56,13 +189,210 @@ def _discover_numbered_frames(base_name: str, search_dirs: tuple[Path, ...]) -> 
     return indexed
 
 
+_SPRITE_WORK_STATES = {"idle", "generating", "thought", "search", "memory"}
+_SPRITE_LOCKED_STATES = {"click", "input", "success", "error", "provider_error"}
+
+
+def classify_sprite_event(event: object) -> str | None:
+    """Map public bubble events to a sprite state without reading private payloads."""
+    safe = public_event(event)
+    kind = str(safe.get("kind") or "").lower()
+    if kind == "thought":
+        return "thought"
+    if kind == "tool_use":
+        tool = str(safe.get("tool_name") or "").lower()
+        if any(token in tool for token in ("mcp__engram__", "engram/", "memory", "kg_")):
+            return "memory"
+        if any(token in tool for token in ("search", "find", "open", "web", "browser", "fetch", "read", "glob", "list", "grep", "rg", "explore")):
+            return "search"
+        return "generating"
+    if kind == "tool_result":
+        return "error" if bool(safe.get("is_error")) else "generating"
+    if kind in {"turn_end", "result"}:
+        return "success"
+    if kind == "error":
+        return "provider_error"
+    return None
+
+
+@dataclass
+class SpriteStateMachine:
+    """Pure display/work state model for the sprite-grid character."""
+
+    states: set[str]
+    state: str = "idle"
+    work_state: str = "idle"
+    hovered: bool = False
+    started_ms: float = 0.0
+    epoch: int = 0
+
+    def _available(self, state: str) -> str:
+        if state in self.states:
+            return state
+        if "idle" in self.states:
+            return "idle"
+        return "default"
+
+    def _set_display(self, state: str, now_ms: float) -> bool:
+        state = self._available(state)
+        if state == self.state:
+            return False
+        self.state = state
+        self.started_ms = now_ms
+        self.epoch += 1
+        return True
+
+    @property
+    def locked(self) -> bool:
+        return self.state in _SPRITE_LOCKED_STATES
+
+    def set_work(self, state: str, now_ms: float) -> bool:
+        if state not in _SPRITE_WORK_STATES or state not in self.states or self.locked:
+            return False
+        self.work_state = state
+        return self._set_display("hover" if self.hovered else state, now_ms)
+
+    def show_transient(self, state: str, now_ms: float) -> bool:
+        if state not in _SPRITE_LOCKED_STATES or state not in self.states:
+            return False
+        if state == "click" and self.state == "click":
+            self.started_ms = now_ms
+            self.epoch += 1
+            return True
+        if self.locked:
+            return False
+        return self._set_display(state, now_ms)
+
+    def set_hovered(self, value: bool, now_ms: float) -> bool:
+        self.hovered = value
+        if self.locked:
+            return False
+        return self._set_display("hover" if value else self.work_state, now_ms)
+
+    def notify_input(self, now_ms: float) -> bool:
+        if self.locked:
+            return False
+        self.work_state = self._available("generating")
+        return self.show_transient("input", now_ms)
+
+    def handle_event(self, event: object, now_ms: float) -> bool:
+        state = classify_sprite_event(event)
+        if state is None:
+            return False
+        if state == "success":
+            if self.locked:
+                return False
+            self.work_state = self._available("idle")
+            return self.show_transient(state, now_ms)
+        if state in {"error", "provider_error"}:
+            if self.locked:
+                return False
+            self.work_state = self._available("idle")
+            return self.show_transient(state, now_ms)
+        return self.set_work(state, now_ms)
+
+    def expire(self, now_ms: float, dwell_ms: int) -> bool:
+        if not self.locked or now_ms - self.started_ms < dwell_ms:
+            return False
+        return self._set_display("hover" if self.hovered else self.work_state, now_ms)
+
+
+def _shuffle_cycle_order(
+    frames: tuple[int, ...],
+    state: str,
+    epoch: int,
+    cycle: int,
+    orders: dict[tuple[str, int, int], tuple[int, ...]],
+    rng: random.Random,
+) -> tuple[int, ...]:
+    key = (state, epoch, cycle)
+    existing = orders.get(key)
+    if existing is not None:
+        return existing
+
+    previous = orders.get((state, epoch, cycle - 1)) if cycle > 0 else None
+    shuffled = list(frames)
+    rng.shuffle(shuffled)
+    if previous and len(shuffled) > 1 and shuffled[0] == previous[-1]:
+        shuffled[0], shuffled[1] = shuffled[1], shuffled[0]
+    order = tuple(shuffled)
+    orders[key] = order
+    return order
+
+
+def select_sprite_frame(
+    spec: dict,
+    state: str,
+    epoch: int,
+    elapsed_ms: float,
+    choices: dict[tuple[str, int, int], int],
+    rng: random.Random | object = random,
+    shuffle_orders: dict[tuple[str, int, int], tuple[int, ...]] | None = None,
+) -> tuple[int, int]:
+    """Pick a frame once per state-time bucket, retaining it for every redraw in that bucket."""
+    frames = tuple(spec["frames"])
+    frame_ms = max(1, int(spec["frame_ms"]))
+    bucket = int(max(0, elapsed_ms) // frame_ms)
+    selection = spec.get("selection", "fixed")
+    if selection == "sequence":
+        return frames[bucket % len(frames)], bucket
+    if selection == "sequence_once":
+        return frames[min(bucket, len(frames) - 1)], bucket
+    if selection == "random":
+        key = (state, epoch, bucket)
+        if key not in choices:
+            choices[key] = rng.choice(frames)  # type: ignore[attr-defined]
+        return choices[key], bucket
+    if selection == "shuffle":
+        orders = shuffle_orders if shuffle_orders is not None else {}
+        cycle, position = divmod(bucket, len(frames))
+        return _shuffle_cycle_order(frames, state, epoch, cycle, orders, rng)[position], bucket
+    return frames[0], bucket
+
+
 class _CharacterProfile:
     def __init__(self, cfg: dict):
         overlay_cfg = cfg.get("overlay", {})
         character_cfg = overlay_cfg.get("character", {})
         seq_cfg = character_cfg.get("sequence", {})
+        effects_cfg = character_cfg.get("effects", {})
+        if not isinstance(effects_cfg, dict):
+            effects_cfg = {}
 
         self.name = str(character_cfg.get("name", "")).strip()
+        self.set_id = str(character_cfg.get("set", "")).strip()
+        self.source_mode = str(character_cfg.get("source_mode", "sprite_grid")).strip().lower()
+        self.set_resolution = resolve_character_set(self.set_id)
+        reactions_cfg = character_cfg.get("reactions", {})
+        reactions_cfg = reactions_cfg if isinstance(reactions_cfg, dict) else {}
+        self.reactions_cfg = reactions_cfg
+        inline_grid = reactions_cfg.get("grid") if isinstance(reactions_cfg.get("grid"), dict) else {}
+        manifest_pack = resolve_reaction_pack(reactions_cfg.get("pack", self.set_id))
+        inline_pack = inline_reaction_pack(
+            reactions_cfg.get("sprite_sheet"),
+            inline_grid,
+            reactions_cfg.get("chroma_key"),
+            reactions_cfg.get("crop_y_offset_px", 0),
+        )
+        # The built-in/user manifest is authoritative for its own sheet.  Inline grid is
+        # only for a different explicitly selected custom PNG.
+        if manifest_pack.source != "disabled":
+            configured_sheet = str(reactions_cfg.get("sprite_sheet") or "")
+            same_builtin = configured_sheet.replace("\\", "/").endswith(f"reactions/{reactions_cfg.get('pack', self.set_id)}/states.png")
+            self.reaction_pack = manifest_pack if same_builtin or inline_pack.source == "disabled" else inline_pack
+        else:
+            self.reaction_pack = inline_pack
+        if "crop_y_offset_px" in reactions_cfg:
+            try:
+                configured_offset = int(reactions_cfg["crop_y_offset_px"])
+            except (TypeError, ValueError):
+                configured_offset = -1
+            if not isinstance(reactions_cfg["crop_y_offset_px"], bool) and 0 <= configured_offset < self.reaction_pack.cell_height:
+                self.reaction_pack = replace(self.reaction_pack, crop_y_offset_px=configured_offset)
+        identity = Path(self.name or self.set_id).stem.lower()
+        self.sprite_enabled = self.source_mode == "sprite_grid" and bool(reactions_cfg.get("enabled", False)) and self.reaction_pack.source != "disabled" and (
+            bool(reactions_cfg.get("apply_to_custom", False)) or identity == str(reactions_cfg.get("pack", self.set_id)).lower()
+        ) and bool(self.reaction_pack.states)
 
         self.sequence_enabled = bool(seq_cfg.get("enabled", True))
         self.trigger_chance = _clamp_float(seq_cfg.get("trigger_chance", 0.12), 0.0, 1.0, 0.12)
@@ -73,13 +403,59 @@ class _CharacterProfile:
         self.interval_max_sec = _clamp_float(seq_cfg.get("interval_max_sec", 3.0), self.interval_min_sec, 30.0, 3.0)
         self.idle_check_interval_sec = _clamp_float(seq_cfg.get("idle_check_interval_sec", 1.0), 0.1, 30.0, 1.0)
 
+        self.effects_enabled = bool(effects_cfg.get("enabled", False))
+        self.effects_chroma_key = _parse_chroma_key(effects_cfg.get("chroma_key", _CHROMA))
+        self.effects_idle_interval_ms = _clamp_int(effects_cfg.get("idle_interval_ms", 2400), 800, 12000, 2400)
+        self.effects_click_frame_ms = _clamp_int(effects_cfg.get("click_frame_ms", 420), 120, 2000, 420)
+        idle_manifest = self.set_resolution.idle
+        click_manifest = self.set_resolution.click
+        # Pack manifests are self-contained; legacy config thickness is only for legacy assets.
+        self.effects_idle_thickness_px = (
+            idle_manifest.thickness_px
+            if idle_manifest else _clamp_int(effects_cfg.get("idle_thickness_px", 2), 1, 6, 2)
+        )
+        self.effects_click_thickness_px = (
+            click_manifest.thickness_px
+            if click_manifest else _clamp_int(effects_cfg.get("click_thickness_px", 3), 1, 6, 3)
+        )
+        self.effects_idle_asset = idle_manifest.path if idle_manifest else resolve_legacy_asset(effects_cfg.get("idle_asset"))
+        self.effects_click_asset = click_manifest.path if click_manifest else resolve_legacy_asset(effects_cfg.get("click_asset"))
+
         self.frames_by_index: dict[int, Path] = {}
         self.default_frame: Path = RESOURCE_OVERLAY
         self.has_numbered_frames = False
 
         self._discover_frames()
+        self.builtin_engram_identity = self._is_bundled_engram_click_target()
+        self.click_vfx_enabled = self.effects_enabled and self.builtin_engram_identity
+
+    @staticmethod
+    def _same_path(left: Path | None, right: Path | None) -> bool:
+        if left is None or right is None:
+            return False
+        try:
+            return left.resolve() == right.resolve()
+        except OSError:
+            return left == right
+
+    def _is_bundled_engram_click_target(self) -> bool:
+        if self.source_mode == "sprite_grid":
+            pack_id = str(self.reactions_cfg.get("pack", self.set_id)).strip().lower()
+            return self.sprite_enabled and self.reaction_pack.source == "bundled" and pack_id == "engram"
+
+        bundled_engram_png = resolve_path("resource/character/engram.png")
+        bundled_set_image = self.set_resolution.base_image if self.set_resolution.source == "bundled" else None
+        return self._same_path(self.default_frame, bundled_engram_png) or self._same_path(self.default_frame, bundled_set_image)
 
     def _discover_frames(self):
+        # A valid reaction pack is the character itself, not a floating badge.
+        if self.sprite_enabled:
+            return
+        # 이름이 비어 있거나 set id와 같은 기본 이름이면 유효 manifest pack을 쓴다.
+        if self.set_resolution.base_image is not None and self.name in {"", self.set_id}:
+            self.default_frame = self.set_resolution.base_image
+            return
+
         # 이름 미설정 → 바로 fallback
         if not self.name:
             self.default_frame = USER_OVERLAY_RESOURCE if USER_OVERLAY_RESOURCE.exists() else RESOURCE_OVERLAY
@@ -184,18 +560,259 @@ class CharacterOverlay:
 
         self._cfg = load_cfg()
         self._profile = _CharacterProfile(self._cfg)
+        self._work_size = (self.root.winfo_screenwidth(), self.root.winfo_screenheight())
         self._current_source = self._profile.default_frame
         self._sequence_queue: list[Path] = []
+        self._animation_after_id: str | None = None
+        self._click_started_ms: float | None = None
+        self._effect_images: dict[str, Image.Image] = {}
         self._context_menu_open = False
         self._flip_h = bool(self._cfg["overlay"].get("flip_horizontal", False))
+        self._sprite_sheet: Image.Image | None = None
+        self._sprite_cache: dict[tuple[int, int, bool, int], Image.Image] = {}
+        self._sprite_choices: dict[tuple[str, int, int], int] = {}
+        self._sprite_shuffle_orders: dict[tuple[str, int, int], tuple[int, ...]] = {}
+        self._sprite_selection_epoch = -1
+        self._sprite_rng = random.Random(time.time_ns())
+        initial_ms = time.monotonic() * 1000
+        self._sprite_model = SpriteStateMachine(
+            set(self._profile.reaction_pack.states or {}),
+            started_ms=initial_ms,
+        )
+        if self._profile.sprite_enabled:
+            self._load_sprite_sheet()
 
+        self._preload_effect_images()
         self._load_image(source_path=self._current_source)
-        self._place_default()
+        if not self._restore_position():
+            self._place_default()
         self._bind_events()
         self._build_context_menu()
         self.root.deiconify()
         self._keep_topmost()
         self._schedule_animation_tick(initial=True)
+        self._watch_after_id: str | None = None
+        self._watch_signature = fingerprint_paths(self._character_watch_paths())
+        self._watch_pending_signature = None
+        self._watch_pending_at = 0.0
+        self._schedule_config_watch()
+
+    @staticmethod
+    def _decode_image(path: Path) -> Image.Image:
+        with Image.open(path) as raw:
+            raw.verify()
+        with Image.open(path) as raw:
+            image = raw.convert("RGBA")
+        if image.width < 1 or image.height < 1:
+            raise ValueError(f"invalid image dimensions: {path}")
+        return image
+
+    def _load_sprite_sheet_for(self, profile: _CharacterProfile) -> Image.Image | None:
+        if not profile.sprite_enabled:
+            return None
+        pack = profile.reaction_pack
+        if pack.sprite_sheet is None:
+            raise ValueError("sprite pack has no sheet")
+        sheet = self._decode_image(pack.sprite_sheet)
+        if sheet.size != (pack.columns * pack.cell_width, pack.rows * pack.cell_height):
+            raise ValueError("sprite grid mismatch")
+        return sheet
+
+    def _effect_images_for(self, profile: _CharacterProfile) -> dict[str, Image.Image]:
+        images: dict[str, Image.Image] = {}
+        if not profile.effects_enabled:
+            return images
+        assets = [("twinkle", profile.effects_idle_asset)]
+        if profile.click_vfx_enabled:
+            assets.append(("sparkle_burst", profile.effects_click_asset))
+        for name, path in assets:
+            if path is not None:
+                images[name] = _key_chroma_background(self._decode_image(path), profile.effects_chroma_key)
+        return images
+
+    def _character_watch_paths_for(self, profile: _CharacterProfile) -> set[Path]:
+        paths = {resolve_editable_overlay_path("config/overlay.yaml"), _USER_CONFIG_PATH}
+        # Keep the configured user-pack candidates in the watch set even when
+        # their manifest is currently missing or invalid and resolution fell
+        # back to the bundled pack.  Creating/fixing that manifest must trigger
+        # a retry, while a half-written file must never replace last-good state.
+        for root, value in (
+            (USER_CHARACTER_SETS_DIR, profile.set_id),
+            (USER_REACTION_PACKS_DIR, profile.reactions_cfg.get("pack", profile.set_id)),
+        ):
+            pack_id = str(value or "").strip()
+            if pack_id and re.fullmatch(r"[A-Za-z0-9_-]+", pack_id):
+                paths.add(root / pack_id / "manifest.yaml")
+        for path in (profile.default_frame, profile.effects_idle_asset, profile.effects_click_asset):
+            if path is not None:
+                paths.add(path)
+        if profile.set_resolution.base_image is not None:
+            paths.add(profile.set_resolution.base_image.parent / "manifest.yaml")
+        pack = profile.reaction_pack
+        if pack.sprite_sheet is not None:
+            paths.add(pack.sprite_sheet)
+            paths.add(pack.sprite_sheet.parent / "manifest.yaml")
+        return paths
+
+    def _character_watch_paths(self) -> set[Path]:
+        return self._character_watch_paths_for(self._profile)
+
+    @staticmethod
+    def _validate_yaml_mappings(paths: set[Path]) -> None:
+        for path in paths:
+            if path.suffix.lower() not in {".yaml", ".yml"} or not path.exists():
+                continue
+            try:
+                parsed = yaml.safe_load(path.read_text(encoding="utf-8"))
+            except (OSError, yaml.YAMLError) as exc:
+                raise ValueError(f"invalid YAML: {path}") from exc
+            if not isinstance(parsed, dict):
+                raise ValueError(f"YAML mapping required: {path}")
+
+    def _schedule_config_watch(self) -> None:
+        try:
+            self._watch_after_id = self.root.after(500, self._poll_config_watch)
+        except tk.TclError:
+            self._watch_after_id = None
+
+    def _poll_config_watch(self) -> None:
+        self._watch_after_id = None
+        try:
+            if not self.root.winfo_exists():
+                return
+            signature = fingerprint_paths(self._character_watch_paths())
+            if signature != self._watch_signature:
+                now = time.monotonic()
+                if signature != self._watch_pending_signature:
+                    self._watch_pending_signature = signature
+                    self._watch_pending_at = now
+                elif now - self._watch_pending_at >= 0.3:
+                    # Record this version even if rejected: another completed write
+                    # gets a new fingerprint and will be retried without log spam.
+                    self._watch_signature = signature
+                    self._watch_pending_signature = None
+                    self.reload_config()
+        except Exception:
+            log.exception("[overlay] character config watch failed")
+        finally:
+            self._schedule_config_watch()
+
+    def cancel_config_watch(self) -> None:
+        if self._watch_after_id is not None:
+            try:
+                self.root.after_cancel(self._watch_after_id)
+            except tk.TclError:
+                pass
+        self._watch_after_id = None
+
+    def reload_config(self) -> bool:
+        """Validate all new character inputs, then replace them as one UI-thread update."""
+        try:
+            cfg = load_cfg(strict=True)
+            profile = _CharacterProfile(cfg)
+            # Validate both sets.  This prevents a half-written active user
+            # manifest from silently falling back to a bundled pack.
+            self._validate_yaml_mappings(self._character_watch_paths())
+            self._validate_yaml_mappings(self._character_watch_paths_for(profile))
+            reactions = cfg.get("overlay", {}).get("character", {}).get("reactions", {})
+            if (
+                str(cfg.get("overlay", {}).get("character", {}).get("source_mode", "")).lower() == "sprite_grid"
+                and isinstance(reactions, dict) and reactions.get("enabled")
+                and not profile.sprite_enabled
+            ):
+                raise ValueError("enabled sprite-grid configuration did not resolve a valid reaction pack")
+            sheet = self._load_sprite_sheet_for(profile)
+            effects = self._effect_images_for(profile)
+            if not profile.sprite_enabled:
+                self._decode_image(profile.default_frame)
+        except Exception as exc:
+            log.warning("[overlay] character reload rejected; keeping last good assets: %s", exc)
+            return False
+
+        old_model = self._sprite_model
+        now_ms = time.monotonic() * 1000
+        model = SpriteStateMachine(set(profile.reaction_pack.states or {}), started_ms=old_model.started_ms)
+        model.hovered = old_model.hovered
+        model.work_state = model._available(old_model.work_state)
+        desired = old_model.state if old_model.state in model.states else ("hover" if model.hovered else model.work_state)
+        model.state = model._available(desired)
+        model.epoch = old_model.epoch + 1
+        if model.state != old_model.state:
+            model.started_ms = now_ms
+
+        old_height = self._img_h
+        # A successful settings save is authoritative: retaining the previous
+        # static/sequence path here would make source selection appear ignored.
+        current_source = profile.default_frame
+        self._cfg, self._profile, self._sprite_sheet = cfg, profile, sheet
+        self._effect_images = effects
+        self._sprite_cache = {}
+        self._sprite_choices = {}
+        self._sprite_shuffle_orders = {}
+        self._sprite_selection_epoch = -1
+        self._sprite_model = model
+        self._flip_h = bool(cfg.get("overlay", {}).get("flip_horizontal", self._flip_h))
+        self._sequence_queue.clear()
+        self._click_started_ms = None
+        self._load_image(work_size=self._work_size, source_path=current_source)
+        self._resize_window_to_image(old_height)
+        self._watch_signature = fingerprint_paths(self._character_watch_paths())
+        self._watch_pending_signature = None
+        self._schedule_animation_in(0)
+        log.info("[overlay] character config reloaded")
+        return True
+
+    def _preload_effect_images(self) -> None:
+        """Load and chroma-key VFX once; unavailable assets simply disable that layer."""
+        try:
+            self._effect_images = self._effect_images_for(self._profile)
+        except Exception:
+            self._log_overlay_exception()
+
+    def _load_sprite_sheet(self) -> None:
+        """Load the sheet once; invalid dimensions make the pack fall back to static."""
+        try:
+            self._sprite_sheet = self._load_sprite_sheet_for(self._profile)
+        except Exception:
+            self._profile.sprite_enabled = False
+            self._sprite_sheet = None
+
+    def _state_spec(self, state: str) -> dict:
+        states = self._profile.reaction_pack.states or {}
+        return states.get(state) or states.get("default") or {"frames": (0,), "selection": "fixed", "transform": "none", "vfx": "none", "frame_ms": 600, "dwell_ms": 600}
+
+    def set_sprite_state(self, state: str, *, transient: bool = False) -> None:
+        if not self._profile.sprite_enabled:
+            return
+        now_ms = time.monotonic() * 1000
+        changed = (
+            self._sprite_model.show_transient(state, now_ms)
+            if transient or state in _SPRITE_LOCKED_STATES
+            else self._sprite_model.set_work(state, now_ms)
+        )
+        if changed:
+            self._schedule_animation_in(0)
+
+    def handle_bubble_event(self, event: object) -> None:
+        if self._profile.sprite_enabled and self._sprite_model.handle_event(event, time.monotonic() * 1000):
+            self._schedule_animation_in(0)
+
+    def notify_input(self) -> None:
+        if self._profile.sprite_enabled and self._sprite_model.notify_input(time.monotonic() * 1000):
+            self._schedule_animation_in(0)
+
+    def _sprite_image(self, index: int, target_h: int, flip: bool) -> Image.Image:
+        p = self._profile.reaction_pack
+        crop_offset = p.crop_y_offset_px
+        key = (index, target_h, flip, crop_offset)
+        if key not in self._sprite_cache:
+            cell = crop_sprite(self._sprite_sheet, index, p.columns, p.rows, p.cell_width, p.cell_height)  # type: ignore[arg-type]
+            sprite = apply_sprite_crop_y_offset(key_chroma(cell, p.chroma_key), crop_offset)
+            width = max(1, round(sprite.width * target_h / sprite.height))
+            sprite = sprite.resize((width, target_h), Image.LANCZOS)
+            if flip: sprite = sprite.transpose(Image.FLIP_LEFT_RIGHT)
+            self._sprite_cache[key] = sprite
+        return self._sprite_cache[key]
 
     def _load_image(self, work_size: tuple[int, int] | None = None, source_path: Path | None = None):
         cfg = self._cfg["overlay"]
@@ -208,15 +825,25 @@ class CharacterOverlay:
         else:
             sw = self.root.winfo_screenwidth()
             sh = self.root.winfo_screenheight()
+        self._work_size = (sw, sh)
 
         # 짧은 축 기준 스케일링 (landscape→높이, portrait→너비)
-        base = min(sw, sh)
-        target_h = max(120, int(base * cfg["char_height_ratio"]))
+        target_h = target_height_for_work_area(self._work_size, cfg["char_height_ratio"])
 
+        if self._profile.sprite_enabled and self._sprite_sheet is not None:
+            spec = self._state_spec(self._sprite_model.state)
+            img = self._sprite_image(spec["frames"][0], target_h, self._flip_h)
+            target_w = img.width
+            self._img_w, self._img_h = target_w, target_h
+            self._base_image = img
+            self._render_current_image()
+            return
         try:
-            img = Image.open(active_source).convert("RGBA")
+            with Image.open(active_source) as raw:
+                img = raw.convert("RGBA")
         except Exception:
-            img = Image.open(RESOURCE_OVERLAY).convert("RGBA")
+            with Image.open(RESOURCE_OVERLAY) as raw:
+                img = raw.convert("RGBA")
 
         scale = target_h / img.height
         target_w = int(img.width * scale)
@@ -224,6 +851,29 @@ class CharacterOverlay:
         if self._flip_h:
             img = img.transpose(Image.FLIP_LEFT_RIGHT)
         self._img_w, self._img_h = target_w, target_h
+        self._base_image = img
+        self._render_current_image()
+
+    def _render_current_image(
+        self,
+        effect: Image.Image | None = None,
+        opacity: float = 0.0,
+        scale_x: float = 1.0,
+        scale_y: float = 1.0,
+        offset_y: int = 0,
+        offset_x: int = 0,
+        effect_thickness_px: int = 1,
+    ) -> None:
+        img = _render_effect_frame(
+            self._base_image,
+            effect,
+            opacity,
+            scale_x,
+            scale_y,
+            offset_y,
+            offset_x,
+            effect_thickness_px,
+        )
 
         r, g, b, a = img.split()
         canvas = Image.new("RGB", img.size, (1, 1, 1))
@@ -252,6 +902,26 @@ class CharacterOverlay:
         y = sh - self._img_h - cfg["char_margin_y"]
         self.root.geometry(f"{self._img_w}x{self._img_h}+{x}+{y}")
 
+    def _restore_position(self) -> bool:
+        """Restore a previous drag location, clamped to a currently visible screen."""
+        saved = get_overlay_state().get("overlay_window", {})
+        if not isinstance(saved, dict):
+            return False
+        try:
+            x, y = int(saved["x"]), int(saved["y"])
+        except (KeyError, TypeError, ValueError):
+            return False
+        x, y = clamp_overlay_position(x, y, self._img_w, self._img_h)
+        self.root.geometry(f"{self._img_w}x{self._img_h}+{x}+{y}")
+        return True
+
+    def _save_position(self) -> None:
+        x, y = self.root.winfo_x(), self.root.winfo_y()
+        def update(state: dict) -> None:
+            work = bubble_geometry.get_monitor_work_rect(x + self._img_w // 2, y + self._img_h // 2)
+            state["overlay_window"] = {"x": int(x), "y": int(y), "work_area": list(work)}
+        update_overlay_state(update)
+
     def _bind_events(self):
         self._press_x = 0
         self._press_y = 0
@@ -261,6 +931,8 @@ class CharacterOverlay:
         self._label.bind("<B1-Motion>", self._on_drag)
         self._label.bind("<ButtonRelease-1>", self._on_release)
         self._label.bind("<Button-3>", self._on_context_menu_event)
+        self._label.bind("<Enter>", lambda _event: self._set_hovered(True))
+        self._label.bind("<Leave>", lambda _event: self._set_hovered(False))
         self.root.bind("<Button-3>", self._on_context_menu_event)
 
     def _on_context_menu_event(self, event):
@@ -322,7 +994,7 @@ class CharacterOverlay:
         current_model = self._get_ollama_model_value()
         models = self._get_ollama_models_value()
 
-        # ── 상위 flat 항목: Copilot / Gemini ────────────────────────
+        # ── 상위 flat 항목: Copilot / Gemini / Codex ───────────────
         self._provider_var.set(current_provider)
         self._provider_menu.add_checkbutton(
             label="Copilot CLI",
@@ -337,6 +1009,13 @@ class CharacterOverlay:
             offvalue="",
             variable=self._provider_var,
             command=lambda: self._select_provider_model("gemini", None),
+        )
+        self._provider_menu.add_checkbutton(
+            label="Codex CLI",
+            onvalue="codex",
+            offvalue="",
+            variable=self._provider_var,
+            command=lambda: self._select_provider_model("codex", None),
         )
         self._provider_menu.add_separator()
 
@@ -563,6 +1242,10 @@ class CharacterOverlay:
         self._press_y = event.y_root
         self._moved = False
 
+    def _set_hovered(self, value: bool) -> None:
+        if self._profile.sprite_enabled and self._sprite_model.set_hovered(value, time.monotonic() * 1000):
+            self._schedule_animation_in(0)
+
     def _on_drag(self, event):
         dx = event.x_root - self._press_x
         dy = event.y_root - self._press_y
@@ -585,19 +1268,144 @@ class CharacterOverlay:
         self._reload_image_for_current_monitor(source_path=source_path)
 
     def _schedule_animation_tick(self, initial: bool = False):
-        if initial:
-            self.root.after(200, self._animation_tick)
+        delay = 200 if initial else max(100, int(self._profile.idle_check_interval_sec * 1000))
+        self._schedule_animation_in(delay)
+
+    def _schedule_animation_in(self, delay_ms: int) -> None:
+        if self._animation_after_id is not None:
+            try:
+                self.root.after_cancel(self._animation_after_id)
+            except tk.TclError:
+                return
+        try:
+            self._animation_after_id = self.root.after(max(0, delay_ms), self._animation_tick)
+        except tk.TclError:
+            self._animation_after_id = None
+
+    def _render_idle_effect(self, now_ms: float) -> None:
+        interval = self._profile.effects_idle_interval_ms
+        phase = (now_ms % interval) / interval
+        pulse = (1.0 - abs(2.0 * phase - 1.0))
+        bob = round(-2 * pulse)
+        self._render_current_image(
+            effect=self._effect_images.get("twinkle"),
+            opacity=0.18 + 0.26 * pulse,
+            scale_x=1.0 - 0.008 * pulse,
+            scale_y=1.0 + 0.012 * pulse,
+            offset_y=bob,
+            effect_thickness_px=self._profile.effects_idle_thickness_px,
+        )
+
+    def _render_click_effect(self, progress: float) -> None:
+        pulse = 1.0 - abs(2.0 * progress - 1.0)
+        shake = round(2 * (1.0 - progress) * (1 if int(progress * 20) % 2 else -1))
+        self._render_current_image(
+            effect=self._effect_images.get("sparkle_burst"),
+            opacity=min(1.0, 0.25 + 0.9 * pulse),
+            scale_x=1.0 - 0.055 * pulse,
+            scale_y=1.0 + 0.055 * pulse,
+            offset_x=shake,
+            offset_y=round(-2 * pulse),
+            effect_thickness_px=self._profile.effects_click_thickness_px,
+        )
+
+    def _start_click_action(self) -> None:
+        if self._profile.sprite_enabled:
+            self.set_sprite_state("click")
             return
-        idle_ms = int(self._profile.idle_check_interval_sec * 1000)
-        self.root.after(max(100, idle_ms), self._animation_tick)
+        if not self._profile.click_vfx_enabled or "sparkle_burst" not in self._effect_images:
+            return
+        # 클릭은 번호 프레임을 포함한 어떤 idle보다 항상 우선이며 재클릭은 0프레임부터다.
+        self._sequence_queue.clear()
+        self._click_started_ms = time.monotonic() * 1000
+        if self._current_source != self._profile.default_frame:
+            self._set_frame(self._profile.default_frame)
+        self._schedule_animation_in(0)
 
     def _animation_tick(self):
+        self._animation_after_id = None
+        try:
+            if not self.root.winfo_exists():
+                return
+        except tk.TclError:
+            return
+
+        now_ms = time.monotonic() * 1000
+        if self._profile.sprite_enabled and self._sprite_sheet is not None:
+            spec = self._state_spec(self._sprite_model.state)
+            elapsed = now_ms - self._sprite_model.started_ms
+            dwell = max(1, int(spec.get("dwell_ms", spec["frame_ms"])))
+            if self._sprite_model.expire(now_ms, dwell):
+                spec = self._state_spec(self._sprite_model.state)
+                elapsed = 0
+            if self._sprite_selection_epoch != self._sprite_model.epoch:
+                self._sprite_choices.clear()
+                self._sprite_shuffle_orders.clear()
+                self._sprite_selection_epoch = self._sprite_model.epoch
+            index, bucket = select_sprite_frame(
+                spec,
+                self._sprite_model.state,
+                self._sprite_model.epoch,
+                elapsed,
+                self._sprite_choices,
+                self._sprite_rng,
+                self._sprite_shuffle_orders,
+            )
+            if len(self._sprite_choices) > 128:
+                self._sprite_choices.clear()
+            if len(self._sprite_shuffle_orders) > 8:
+                current_cycle = bucket // len(spec["frames"])
+                self._sprite_shuffle_orders = {
+                    key: order
+                    for key, order in self._sprite_shuffle_orders.items()
+                    if key[0] == self._sprite_model.state
+                    and key[1] == self._sprite_model.epoch
+                    and key[2] >= current_cycle - 1
+                }
+            transform = spec.get("transform", "none")
+            flip_key = (f"flip:{self._sprite_model.state}", self._sprite_model.epoch, bucket)
+            idle_flip = False
+            if transform == "breathe_mirror":
+                if flip_key not in self._sprite_choices:
+                    self._sprite_choices[flip_key] = random.choice((0, 1))
+                idle_flip = bool(self._sprite_choices[flip_key])
+            hover_flip = transform == "hflip_squash" and bucket % 2 == 1
+            flip = self._flip_h ^ idle_flip ^ hover_flip
+            target_h = target_height_for_work_area(self._work_size, self._cfg["overlay"]["char_height_ratio"])
+            old_width, old_height = self._img_w, self._img_h
+            self._base_image = self._sprite_image(index, target_h, flip)
+            self._img_w, self._img_h = self._base_image.size
+            phase = (elapsed % max(1, spec["frame_ms"])) / max(1, spec["frame_ms"])
+            sx, sy = (1.0, 1.0)
+            pulse = 1.0 - abs(2.0 * phase - 1.0)
+            if transform == "breathe_mirror":
+                sx, sy = (0.98 + 0.02 * pulse, 1.02 - 0.02 * pulse)
+            elif transform == "hflip_squash":
+                sx, sy = (1.0 + 0.025 * pulse, 1.0 - 0.06 * pulse)
+            wants_click_vfx = spec.get("vfx") == "sparkle_burst"
+            effect = self._effect_images.get(spec.get("vfx", "none")) if (not wants_click_vfx or self._profile.click_vfx_enabled) else None
+            thickness = self._profile.effects_click_thickness_px if spec.get("vfx") == "sparkle_burst" else self._profile.effects_idle_thickness_px
+            self._render_current_image(effect=effect, opacity=.55 if effect else 0, scale_x=sx, scale_y=sy, effect_thickness_px=thickness)
+            if (old_width, old_height) != (self._img_w, self._img_h):
+                self._resize_window_to_image(old_height)
+            self._schedule_animation_in(min(80, max(30, int(spec["frame_ms"]/4))))
+            return
+        if _animation_state(self._click_started_ms, now_ms, self._profile.effects_click_frame_ms) == "click":
+            progress = (now_ms - self._click_started_ms) / self._profile.effects_click_frame_ms  # type: ignore[operator]
+            self._render_click_effect(max(0.0, min(1.0, progress)))
+            self._schedule_animation_in(33)
+            return
+        if self._click_started_ms is not None:
+            self._click_started_ms = None
+            if self._current_source != self._profile.default_frame:
+                self._set_frame(self._profile.default_frame)
+
         if self._sequence_queue:
             next_frame = self._sequence_queue.pop(0)
             self._set_frame(next_frame)
             if self._sequence_queue:
                 sec = random.uniform(self._profile.interval_min_sec, self._profile.interval_max_sec)
-                self.root.after(max(50, int(sec * 1000)), self._animation_tick)
+                self._schedule_animation_in(max(50, int(sec * 1000)))
                 return
 
             if self._current_source != self._profile.default_frame:
@@ -612,8 +1420,13 @@ class CharacterOverlay:
             sequence = self._profile.build_sequence_paths()
             if sequence:
                 self._sequence_queue = sequence
-                self.root.after(0, self._animation_tick)
+                self._schedule_animation_in(0)
                 return
+
+        if "twinkle" in self._effect_images:
+            self._render_idle_effect(now_ms)
+            self._schedule_animation_in(100)
+            return
 
         self._schedule_animation_tick()
 
@@ -633,18 +1446,22 @@ class CharacterOverlay:
 
         old_h = self._img_h
         self._load_image(work_size=work_size, source_path=source_path)
+        self._resize_window_to_image(old_h)
 
-        # 창 크기 갱신 (y 위치는 비율 유지)
+    def _resize_window_to_image(self, old_height: int) -> None:
+        """Keep the image label and borderless Tk window in the same dimensions."""
         x = self.root.winfo_x()
         y = self.root.winfo_y()
-        if old_h > 0:
-            y = y + old_h - self._img_h  # 하단 기준 유지
-        self.root.geometry(f"{self._img_w}x{self._img_h}+{x}+{y}")
+        bottom_anchored_y = y + old_height - self._img_h
+        x, bottom_anchored_y = clamp_overlay_position(x, bottom_anchored_y, self._img_w, self._img_h)
+        self.root.geometry(f"{self._img_w}x{self._img_h}+{x}+{bottom_anchored_y}")
 
     def _on_release(self, event):
         if self._moved:
             self._reload_image_for_current_monitor()
+            self._save_position()
         else:
+            self._start_click_action()
             self._invoke_activate()
 
     def get_phys_rect(self):

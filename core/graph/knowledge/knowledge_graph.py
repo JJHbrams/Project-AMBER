@@ -66,6 +66,18 @@ def iter_wiki_md_files(vault_path: Path):
         yield p
 
 
+def vault_key(vault_path) -> str:
+    """kg_nodes.vault_path 에 저장·비교할 정규화 키.
+
+    같은 볼트를 가리키는 서로 다른 표기(대소문자, 상대경로, 끝 구분자, 심볼릭)가
+    다른 볼트로 취급되면 sync 가 서로의 노드를 지운다. 저장 시점과 조회 시점이
+    반드시 같은 함수를 거치게 해서 그걸 막는다."""
+    try:
+        return str(Path(vault_path).resolve())
+    except OSError:
+        return str(vault_path)
+
+
 # ── 스키마 초기화 ─────────────────────────────────────────
 
 KG_SCHEMA = """
@@ -110,6 +122,29 @@ def initialize_kg_tables():
         cols = [r[1] for r in conn.execute("PRAGMA table_info(kg_nodes)").fetchall()]
         if "source_mtime" not in cols:
             conn.execute("ALTER TABLE kg_nodes ADD COLUMN source_mtime REAL NOT NULL DEFAULT 0")
+
+        # 마이그레이션: vault_path 정규화 + 빈 값 backfill.
+        # 다중 볼트에서 prune/증분판단이 vault_path 로 필터링되므로, 표기가 어긋난
+        # 값이나 빈 값이 남아 있으면 그 노드는 영구히 어느 볼트에도 속하지 않게 된다.
+        raw_vaults = [
+            r[0] for r in conn.execute(
+                "SELECT DISTINCT vault_path FROM kg_nodes WHERE vault_path != ''"
+            ).fetchall()
+        ]
+        for raw in raw_vaults:
+            norm = vault_key(raw)
+            if norm != raw:
+                conn.execute(
+                    "UPDATE kg_nodes SET vault_path=? WHERE vault_path=?", (norm, raw)
+                )
+        # 볼트가 하나뿐인 기존 DB 라면 vault_path 가 비어 있는 노드는 그 볼트 소속이다.
+        # 볼트가 여럿이면 판별할 수 없으므로 손대지 않는다.
+        normalized = {vault_key(r) for r in raw_vaults}
+        if len(normalized) == 1:
+            conn.execute(
+                "UPDATE kg_nodes SET vault_path=? WHERE vault_path=''",
+                (next(iter(normalized)),),
+            )
     conn.close()
 
 
@@ -231,9 +266,15 @@ class KnowledgeGraph:
         return nid
 
     def get_path_mtimes(self, vault_path: Path) -> dict[str, float]:
-        """rel_path -> source_mtime 매핑을 한 번의 쿼리로 반환한다 (증분 sync 판단용)."""
+        """rel_path -> source_mtime 매핑을 한 번의 쿼리로 반환한다 (증분 sync 판단용).
+
+        vault_path 로 범위를 좁힌다 — 볼트가 여럿일 때 상대경로는 볼트 간에 겹칠 수
+        있어서, 섞으면 다른 볼트의 mtime 을 보고 "안 바뀐 파일"로 오판해 sync 를 건너뛴다."""
         conn = get_connection()
-        rows = conn.execute("SELECT path, source_mtime FROM kg_nodes WHERE path != ''").fetchall()
+        rows = conn.execute(
+            "SELECT path, source_mtime FROM kg_nodes WHERE path != '' AND vault_path = ?",
+            (vault_key(vault_path),),
+        ).fetchall()
         conn.close()
         return {r[0]: (r[1] or 0.0) for r in rows}
 
@@ -258,9 +299,14 @@ class KnowledgeGraph:
 
     def prune_missing(self, vault_path: Path) -> list[str]:
         """path가 더 이상 디스크에 없는 노드를 DB에서 제거 (파일 이동/삭제 후 고아 노드 정리).
-        vault_path는 sync_file에 넘긴 것과 동일한 루트(보통 docs/)여야 한다."""
+        vault_path는 sync_file에 넘긴 것과 동일한 루트(보통 docs/)여야 한다.
+
+        해당 볼트에 속한 노드만 검사한다 — 필터가 없으면 볼트 A 를 sync 할 때 볼트 B
+        노드의 상대경로를 A 기준으로 확인하고 없다는 이유로 전부 지워버린다."""
         conn = get_connection()
-        rows = conn.execute("SELECT id, path FROM kg_nodes").fetchall()
+        rows = conn.execute(
+            "SELECT id, path FROM kg_nodes WHERE vault_path = ?", (vault_key(vault_path),)
+        ).fetchall()
         conn.close()
         pruned = []
         for row in rows:
@@ -461,7 +507,7 @@ class KnowledgeGraph:
             tags=parsed["tags"],
             summary=parsed["summary"],
             path=rel_path,
-            vault_path=str(vault_path),
+            vault_path=vault_key(vault_path),
             node_id=parsed["id"],
             source_mtime=source_mtime,
         )
@@ -502,8 +548,14 @@ class KnowledgeGraph:
                         tuple(parsed_by_from_id.keys()),
                     )
             else:
-                # 기존 자동 links 엣지 제거 (수동 엣지는 유지)
-                conn.execute("DELETE FROM kg_edges WHERE rel_type='links'")
+                # 기존 자동 links 엣지 제거 (수동 엣지는 유지).
+                # 이 볼트에 속한 노드에서 나가는 것만 — 전체를 지우면 다른 볼트의
+                # 링크가 사라지고, 그쪽을 다시 sync 할 때까지 복구되지 않는다.
+                conn.execute(
+                    """DELETE FROM kg_edges WHERE rel_type='links' AND from_id IN
+                       (SELECT id FROM kg_nodes WHERE vault_path = ?)""",
+                    (vault_key(vault_path),),
+                )
         conn.close()
 
         for from_id, parsed in parsed_by_from_id.items():

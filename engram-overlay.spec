@@ -32,6 +32,28 @@ def _collect_tcl_tk() -> list[tuple[str, str]]:
 _tcl_tk_datas = _collect_tcl_tk()
 
 
+def _collect_tk_python_runtime() -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:
+    """Collect tkinter even when PyInstaller's isolated Tcl probe is unreliable.
+
+    Conda's regular Python process can load Tk while PyInstaller's isolated
+    helper fails to source init.tcl.  The standard hook then suppresses the
+    otherwise valid tkinter package.  We already collect Tcl/Tk scripts above;
+    pair them explicitly with the stdlib package and extension module.
+    """
+    datas: list[tuple[str, str]] = []
+    binaries: list[tuple[str, str]] = []
+    package = Path(sys.prefix) / 'Lib' / 'tkinter'
+    extension = Path(sys.prefix) / 'DLLs' / '_tkinter.pyd'
+    if package.is_dir():
+        datas.append((str(package), 'tkinter'))
+    if extension.is_file():
+        binaries.append((str(extension), '.'))
+    return datas, binaries
+
+
+_tk_python_datas, _tk_python_binaries = _collect_tk_python_runtime()
+
+
 def _collect_character_datas() -> list[tuple[str, str]]:
     """Collect runtime character assets while skipping editor lock files."""
     root = Path("resource") / "character"
@@ -90,7 +112,7 @@ a = Analysis(
     ['engram_overlay_entry.py'],
     # scripts/kg 를 추가해 멀티콜 백엔드용 kg_watcher 를 top-level 모듈로 수집한다.
     pathex=['scripts\\kg'],
-    binaries=[*_streamlit_binaries, *_mcp_binaries],
+    binaries=[*_streamlit_binaries, *_mcp_binaries, *_tk_python_binaries],
     datas=[
         ('resource\\icon.png', 'resource'),
         ('resource\\overlay.png', 'resource'),
@@ -106,11 +128,12 @@ a = Analysis(
         *_streamlit_datas,
         *_mcp_datas,
         *_tcl_tk_datas,
+        *_tk_python_datas,
     ],
     hiddenimports=['core.context.context_builder', 'core.storage.db', 'core.identity', 'core.memory', 'core.context.directives', 'core.identity.reflection', 'core.identity.curiosity', 'core.common.sanitizer', 'core.memory.bus', 'core.config.runtime_config', 'core.config.remote_tokens', 'core.graph.semantic', 'core.graph.semantic.stm_promoter', 'core.install.bootstrap', 'core.install.model_manifest', 'core.observability.activity', 'core.context.project_scope', 'core.dashboard.app', 'discord_bot', 'discord_bot.bot', 'tkinterweb', 'tkinterweb_tkhtml', 'mcp_server', 'kg_watcher', 'scripts.kg.kg_lint', *_streamlit_hiddenimports, *_mcp_hiddenimports],
     hookspath=[],
     hooksconfig={},
-    runtime_hooks=[],
+    runtime_hooks=['installer\\pyi_rth_engram_tk.py'],
     excludes=[],
     # one-dir 배포에서 지연 import 모듈을 PYZ(zlib)에서 읽다 실패하는 환경을 피한다.
     noarchive=True,

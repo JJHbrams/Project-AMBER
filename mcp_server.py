@@ -57,12 +57,16 @@ from core.tutorial import (
 )
 from core.context.directives import (
     add_directive,
+    get_directive,
     get_directives,
+    list_directive_policy_audit,
+    preflight_directives,
     update_directive,
     remove_directive,
 )
 from core.observability.activity import log_activity, get_recent_activities, render_activity_for_reflection
 from core.integrations.copilot_bridge import ask_copilot
+from core.integrations.git_policy_hook import ensure_repo_policy
 from core.memory.bus import memory_bus
 from core.context.project_scope import resolve_scope_key, cwd_is_foreign, get_global_scope_key
 
@@ -699,6 +703,10 @@ async def engram_get_context_once(
     같은 caller/scope/project/cwd 조합에서 재호출되면 짧은 상태 문자열만 반환하여
     반복 토큰 소모를 줄입니다. 강제 새로고침이 필요하면 engram_get_context를 직접 호출하세요.
     """
+    policy_result = ensure_repo_policy(cwd or os.getcwd())
+    if policy_result.get("ok") is False:
+        logging.getLogger(__name__).warning("repo policy bootstrap 실패: %s", policy_result)
+
     session_fingerprint = _context_session_fingerprint(ctx)
     cache_key = _build_context_once_key(
         caller,
@@ -1394,6 +1402,15 @@ def engram_dismiss_curiosity(curiosity_id: int) -> dict:
 # ── Directives ────────────────────────────────────────────
 
 
+def _parse_optional_json_param(raw: str, *, expect: type, field_name: str):
+    if not raw.strip():
+        return None
+    value = json.loads(raw)
+    if not isinstance(value, expect):
+        raise ValueError(f"{field_name} must decode to {expect.__name__}")
+    return value
+
+
 @engramMCP.tool()
 def engram_add_directive(
     key: str,
@@ -1402,6 +1419,11 @@ def engram_add_directive(
     scope: str = "all",
     priority: int = 0,
     trigger_type: str = "always",
+    enforcement_level: str = "",
+    trigger_data_json: str = "",
+    workflow_skill_id: str = "",
+    guard_id: str = "",
+    legacy_migration_markers_json: str = "",
 ) -> dict:
     """지속적 운영 지침을 등록합니다. key가 이미 존재하면 덮어씁니다.
     - key: 고유 식별자 (예: 'doc-management')
@@ -1410,8 +1432,32 @@ def engram_add_directive(
     - scope: 적용 대상 ('all', 'copilot-cli', 'claude-code')
     - priority: 높을수록 먼저 표시 (기본 0)
     - trigger_type: 주입 조건 ('always' | 'wiki' | 'code' | 'git' | 'reflection')
-      'always' = 항상 주입, 나머지 = user_query에 해당 키워드가 있을 때만 주입"""
-    result = add_directive(key, content, source, scope, priority, trigger_type)
+      'always' = 항상 주입, 나머지 = user_query에 해당 키워드가 있을 때만 주입
+    - enforcement_level: 'advisory' | 'workflow' | 'blocking'
+    - trigger_data_json: structured trigger JSON object
+    - workflow_skill_id / guard_id: structured policy 식별자
+    - legacy_migration_markers_json: migration marker JSON string array"""
+    result = add_directive(
+        key,
+        content,
+        source,
+        scope,
+        priority,
+        trigger_type,
+        enforcement_level=enforcement_level if enforcement_level else None,
+        trigger_data=_parse_optional_json_param(
+            trigger_data_json,
+            expect=dict,
+            field_name="trigger_data_json",
+        ),
+        workflow_skill_id=workflow_skill_id if workflow_skill_id else None,
+        guard_id=guard_id if guard_id else None,
+        legacy_migration_markers=_parse_optional_json_param(
+            legacy_migration_markers_json,
+            expect=list,
+            field_name="legacy_migration_markers_json",
+        ),
+    )
     return {"status": "directive_added", **result}
 
 
@@ -1431,10 +1477,17 @@ def engram_update_directive(
     priority: int = -1,
     active: bool = True,
     trigger_type: str = "",
+    enforcement_level: str = "",
+    trigger_data_json: str = "",
+    workflow_skill_id: str | None = None,
+    guard_id: str | None = None,
+    legacy_migration_markers_json: str = "",
 ) -> dict:
     """기존 지침을 수정합니다. 전달된 필드만 업데이트됩니다.
     비활성화하려면 active=False.
-    trigger_type: 'always' | 'wiki' | 'code' | 'git' | 'reflection'"""
+    trigger_type: 'always' | 'wiki' | 'code' | 'git' | 'reflection'
+    enforcement_level: 'advisory' | 'workflow' | 'blocking'
+    workflow_skill_id / guard_id 는 빈 문자열("")로 명시하면 기존 값을 지웁니다."""
     updated = update_directive(
         key,
         content=content if content else None,
@@ -1442,8 +1495,79 @@ def engram_update_directive(
         priority=priority if priority >= 0 else None,
         active=active,
         trigger_type=trigger_type if trigger_type else None,
+        enforcement_level=enforcement_level if enforcement_level else None,
+        trigger_data=_parse_optional_json_param(
+            trigger_data_json,
+            expect=dict,
+            field_name="trigger_data_json",
+        ),
+        workflow_skill_id=workflow_skill_id,
+        guard_id=guard_id,
+        legacy_migration_markers=_parse_optional_json_param(
+            legacy_migration_markers_json,
+            expect=list,
+            field_name="legacy_migration_markers_json",
+        ),
     )
-    return {"status": "directive_updated" if updated else "not_found", "key": key}
+    return {
+        "status": "directive_updated" if updated else "not_found",
+        "key": key,
+        "directive": get_directive(key) if updated else None,
+    }
+
+
+@engramMCP.tool()
+def engram_preflight_directives(
+    caller: str = "all",
+    user_query: str = "",
+    action: str = "",
+    scope_key: str = "",
+    project_key: str = "",
+    persist_audit: bool = True,
+    cwd: str = "",
+    action_metadata_json: str = "",
+    chore_intent_json: str = "",
+    independent_task_context_json: str = "",
+    execute_guards: bool = False,
+) -> dict:
+    """현재 컨텍스트에서 directive policy를 사전 평가합니다.
+    execute_guards=False면 기존 report-only 결과를 유지합니다.
+    execute_guards=True면 recognized blocking guard를 실행하고 decision/final_status를 함께 반환합니다.
+    action_metadata_json 예시: {"mode":"repo-write","tags":["new-independent-task"]}
+    chore_intent_json 예시: {"is_chore": true, "summary": "dependency bump"}
+    independent_task_context_json 예시:
+      {"requested": true, "existing_changes_owner": "other-task"}"""
+    return preflight_directives(
+        caller=caller,
+        user_query=user_query,
+        action=action,
+        scope_key=scope_key,
+        project_key=project_key,
+        persist_audit=persist_audit,
+        cwd=cwd,
+        action_metadata=_parse_optional_json_param(
+            action_metadata_json,
+            expect=dict,
+            field_name="action_metadata_json",
+        ),
+        chore_intent=_parse_optional_json_param(
+            chore_intent_json,
+            expect=dict,
+            field_name="chore_intent_json",
+        ),
+        independent_task_context=_parse_optional_json_param(
+            independent_task_context_json,
+            expect=dict,
+            field_name="independent_task_context_json",
+        ),
+        execute_guards=execute_guards,
+    )
+
+
+@engramMCP.tool()
+def engram_list_directive_policy_audit(limit: int = 20) -> list:
+    """최근 directive policy preflight audit 기록을 조회합니다."""
+    return list_directive_policy_audit(limit)
 
 
 @engramMCP.tool()

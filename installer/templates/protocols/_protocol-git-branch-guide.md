@@ -8,7 +8,7 @@ tags:
   - branch
 created: __DATE__
 updated: __DATE__
-summary: main/dev 직접 커밋 금지 정책. feat/fix/refactor prefix 브랜치 생성 규칙 및 병합 절차.
+summary: 단순 유지보수 예외와 main/dev 보호 정책. feat/fix/refactor prefix 브랜치 및 worktree 사용 기준.
 ---
 
 # Git 브랜치 관리 규칙
@@ -17,8 +17,11 @@ summary: main/dev 직접 커밋 금지 정책. feat/fix/refactor prefix 브랜�
 
 ## 기본 규칙
 
-1. `main`/`master`, `dev` 브랜치에 **직접 커밋 금지**.
-   - 예외: chore (의존성 업데이트, 문서 오탈자 등 단순 유지보수)
+1. `main`/`master`, `dev` 브랜치에 **기능·코드 변경 직접 커밋 금지**.
+   - 예외: 아래 범위의 단순 유지보수는 현재 브랜치에서 처리한다.
+     - `docs/**`, 루트 `README*.md`, `CHANGELOG.md`의 오탈자·표현·링크 수정
+     - 런타임 동작, 테스트, 빌드, 의존성, CI, 배포, agent 정책에 영향이 없는 소규모 chore
+   - `AGENTS.md`, `.github/**`, workflow/skill, 설정·의존성·빌드 파일은 이름이 docs/chore여도 예외가 아니다.
 
 2. 새 작업 시작 시 작업 성격을 반영한 브랜치 생성:
 
@@ -27,7 +30,7 @@ summary: main/dev 직접 커밋 금지 정책. feat/fix/refactor prefix 브랜�
    | `feat/`     | 신규 기능 |
    | `fix/`      | 버그 수정 |
    | `refactor/` | 리팩토링  |
-   | `docs/`     | 문서 작업 |
+   | `docs/`     | 구조 변경·대규모 작성 등 단순 유지보수를 넘는 문서 작업 |
    - 기준 브랜치: `dev` (또는 명시된 브랜치)
 
 3. 현재 브랜치와 성격이 크게 다른 작업 → 파생 브랜치 생성:
@@ -39,13 +42,13 @@ summary: main/dev 직접 커밋 금지 정책. feat/fix/refactor prefix 브랜�
 ## 실행 절차
 
 1. 파일을 수정하기 전에 현재 브랜치와 worktree 상태를 확인한다.
-2. 보호 브랜치에서 chore가 아닌 작업이면 변경 전에 작업 브랜치를 생성한다.
+2. 보호 브랜치에서 단순 유지보수가 아닌 작업이면 변경 전에 작업 브랜치를 생성한다.
 3. 기존 미커밋 변경은 삭제하거나 자동 stash하지 않고 새 브랜치로 그대로 승계한다.
 4. 완료 후 검증과 activity 기록은 `engram-task-workflow`에서 처리한다.
 
 ## Worktree 사용 기준
 
-다음 상황에서는 단순 브랜치 전환 대신 독립 branch+worktree를 사용한다.
+worktree는 작업 종류가 아니라 격리가 실제로 필요한지를 기준으로 사용한다. 다음 상황에서는 단순 브랜치 전환 대신 독립 branch+worktree를 사용한다.
 
 - 여러 에이전트가 독립 작업을 병렬 수행할 때
 - 현재 worktree에 다른 작업의 미커밋 변경이 있을 때

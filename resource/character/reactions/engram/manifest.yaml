@@ -1,0 +1,108 @@
+schema_version: 1
+id: engram
+display_name: Engram Reactions
+sprite_sheet: states.png
+chroma_key: "#00FF00"
+crop_y_offset_px: 32
+grid:
+  columns: 6
+  rows: 4
+  cell_width: 434
+  cell_height: 408
+# The sheet is the character body.  Indices are zero-based, left-to-right.
+states:
+  default:
+    {
+      frames: [18],
+      selection: fixed,
+      frame_ms: 900,
+      transform: none,
+      vfx: none,
+    }
+  idle:
+    {
+      frames: [18, 19, 20, 21, 22],
+      selection: shuffle,
+      frame_ms: 7200,
+      transform: none,
+      vfx: twinkle,
+    }
+  hover:
+    {
+      frames: [17],
+      selection: fixed,
+      frame_ms: 640,
+      transform: hflip_squash,
+      vfx: none,
+    }
+  click:
+    {
+      frames: [9, 10, 11],
+      selection: random,
+      frame_ms: 1000,
+      dwell_ms: 1000,
+      transform: none,
+      vfx: sparkle_burst,
+    }
+  input:
+    {
+      frames: [12, 14],
+      selection: random,
+      frame_ms: 1600,
+      dwell_ms: 1600,
+      transform: none,
+      vfx: none,
+    }
+  generating:
+    {
+      frames: [14],
+      selection: fixed,
+      frame_ms: 700,
+      transform: none,
+      vfx: none,
+    }
+  search:
+    {
+      frames: [0, 1, 2, 3, 4],
+      selection: sequence,
+      frame_ms: 260,
+      transform: none,
+      vfx: none,
+    }
+  thought:
+    {
+      frames: [5, 7, 12, 13, 14],
+      selection: random,
+      frame_ms: 720,
+      transform: none,
+      vfx: none,
+    }
+  memory:
+    { frames: [6], selection: fixed, frame_ms: 700, transform: none, vfx: none }
+  success:
+    {
+      frames: [16],
+      selection: fixed,
+      frame_ms: 2400,
+      dwell_ms: 2400,
+      transform: none,
+      vfx: none,
+    }
+  provider_error:
+    {
+      frames: [8],
+      selection: fixed,
+      frame_ms: 650,
+      dwell_ms: 1800,
+      transform: none,
+      vfx: none,
+    }
+  error:
+    {
+      frames: [15],
+      selection: fixed,
+      frame_ms: 650,
+      dwell_ms: 1800,
+      transform: none,
+      vfx: none,
+    }

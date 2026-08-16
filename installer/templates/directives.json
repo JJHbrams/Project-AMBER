@@ -4,6 +4,10 @@
     "scope": "all",
     "priority": 20,
     "trigger_type": "always",
+    "enforcement_level": "advisory",
+    "trigger_data": {
+      "match": "always"
+    },
     "content": "페르소나는 프로젝트가 아니라 '나'에 속한다. 어느 리포에서 작업하든 — 그 프로젝트에 별도 CLAUDE.md가 있어도 — 항상 DB의 persona(voice/traits/formality)를 따라 응답한다. CLAUDE.md는 *무엇을 어떻게 작업할지*를 규정하고 페르소나는 *누가 말하는지*를 규정하므로 서로 충돌하지 않는다. 페르소나를 끄려면 사용자가 명시적으로 요청해야 한다."
   },
   {
@@ -11,6 +15,10 @@
     "scope": "all",
     "priority": 10,
     "trigger_type": "always",
+    "enforcement_level": "advisory",
+    "trigger_data": {
+      "match": "always"
+    },
     "content": "프로젝트 경로, 파일 위치, 관련 컨텍스트를 찾을 때 **반드시 KG/wiki 먼저** 탐색할 것.\n순서: kg_semantic_search → kg_search → 파일시스템(glob/grep) → 웹검색\n파일시스템 직접 탐색은 KG에서 찾지 못했을 때만 fallback으로 사용."
   },
   {
@@ -18,13 +26,147 @@
     "scope": "all",
     "priority": 12,
     "trigger_type": "always",
+    "enforcement_level": "workflow",
+    "workflow_skill_id": "engram-task-workflow",
+    "trigger_data": {
+      "actions_any": [
+        "build",
+        "bugfix",
+        "code",
+        "edit",
+        "file",
+        "git",
+        "refactor",
+        "test"
+      ],
+      "action_keywords_any": [
+        "branch",
+        "build",
+        "checkout",
+        "code",
+        "commit",
+        "edit",
+        "file",
+        "fix",
+        "git",
+        "merge",
+        "rebase",
+        "refactor",
+        "test"
+      ],
+      "query_keywords_any": [
+        "branch",
+        "build",
+        "bug",
+        "checkout",
+        "code",
+        "commit",
+        "edit",
+        "file",
+        "fix",
+        "git",
+        "import",
+        "merge",
+        "module",
+        "push",
+        "refactor",
+        "test",
+        "구현",
+        "디버깅",
+        "리팩토링",
+        "버그",
+        "브랜치",
+        "빌드",
+        "수정",
+        "커밋",
+        "코드",
+        "테스트",
+        "파일"
+      ]
+    },
     "content": "코드·파일 수정, 버그 수정, 리팩토링, 빌드·테스트, Git 작업을 시작할 때 반드시 `engram-task-workflow` skill을 먼저 실행한다. 작업 전 Wiki 선행 기록과 현재 브랜치를 확인하고, 완료 후 activity를 기록한다."
+  },
+  {
+    "key": "protected-branch-guard",
+    "scope": "all",
+    "priority": 14,
+    "trigger_type": "always",
+    "enforcement_level": "blocking",
+    "guard_id": "protected-branch",
+    "trigger_data": {
+      "match": "always",
+      "action_modes_any": [
+        "repo-write"
+      ],
+      "render_in_prompt": false
+    },
+    "content": "저장소를 변경하는 작업에는 `protected-branch` guard를 적용한다. main/master/dev 직접 변경은 structured chore intent가 명시된 경우에만 허용한다."
+  },
+  {
+    "key": "dirty-worktree-guard",
+    "scope": "all",
+    "priority": 13,
+    "trigger_type": "always",
+    "enforcement_level": "blocking",
+    "guard_id": "dirty-worktree",
+    "trigger_data": {
+      "match": "always",
+      "action_modes_any": [
+        "repo-write"
+      ],
+      "action_tags_any": [
+        "new-independent-task"
+      ],
+      "render_in_prompt": false
+    },
+    "content": "새 독립 작업을 시작할 때는 `dirty-worktree` guard를 적용한다. dirty 변경이 다른 작업 소유로 명시된 worktree에서는 새 독립 task를 시작하지 않는다."
   },
   {
     "key": "wiki-workflow-dispatch",
     "scope": "all",
     "priority": 10,
     "trigger_type": "always",
+    "enforcement_level": "workflow",
+    "workflow_skill_id": "engram-wiki-workflow",
+    "trigger_data": {
+      "actions_any": [
+        "design",
+        "documentation",
+        "note",
+        "research",
+        "wiki"
+      ],
+      "action_keywords_any": [
+        "design",
+        "document",
+        "note",
+        "research",
+        "sync",
+        "wiki",
+        "write"
+      ],
+      "query_keywords_any": [
+        "design",
+        "document",
+        "note",
+        "research",
+        "wiki",
+        "write",
+        "기록",
+        "노트",
+        "도구",
+        "리서치",
+        "문서",
+        "설계",
+        "연구",
+        "위키",
+        "작성",
+        "정리"
+      ],
+      "legacy_trigger_types": [
+        "wiki"
+      ]
+    },
     "content": "의미 있는 기술 리서치, 설계 결정, 새 도구 파악, Wiki 작성·수정 요청에는 반드시 `engram-wiki-workflow` skill을 실행한다. skill이 `wiki-guide` 확인부터 작성·동기화·lint까지 담당하며, 단순 조회에는 실행하지 않는다."
   },
   {
@@ -32,6 +174,22 @@
     "scope": "all",
     "priority": 8,
     "trigger_type": "always",
+    "enforcement_level": "advisory",
+    "trigger_data": {
+      "actions_any": [
+        "code",
+        "python"
+      ],
+      "query_keywords_any": [
+        "import",
+        "python",
+        "구현",
+        "모듈",
+        "수정",
+        "코드",
+        "파이썬"
+      ]
+    },
     "content": "Python 코드 작성 시 import는 반드시 파일 최상단에. if/else 블록 안, 비즈니스 로직 중간 inline import 금지. try/except ImportError 폴백은 허용. 함수 내부 import는 순환 참조 회피 등 진짜 필요한 경우만."
   },
   {
@@ -39,6 +197,38 @@
     "scope": "all",
     "priority": 8,
     "trigger_type": "always",
+    "enforcement_level": "workflow",
+    "workflow_skill_id": "engram-close-session",
+    "trigger_data": {
+      "actions_any": [
+        "cleanup",
+        "close",
+        "reflection",
+        "session"
+      ],
+      "action_keywords_any": [
+        "/reflect",
+        "cleanup",
+        "close_session",
+        "reflect",
+        "session"
+      ],
+      "query_keywords_any": [
+        "/reflect",
+        "reflect",
+        "끝",
+        "마무리",
+        "반성",
+        "세션",
+        "세션 종료",
+        "수고",
+        "정리",
+        "종료"
+      ],
+      "legacy_trigger_types": [
+        "reflection"
+      ]
+    },
     "content": "사용자가 세션 종료·정리·반성(`/reflect`)을 요청하면 반드시 `engram-close-session` skill을 실행한다. activity 기록, 미해결 curiosity 확인, narrative 판단, `engram_close_session` 호출을 임의로 생략하지 않는다."
   }
 ]

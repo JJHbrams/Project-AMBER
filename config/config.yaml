@@ -40,7 +40,8 @@ memory:
     idle_seconds: 1800
     min_user_turns: 5
     # 사용자 timezone은 OS local timezone을 사용한다.
-    external_daily_dir: "~/vault623/daily_notes"
+    # 선택값. 비어 있으면 Engram Wiki daily note만 기록한다.
+    external_daily_dir: ""
 
   long_term:
     search_limit: 2
@@ -128,6 +129,10 @@ directives:
       - task-workflow-dispatch
       - wiki-workflow-dispatch
       - session-lifecycle-workflow
+  policy:
+    audit_default_limit: 20
+    audit_max_limit: 100
+    guidance_level: "warn"  # off | warn | enforce_agents
 
 copilot:
   model: "claude-sonnet-4.6"

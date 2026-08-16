@@ -9,7 +9,7 @@ mcp>=1.0.0,<2.0.0               # MCP 서버 (Claude Code 연동, FastMCP 1.x AP
 # sqlite3, json, re, os, sys, pathlib
 
 # 빌드 도구
-pyinstaller>=6.0.0              # exe 빌드 (overlay.debug.bat)
+pyinstaller==6.21.0             # 6.22.1은 conda Tcl/Tk 탐지 회귀로 tkinter를 누락함
 
 # 윈도우 오버레이
 pillow>=10.0.0                  # 이미지 처리 (PNG 투명도)

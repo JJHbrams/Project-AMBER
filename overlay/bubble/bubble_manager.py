@@ -23,6 +23,7 @@ from typing import Callable
 from overlay.bubble import events, geometry, shapes
 from overlay.bubble.bubble_window import BubbleWindow
 from overlay.chat_window import terminal_font_size
+from overlay.config import get_overlay_state, update_overlay_state
 
 FONT_FAMILY = "Noto Sans KR Medium"
 
@@ -124,6 +125,7 @@ class BubbleManager:
         # 생각풍선은 꼬리가 항상 "down"(하단 중앙)이므로 anchor는 항상 하단-중앙 코너.
         self._thought_manual_pos: "tuple[float, float] | None" = None
         self._thought_block_id: "str | None" = None  # speech와 동일한 이유
+        self._restore_manual_positions()
 
         # 에코(사용자 메시지) 슬롯 — 입력창을 제출한 자리에 사용자가 방금 보낸 말을
         # 그대로 남긴다(응답 말풍선과 완전히 별개). 일정 시간(echo_dwell_ms) 유지 후
@@ -142,6 +144,33 @@ class BubbleManager:
     def _set_cfg(self, cfg_bubble: dict) -> None:
         self._cfg = {**_DEFAULTS, **(cfg_bubble or {})}
         self._theme = {**shapes.DEFAULT_THEME, **(self._cfg.get("theme") or {})}
+
+    def _restore_manual_positions(self) -> None:
+        saved = get_overlay_state().get("bubble_positions", {})
+        if not isinstance(saved, dict):
+            return
+        speech = saved.get("speech", {})
+        thought = saved.get("thought", {})
+        if isinstance(speech, dict):
+            try:
+                self._speech_manual_pos = (float(speech["x"]), float(speech["y"]))
+                self._speech_tail_side = speech.get("tail_side") if speech.get("tail_side") in {"left", "right"} else "left"
+            except (KeyError, TypeError, ValueError):
+                pass
+        if isinstance(thought, dict):
+            try:
+                self._thought_manual_pos = (float(thought["x"]), float(thought["y"]))
+            except (KeyError, TypeError, ValueError):
+                pass
+
+    def _save_manual_positions(self) -> None:
+        def update(state: dict) -> None:
+            values = state.setdefault("bubble_positions", {})
+            if self._speech_manual_pos is not None:
+                values["speech"] = {"x": self._speech_manual_pos[0], "y": self._speech_manual_pos[1], "tail_side": self._speech_tail_side}
+            if self._thought_manual_pos is not None:
+                values["thought"] = {"x": self._thought_manual_pos[0], "y": self._thought_manual_pos[1]}
+        update_overlay_state(update)
 
     # ── 공개 API ──────────────────────────────────────────────────────
 
@@ -352,14 +381,11 @@ class BubbleManager:
         self._clear_nudge_state()
         self._last_speech_text = ""
         self._last_was_nudge = False
-        self._speech_manual_pos = None
-        self._speech_tail_side = "left"
         self._speech_block_id = None
         self._thought.hide()
         self._thought_text = ""
         self._thought_dismissed = False
         self._thought_rect = None
-        self._thought_manual_pos = None
         self._thought_block_id = None
         self._echo.hide()
         self._echo_text = ""
@@ -583,6 +609,7 @@ class BubbleManager:
         anchor_y = new_y + h
         self._speech_manual_pos = ((anchor_x - char_x) / char_w, (anchor_y - char_y) / char_h)
         self._speech.set_grip_corner("top-left" if tail_side == "right" else "top-right")
+        self._save_manual_positions()
         self._render_speech()  # 꼬리가 바뀌었을 수 있으니 다시 그려서 반영 + rect 갱신
 
     def is_idle(self) -> bool:
@@ -739,6 +766,7 @@ class BubbleManager:
         anchor_x = new_x + w / 2
         anchor_y = new_y + h
         self._thought_manual_pos = ((anchor_x - char_x) / char_w, (anchor_y - char_y) / char_h)
+        self._save_manual_positions()
         self._render_thought()
 
     def _handle_text_event(self, ev: dict) -> None:

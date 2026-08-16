@@ -6,9 +6,12 @@
 
 from __future__ import annotations
 
+import ctypes
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 import tkinter as tk
 import tkinter.ttk as ttk
 import webbrowser
@@ -17,6 +20,7 @@ from tkinter import colorchooser, filedialog, messagebox
 from typing import Callable
 
 import yaml
+from PIL import Image, ImageGrab
 
 from overlay.bubble import shapes
 from overlay.config import (
@@ -28,13 +32,23 @@ from overlay.config import (
     normalize_chat_mode,
     normalize_cli_provider,
     normalize_permission_level,
+    resolve_editable_overlay_path,
+    resolve_path,
 )
-from core.identity import set_persona_baseline
+from overlay.character_assets import (
+    USER_REACTION_PACKS_DIR,
+    normalize_sprite_transform,
+    normalize_sprite_vfx,
+    resolve_reaction_pack,
+)
+from core.identity import get_persona, set_persona_baseline
+from core.config.runtime_config import normalize_policy_guidance_level
 from core.tutorial import complete_tutorial_step, has_user_persona_override, reset_tutorial_state
 
 _PROVIDER_OPTIONS = [
     "copilot",
     "gemini",
+    "codex",
     "claude-code",
     "claude-code(ollama)",
     "ollama",
@@ -42,6 +56,7 @@ _PROVIDER_OPTIONS = [
 _PROVIDER_DISPLAY_TO_VALUE = {
     "copilot": "copilot",
     "gemini": "gemini",
+    "codex": "codex",
     "claude-code": "claude-code",
     "claude-code(ollama)": "claude-code-ollama",
     "ollama": "ollama",
@@ -49,9 +64,19 @@ _PROVIDER_DISPLAY_TO_VALUE = {
 _PROVIDER_VALUE_TO_DISPLAY = {
     "copilot": "copilot",
     "gemini": "gemini",
+    "codex": "codex",
     "claude-code": "claude-code",
     "claude-code-ollama": "claude-code(ollama)",
     "ollama": "ollama",
+}
+_POLICY_LEVEL_OPTIONS = ["끔", "경고만", "Agent 강제 · 사람 경고 (권장)"]
+_POLICY_LEVEL_DISPLAY_TO_VALUE = {
+    "끔": "off",
+    "경고만": "warn",
+    "Agent 강제 · 사람 경고 (권장)": "enforce_agents",
+}
+_POLICY_LEVEL_VALUE_TO_DISPLAY = {
+    value: display for display, value in _POLICY_LEVEL_DISPLAY_TO_VALUE.items()
 }
 _CHAT_MODE_OPTIONS = ["터미널 (TUI)", "말풍선 (실험적, 준비 중)"]
 _CHAT_MODE_DISPLAY_TO_VALUE = {
@@ -83,6 +108,16 @@ _THOUGHT_DETAIL_VALUE_TO_DISPLAY = {
     "full": "상세 — 추론 내용 표시 (CLI가 줄 때만)",
     "brief": "간략 — 상태 문구만",
 }
+
+_CHARACTER_SOURCE_MODE_DISPLAY_TO_VALUE = {
+    "스프라이트 그리드": "sprite_grid",
+    "단일 이미지": "static",
+    "애니메이션 폴더": "sequence",
+}
+_CHARACTER_SOURCE_MODE_VALUE_TO_DISPLAY = {
+    value: display for display, value in _CHARACTER_SOURCE_MODE_DISPLAY_TO_VALUE.items()
+}
+_CHARACTER_SOURCE_MODE_OPTIONS = list(_CHARACTER_SOURCE_MODE_DISPLAY_TO_VALUE)
 
 _THEME_COLOR_ROWS = [
     ("speech_bg", "대화풍선 배경"),
@@ -253,6 +288,191 @@ def _nested_get(d: dict, keys: list[str], default=None):
     return d if d != {} else default
 
 
+def character_height_override_value(height: float, base_height: float) -> float | None:
+    """Keep only values that differ from the distributable base setting."""
+    return height if abs(height - base_height) > 0.001 else None
+
+
+def character_source_mode_to_display(value: object) -> str:
+    """Return the localized GUI label for a persisted character source mode."""
+    return _CHARACTER_SOURCE_MODE_VALUE_TO_DISPLAY.get(str(value or "").strip(), "단일 이미지")
+
+
+def character_source_mode_from_display(value: object) -> str:
+    """Return the persisted source mode for a localized GUI label."""
+    return _CHARACTER_SOURCE_MODE_DISPLAY_TO_VALUE.get(str(value or "").strip(), "static")
+
+
+def _resolve_character_source_path(value: object) -> Path:
+    path = Path(str(value or "").strip()).expanduser()
+    return path if path.is_absolute() else resolve_path(str(path))
+
+
+def validate_sprite_grid(
+    path: object,
+    columns: object,
+    rows: object,
+    cell_width: object,
+    cell_height: object,
+    chroma_key: object,
+) -> tuple[bool, str]:
+    """Validate a user-selected sprite-grid asset without touching configuration files."""
+    try:
+        parsed_columns, parsed_rows = int(columns), int(rows)
+        parsed_width, parsed_height = int(cell_width), int(cell_height)
+        chroma = str(chroma_key or "").strip()
+    except (TypeError, ValueError):
+        return False, "열·행·셀 크기는 양의 정수여야 합니다."
+    if min(parsed_columns, parsed_rows, parsed_width, parsed_height) <= 0:
+        return False, "열·행·셀 크기는 양의 정수여야 합니다."
+    if len(chroma) != 7 or not chroma.startswith("#"):
+        return False, "chroma는 #RRGGBB 형식이어야 합니다."
+    try:
+        int(chroma[1:], 16)
+    except ValueError:
+        return False, "chroma는 #RRGGBB 형식이어야 합니다."
+    image_path = _resolve_character_source_path(path)
+    if not image_path.is_file() or image_path.suffix.lower() != ".png":
+        return False, "스프라이트 그리드는 PNG 파일을 선택해야 합니다."
+    try:
+        with Image.open(image_path) as image:
+            actual_size = image.size
+    except (OSError, ValueError):
+        return False, "스프라이트 PNG를 읽을 수 없습니다."
+    expected_size = (parsed_columns * parsed_width, parsed_rows * parsed_height)
+    if actual_size != expected_size:
+        return False, f"이미지 {actual_size[0]}×{actual_size[1]}와 grid {expected_size[0]}×{expected_size[1]}가 일치하지 않습니다."
+    return True, "유효"
+
+
+def validate_character_source(mode: object, character_path: object, grid_values: tuple[object, object, object, object, object, object]) -> tuple[bool, str]:
+    """Validate the active character-source mode before a settings write."""
+    normalized_mode = str(mode or "").strip()
+    if normalized_mode == "sprite_grid":
+        return validate_sprite_grid(*grid_values)
+    source_path = _resolve_character_source_path(character_path)
+    if normalized_mode == "static":
+        if source_path.is_file() and source_path.suffix.lower() == ".png":
+            return True, "유효"
+        return False, "단일 이미지 모드는 PNG 파일을 선택해야 합니다."
+    if normalized_mode == "sequence":
+        if source_path.is_dir():
+            return True, "유효"
+        return False, "애니메이션 폴더 모드는 폴더를 선택해야 합니다."
+    return False, "알 수 없는 캐릭터 소스 모드입니다."
+
+
+_MANIFEST_SELECTIONS = {"random", "sequence", "sequence_once", "fixed", "shuffle"}
+_MANIFEST_TRANSFORM_OPTIONS = {
+    "없음": "none",
+    "숨쉬기 + 무작위 좌우 반전": "breathe_mirror",
+    "좌우 반전 + 세로 squash": "hflip_squash",
+}
+_MANIFEST_VFX_OPTIONS = {
+    "없음": "none",
+    "은은한 반짝임 (twinkle)": "twinkle",
+    "반짝임 폭발 (sparkle burst)": "sparkle_burst",
+}
+
+
+def manifest_transform_to_display(value: object) -> str:
+    canonical = normalize_sprite_transform(value)
+    return next((label for label, name in _MANIFEST_TRANSFORM_OPTIONS.items() if name == canonical), str(value))
+
+
+def manifest_transform_from_display(value: object) -> str | None:
+    return _MANIFEST_TRANSFORM_OPTIONS.get(str(value), normalize_sprite_transform(value))
+
+
+def manifest_vfx_to_display(value: object) -> str:
+    canonical = normalize_sprite_vfx(value)
+    return next((label for label, name in _MANIFEST_VFX_OPTIONS.items() if name == canonical), str(value))
+
+
+def manifest_vfx_from_display(value: object) -> str | None:
+    return _MANIFEST_VFX_OPTIONS.get(str(value), normalize_sprite_vfx(value))
+
+
+def validate_manifest_state(state: dict, cell_count: int) -> tuple[bool, str]:
+    """Validate editable state fields while leaving unrelated YAML intact."""
+    try:
+        frames = [int(part.strip()) for part in str(state.get("frames", "")).split(",") if part.strip()]
+        frame_ms = int(state.get("frame_ms"))
+        dwell_raw = str(state.get("dwell_ms", "")).strip()
+        dwell_ms = int(dwell_raw) if dwell_raw else None
+    except (TypeError, ValueError):
+        return False, "frames와 timing은 정수여야 합니다."
+    if not frames or any(index < 0 or index >= cell_count for index in frames):
+        return False, f"frames는 0~{max(0, cell_count - 1)} 범위여야 합니다."
+    if frame_ms <= 0 or (dwell_ms is not None and dwell_ms <= 0):
+        return False, "timing은 양수여야 합니다."
+    if (
+        state.get("selection") not in _MANIFEST_SELECTIONS
+        or manifest_transform_from_display(state.get("transform")) is None
+        or manifest_vfx_from_display(state.get("vfx")) is None
+    ):
+        return False, "selection, transform 또는 vfx 값이 허용 범위가 아닙니다."
+    return True, "유효"
+
+
+def ensure_user_reaction_pack(pack_id: object) -> Path:
+    """Make a writable user copy of the active pack; never edit bundled assets."""
+    safe_id = str(pack_id or "").strip()
+    if not safe_id or not all(char.isalnum() or char in "_-" for char in safe_id):
+        raise ValueError("유효한 reaction pack id가 없습니다.")
+    target = USER_REACTION_PACKS_DIR / safe_id
+    manifest = target / "manifest.yaml"
+    if manifest.is_file():
+        return target
+    if target.exists():
+        raise ValueError(f"사용자 pack 디렉토리에 manifest.yaml이 없습니다: {target}")
+    resolved = resolve_reaction_pack(safe_id)
+    if resolved.source == "disabled" or resolved.sprite_sheet is None:
+        raise ValueError("활성 reaction pack을 찾을 수 없습니다.")
+    source = resolved.sprite_sheet.parent
+    target.parent.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix=f".{safe_id}-", dir=str(target.parent)))
+    try:
+        shutil.copytree(source, staging, dirs_exist_ok=True)
+        os.replace(staging, target)
+    finally:
+        if staging.exists():
+            shutil.rmtree(staging)
+    if not manifest.is_file():
+        raise ValueError("reaction pack 복사 후 manifest.yaml을 찾을 수 없습니다.")
+    return target
+
+
+def save_reaction_manifest(pack_id: object, raw: dict) -> Path:
+    root = ensure_user_reaction_pack(pack_id)
+    manifest = root / "manifest.yaml"
+    temporary = manifest.with_suffix(".yaml.tmp")
+    temporary.write_text(yaml.safe_dump(raw, sort_keys=False, allow_unicode=True), encoding="utf-8")
+    os.replace(temporary, manifest)
+    return manifest
+
+
+def open_reaction_manifest(pack_id: object) -> Path:
+    manifest = ensure_user_reaction_pack(pack_id) / "manifest.yaml"
+    os.startfile(str(manifest))
+    return manifest
+
+
+def rgb_to_hex(color: tuple[int, ...]) -> str:
+    """Convert an RGB/RGBA pixel into the canonical settings color format."""
+    red, green, blue = (max(0, min(255, int(channel))) for channel in color[:3])
+    return f"#{red:02X}{green:02X}{blue:02X}"
+
+
+def sample_snapshot_color(snapshot: Image.Image, screen_x: int, screen_y: int, origin: tuple[int, int]) -> str | None:
+    """Read one screen coordinate from a pre-overlay screenshot, or return None."""
+    image_x, image_y = int(screen_x) - origin[0], int(screen_y) - origin[1]
+    if not (0 <= image_x < snapshot.width and 0 <= image_y < snapshot.height):
+        return None
+    pixel = snapshot.convert("RGB").getpixel((image_x, image_y))
+    return rgb_to_hex(pixel)
+
+
 def _is_port_listening(port: int) -> bool:
     # Tk 메인 스레드에서 2초마다 호출되므로 타임아웃을 짧게 둔다.
     # loopback 이라 닫힌 포트는 즉시 RST 가 오고, 이 값은 방화벽이 드롭할 때만 쓰인다.
@@ -389,10 +609,15 @@ class _SettingsWindow:
         self._persona_numeric_vars: dict[str, tk.DoubleVar] = {}
         self._persona_numeric_pin_vars: dict[str, tk.BooleanVar] = {}
         self._persona_numeric_label_vars: dict[str, tk.StringVar] = {}
+        self._persona_numeric_overwrite_btns: dict[str, ttk.Button] = {}
         self._persona_banner_var = tk.StringVar(value="현재 기본 페르소나가 적용되어 있습니다. 커스텀 페르소나를 적용해 보세요.")
         self._autostart_var = tk.BooleanVar()
         self._auto_inject_var = tk.BooleanVar()
+        self._policy_level_var = tk.StringVar(value="경고만")
+        self._policy_status_var = tk.StringVar(value="저장 후 Claude/Codex 적용 상태가 표시됩니다.")
+        self._policy_sync_warnings: list[str] = []
         self._dashboard_enabled_var = tk.BooleanVar()
+        self._external_daily_dir_var = tk.StringVar()
         # 능동 발화(initiative) — 빈도/타이밍 knob 들을 GUI 로 노출.
         self._initiative_enabled_var = tk.BooleanVar()
         self._initiative_idle_min_var = tk.IntVar()      # 유휴 대기(분)
@@ -461,6 +686,7 @@ class _SettingsWindow:
         self.window.protocol("WM_DELETE_WINDOW", self._close)
 
     def _close(self):
+        self._cancel_grid_eyedropper()
         if self._remote_after_id:
             try:
                 self.window.after_cancel(self._remote_after_id)
@@ -475,27 +701,127 @@ class _SettingsWindow:
     def _build_overlay_tab(self, PAD: dict):
         f = self._tab_overlay
 
-        # 캐릭터 소스 (파일 또는 폴더 선택)
-        ttk.Label(f, text="캐릭터:").grid(row=0, column=0, sticky="w", **PAD)
+        # 캐릭터 소스 — 서로 배타적인 세 모드를 한 프레임에 모아 이후 설정 행과 겹치지 않게 둔다.
+        source_box = ttk.LabelFrame(f, text="캐릭터 소스")
+        source_box.grid(row=0, column=0, columnspan=5, sticky="ew", padx=8, pady=(8, 4))
+        # Keep the growing path column bounded so the browse controls never leave a
+        # normal 850–950px settings window.  Grid fields below are intentionally
+        # split across rows instead of determining this frame's requested width.
+        source_box.columnconfigure(1, weight=1, minsize=250)
+        source_box.columnconfigure(2, weight=0, minsize=116)
+        self._char_source_mode_var = tk.StringVar()
+        self._char_source_mode_combo = ttk.Combobox(
+            source_box, textvariable=self._char_source_mode_var,
+            values=_CHARACTER_SOURCE_MODE_OPTIONS, state="readonly", width=16,
+        )
+        ttk.Label(source_box, text="방식:").grid(row=0, column=0, sticky="w", **PAD)
+        self._char_source_mode_combo.grid(row=0, column=1, sticky="w", **PAD)
         self._char_path_var = tk.StringVar()
-        ttk.Entry(f, textvariable=self._char_path_var, width=24, state="readonly").grid(row=0, column=1, sticky="ew", **PAD)
-        btn_frame_char = ttk.Frame(f)
-        btn_frame_char.grid(row=0, column=2, sticky="w", padx=(0, 4), pady=4)
-        ttk.Button(btn_frame_char, text="파일...", width=6, command=self._browse_char_file).pack(side="left", padx=(0, 2))
-        ttk.Button(btn_frame_char, text="폴더...", width=6, command=self._browse_char_dir).pack(side="left")
+        ttk.Label(source_box, text="이미지 / 폴더:").grid(row=1, column=0, sticky="w", **PAD)
+        self._char_path_entry = ttk.Entry(source_box, textvariable=self._char_path_var, width=28)
+        self._char_path_entry.grid(row=1, column=1, sticky="ew", **PAD)
+        btn_frame_char = ttk.Frame(source_box)
+        btn_frame_char.grid(row=1, column=2, sticky="w", padx=(0, 4), pady=4)
+        self._char_file_button = ttk.Button(btn_frame_char, text="파일...", width=7, command=self._browse_char_file)
+        self._char_file_button.pack(side="left", padx=(0, 2))
+        self._char_dir_button = ttk.Button(btn_frame_char, text="폴더...", width=7, command=self._browse_char_dir)
+        self._char_dir_button.pack(side="left")
         self._flip_var = tk.BooleanVar()
-        ttk.Checkbutton(f, text="좌우 반전", variable=self._flip_var).grid(row=0, column=3, sticky="w", padx=(4, 8), pady=4)
-        ttk.Label(
-            f,
-            text="(파일 선택 → 정적 이미지 / 폴더 선택 → 애니메이션)",
-            foreground="gray",
-        ).grid(row=1, column=0, columnspan=3, sticky="w", padx=8, pady=(0, 4))
+        ttk.Checkbutton(source_box, text="기본 좌우 반전", variable=self._flip_var).grid(row=1, column=3, sticky="w", padx=(4, 8), pady=4)
+        self._grid_path_var = tk.StringVar()
+        self._grid_columns_var, self._grid_rows_var = tk.StringVar(), tk.StringVar()
+        self._grid_cell_width_var, self._grid_cell_height_var, self._grid_chroma_var = tk.StringVar(), tk.StringVar(), tk.StringVar()
+        self._grid_status_var = tk.StringVar()
+        ttk.Label(source_box, text="스프라이트 PNG:").grid(row=2, column=0, sticky="w", **PAD)
+        self._grid_path_entry = ttk.Entry(source_box, textvariable=self._grid_path_var, width=28)
+        self._grid_path_entry.grid(row=2, column=1, sticky="ew", **PAD)
+        self._grid_file_button = ttk.Button(source_box, text="파일...", command=self._browse_grid_file)
+        self._grid_file_button.grid(row=2, column=2, sticky="w", **PAD)
+        grid_frame = ttk.Frame(source_box)
+        grid_frame.grid(row=3, column=1, columnspan=2, sticky="w", padx=4, pady=2)
+        ttk.Label(grid_frame, text="열:").grid(row=0, column=0, sticky="w")
+        self._grid_columns_input = ttk.Spinbox(grid_frame, textvariable=self._grid_columns_var, from_=1, to=99, width=5)
+        self._grid_columns_input.grid(row=0, column=1, padx=(2, 8))
+        ttk.Label(grid_frame, text="행:").grid(row=0, column=2, sticky="w")
+        self._grid_rows_input = ttk.Spinbox(grid_frame, textvariable=self._grid_rows_var, from_=1, to=99, width=5)
+        self._grid_rows_input.grid(row=0, column=3, padx=(2, 8))
+        ttk.Label(grid_frame, text="셀 너비:").grid(row=0, column=4, sticky="w")
+        self._grid_cell_width_input = ttk.Spinbox(grid_frame, textvariable=self._grid_cell_width_var, from_=1, to=9999, width=6)
+        self._grid_cell_width_input.grid(row=0, column=5, padx=(2, 8))
+        ttk.Label(grid_frame, text="셀 높이:").grid(row=0, column=6, sticky="w")
+        self._grid_cell_height_input = ttk.Spinbox(grid_frame, textvariable=self._grid_cell_height_var, from_=1, to=9999, width=6)
+        self._grid_cell_height_input.grid(row=0, column=7, padx=(2, 8))
+        ttk.Label(source_box, text="Chroma:").grid(row=4, column=0, sticky="w", **PAD)
+        self._grid_chroma_entry = ttk.Entry(source_box, textvariable=self._grid_chroma_var, width=10)
+        self._grid_chroma_entry.grid(row=4, column=1, sticky="w", **PAD)
+        # Match the bubble-theme color UX: click the swatch for the OS picker
+        # (including its platform eyedropper where available), or type #RRGGBB.
+        self._grid_chroma_swatch = tk.Button(
+            source_box, width=10, command=self._pick_grid_chroma_color,
+        )
+        self._grid_chroma_swatch.grid(row=4, column=2, sticky="w", **PAD)
+        self._grid_eyedropper_button = ttk.Button(
+            source_box, text="스포이트", command=self._start_grid_eyedropper,
+        )
+        self._grid_eyedropper_button.grid(row=4, column=3, sticky="w", **PAD)
+        ttk.Label(source_box, textvariable=self._grid_status_var, foreground="gray").grid(row=5, column=0, columnspan=3, sticky="w", padx=8, pady=(0, 4))
+        self._grid_controls = (
+            self._grid_path_entry, self._grid_file_button, self._grid_columns_input,
+            self._grid_rows_input, self._grid_cell_width_input, self._grid_cell_height_input,
+            self._grid_chroma_entry, self._grid_chroma_swatch, self._grid_eyedropper_button,
+        )
+        self._manifest_box = ttk.LabelFrame(source_box, text="Sprite state manifest (사용자 팩으로 저장)")
+        self._manifest_box.grid(row=6, column=0, columnspan=4, sticky="ew", padx=8, pady=(5, 8))
+        self._manifest_box.columnconfigure(1, weight=1)
+        self._manifest_state_var = tk.StringVar()
+        self._manifest_frames_var = tk.StringVar()
+        self._manifest_selection_var = tk.StringVar(value="fixed")
+        self._manifest_frame_ms_var = tk.StringVar()
+        self._manifest_dwell_ms_var = tk.StringVar()
+        self._manifest_transform_var = tk.StringVar(value="none")
+        self._manifest_vfx_var = tk.StringVar(value="none")
+        self._manifest_status_var = tk.StringVar(value="sprite grid에서 활성화됩니다.")
+        ttk.Label(self._manifest_box, text="State:").grid(row=0, column=0, padx=4, pady=3, sticky="w")
+        self._manifest_state_combo = ttk.Combobox(self._manifest_box, textvariable=self._manifest_state_var, state="readonly", width=15)
+        self._manifest_state_combo.grid(row=0, column=1, padx=4, pady=3, sticky="w")
+        ttk.Label(self._manifest_box, text="frames:").grid(row=1, column=0, padx=4, pady=3, sticky="w")
+        self._manifest_frames_entry = ttk.Entry(self._manifest_box, textvariable=self._manifest_frames_var, width=22)
+        self._manifest_frames_entry.grid(row=1, column=1, padx=4, pady=3, sticky="w")
+        self._manifest_selection_combo = ttk.Combobox(self._manifest_box, textvariable=self._manifest_selection_var, values=tuple(_MANIFEST_SELECTIONS), state="readonly", width=10)
+        self._manifest_transform_combo = ttk.Combobox(self._manifest_box, textvariable=self._manifest_transform_var, values=tuple(_MANIFEST_TRANSFORM_OPTIONS), state="readonly", width=24)
+        self._manifest_vfx_combo = ttk.Combobox(self._manifest_box, textvariable=self._manifest_vfx_var, values=tuple(_MANIFEST_VFX_OPTIONS), state="readonly", width=14)
+        for column, (label, combo) in enumerate((("selection", self._manifest_selection_combo), ("transform", self._manifest_transform_combo), ("vfx", self._manifest_vfx_combo))):
+            ttk.Label(self._manifest_box, text=label).grid(row=2, column=column * 2, padx=3, pady=3)
+            combo.grid(row=2, column=column * 2 + 1, padx=3, pady=3)
+        ttk.Label(self._manifest_box, text="frame/dwell ms:").grid(row=3, column=0, padx=3, pady=3)
+        self._manifest_frame_ms_entry = ttk.Entry(self._manifest_box, textvariable=self._manifest_frame_ms_var, width=8)
+        self._manifest_frame_ms_entry.grid(row=3, column=1, padx=3, pady=3)
+        self._manifest_dwell_ms_entry = ttk.Entry(self._manifest_box, textvariable=self._manifest_dwell_ms_var, width=8)
+        self._manifest_dwell_ms_entry.grid(row=3, column=2, padx=3, pady=3)
+        self._manifest_save_button = ttk.Button(self._manifest_box, text="저장", command=self._save_manifest_state)
+        self._manifest_save_button.grid(row=3, column=3, padx=3, pady=3)
+        self._manifest_reload_button = ttk.Button(self._manifest_box, text="다시 읽기", command=self._reload_manifest_editor)
+        self._manifest_reload_button.grid(row=3, column=4, padx=3, pady=3)
+        self._manifest_yaml_button = ttk.Button(self._manifest_box, text="고급 YAML", command=self._open_manifest_editor)
+        self._manifest_yaml_button.grid(row=3, column=5, padx=3, pady=3)
+        ttk.Label(self._manifest_box, textvariable=self._manifest_status_var, foreground="gray").grid(row=4, column=0, columnspan=6, padx=4, pady=(0, 3), sticky="w")
+        self._manifest_controls = (
+            self._manifest_state_combo, self._manifest_frames_entry, self._manifest_selection_combo,
+            self._manifest_transform_combo, self._manifest_vfx_combo, self._manifest_frame_ms_entry,
+            self._manifest_dwell_ms_entry, self._manifest_save_button, self._manifest_reload_button,
+            self._manifest_yaml_button,
+        )
+        self._manifest_state_combo.bind("<<ComboboxSelected>>", self._manifest_select_state)
+        self._char_source_mode_combo.bind("<<ComboboxSelected>>", self._on_character_source_mode_changed)
+        for variable in (self._grid_path_var, self._grid_columns_var, self._grid_rows_var,
+                         self._grid_cell_width_var, self._grid_cell_height_var, self._grid_chroma_var):
+            variable.trace_add("write", self._on_grid_value_changed)
 
         # 캐릭터 높이 비율
-        ttk.Label(f, text="캐릭터 높이 비율\n(0.05 ~ 0.5):").grid(row=2, column=0, sticky="w", **PAD)
+        ttk.Label(f, text="캐릭터 높이 비율\n(0.05 ~ 0.5):").grid(row=1, column=0, sticky="w", **PAD)
         self._char_height_var = tk.DoubleVar()
         height_frame = ttk.Frame(f)
-        height_frame.grid(row=2, column=1, columnspan=2, sticky="ew", **PAD)
+        height_frame.grid(row=1, column=1, columnspan=2, sticky="ew", **PAD)
         self._height_scale = ttk.Scale(
             height_frame,
             from_=0.05,
@@ -510,13 +836,13 @@ class _SettingsWindow:
         self._height_label.pack(side="left", padx=(4, 0))
 
         # 작업 디렉토리
-        ttk.Label(f, text="작업 디렉토리:").grid(row=3, column=0, sticky="w", **PAD)
+        ttk.Label(f, text="작업 디렉토리:").grid(row=2, column=0, sticky="w", **PAD)
         self._workdir_var = tk.StringVar()
-        ttk.Entry(f, textvariable=self._workdir_var, width=22).grid(row=3, column=1, sticky="ew", **PAD)
-        ttk.Button(f, text="찾기...", command=self._browse_workdir).grid(row=3, column=2, **PAD)
+        ttk.Entry(f, textvariable=self._workdir_var, width=22).grid(row=2, column=1, sticky="ew", **PAD)
+        ttk.Button(f, text="찾기...", command=self._browse_workdir).grid(row=2, column=2, **PAD)
 
         # 채팅 UI 모드
-        ttk.Label(f, text="채팅 UI 모드:").grid(row=4, column=0, sticky="w", **PAD)
+        ttk.Label(f, text="채팅 UI 모드:").grid(row=3, column=0, sticky="w", **PAD)
         self._chat_mode_var = tk.StringVar()
         ttk.Combobox(
             f,
@@ -524,15 +850,15 @@ class _SettingsWindow:
             values=_CHAT_MODE_OPTIONS,
             state="readonly",
             width=22,
-        ).grid(row=4, column=1, sticky="ew", **PAD)
+        ).grid(row=3, column=1, sticky="ew", **PAD)
         ttk.Label(
             f,
             text="말풍선 모드는 아직 미구현이라 선택해도 터미널로 동작합니다.",
             foreground="gray",
-        ).grid(row=5, column=0, columnspan=3, sticky="w", padx=8, pady=(0, 4))
+        ).grid(row=4, column=0, columnspan=3, sticky="w", padx=8, pady=(0, 4))
 
         # 말풍선 모드 권한 수준
-        ttk.Label(f, text="말풍선 권한 수준:").grid(row=6, column=0, sticky="w", **PAD)
+        ttk.Label(f, text="말풍선 권한 수준:").grid(row=5, column=0, sticky="w", **PAD)
         self._permission_level_var = tk.StringVar()
         ttk.Combobox(
             f,
@@ -540,16 +866,16 @@ class _SettingsWindow:
             values=_PERMISSION_LEVEL_OPTIONS,
             state="readonly",
             width=22,
-        ).grid(row=6, column=1, sticky="ew", **PAD)
+        ).grid(row=5, column=1, sticky="ew", **PAD)
         ttk.Label(
             f,
             text="말풍선 모드에서 도구 사용을 얼마나 자동으로 승인할지 (기본: 자동).",
             foreground="gray",
-        ).grid(row=7, column=0, columnspan=3, sticky="w", padx=8, pady=(0, 4))
+        ).grid(row=6, column=0, columnspan=3, sticky="w", padx=8, pady=(0, 4))
 
         # ── 능동 발화 (initiative) — 유휴 시 캐릭터가 스스로 말을 건다(말풍선 모드 전용) ──
         init_box = ttk.LabelFrame(f, text="능동 발화 — 유휴 시 스스로 말 걸기")
-        init_box.grid(row=8, column=0, columnspan=3, sticky="we", padx=8, pady=(10, 4))
+        init_box.grid(row=7, column=0, columnspan=3, sticky="we", padx=8, pady=(10, 4))
 
         ttk.Checkbutton(
             init_box, text="능동 발화 사용", variable=self._initiative_enabled_var,
@@ -737,6 +1063,7 @@ class _SettingsWindow:
         ttk.Label(f, text="Adaptive Slider", foreground="gray").grid(row=9, column=0, sticky="w", padx=8, pady=(2, 0))
         ttk.Label(f, text="값", foreground="gray").grid(row=9, column=2, sticky="w", padx=(0, 6), pady=(2, 0))
         ttk.Label(f, text="pin", foreground="gray").grid(row=9, column=3, sticky="w", padx=(0, 8), pady=(2, 0))
+        ttk.Label(f, text="DB 반영", foreground="gray").grid(row=9, column=4, sticky="w", padx=(0, 8), pady=(2, 0))
 
         for idx, field in enumerate(_PERSONA_NUMERIC_FIELDS):
             row = 10 + idx
@@ -760,12 +1087,20 @@ class _SettingsWindow:
             ).grid(row=row, column=1, sticky="ew", padx=8, pady=4)
             ttk.Label(f, textvariable=label_var, width=5).grid(row=row, column=2, sticky="w", padx=(0, 6), pady=4)
             ttk.Checkbutton(f, variable=pin_var).grid(row=row, column=3, sticky="w", padx=(0, 8), pady=4)
+            btn = ttk.Button(
+                f,
+                text="→ DB",
+                width=6,
+                command=lambda key=field: self._on_persona_overwrite(key),
+            )
+            btn.grid(row=row, column=4, sticky="w", padx=(0, 8), pady=4)
+            self._persona_numeric_overwrite_btns[field] = btn
 
         ttk.Label(
             f,
-            text="pin 해제된 슬라이더는 persona.user.yaml에서 주석(adaptive)으로 기록되어 DB 학습을 허용합니다.",
+            text="pin 해제 시 DB 진화값을 따릅니다. → DB는 현재 값을 DB baseline에 영구 반영하고 pin을 해제합니다.",
             foreground="gray",
-        ).grid(row=14, column=0, columnspan=4, sticky="w", padx=8, pady=(4, 8))
+        ).grid(row=14, column=0, columnspan=5, sticky="w", padx=8, pady=(4, 8))
 
         f.columnconfigure(1, weight=1)
 
@@ -775,6 +1110,29 @@ class _SettingsWindow:
         except (TypeError, ValueError):
             value = float(self._persona_numeric_vars[field].get())
         self._persona_numeric_label_vars[field].set(f"{value:.2f}")
+
+    def _on_persona_overwrite(self, field: str):
+        """현재 슬라이더 값을 DB baseline에 명시적으로 반영하고 pin을 해제한다."""
+        try:
+            value = _coerce_persona_number(self._persona_numeric_vars[field].get(), _PERSONA_DEFAULTS[field])
+        except Exception:
+            return
+
+        try:
+            set_persona_baseline({field: value})
+        except Exception as exc:
+            messagebox.showerror("DB 저장 실패", f"{field} 값을 DB에 저장하지 못했습니다.\n{exc}", parent=self.window)
+            return
+
+        # DB 값이 user YAML의 pin에 가려지지 않도록 해당 필드의 pin을 즉시 해제·저장한다.
+        self._persona_numeric_pin_vars[field].set(False)
+        self._save_persona_user_file()
+
+        # 버튼 일시 피드백
+        btn = self._persona_numeric_overwrite_btns.get(field)
+        if btn:
+            btn.configure(text="완료✓")
+            self.window.after(1200, lambda: btn.configure(text="→ DB"))
 
     def _build_terminal_tab(self, PAD: dict):
         f = self._tab_terminal
@@ -1461,19 +1819,52 @@ class _SettingsWindow:
             foreground="#7a5800",
         ).pack(fill="x", padx=8, pady=6)
 
-        ttk.Separator(f, orient="horizontal").grid(row=9, column=0, columnspan=2, sticky="ew", padx=8, pady=4)
+        policy_level_row = ttk.Frame(f)
+        policy_level_row.grid(row=9, column=0, columnspan=2, sticky="w", padx=16, pady=(2, 0))
+        ttk.Label(policy_level_row, text="저장소 정책 수준").pack(side="left")
+        ttk.Combobox(
+            policy_level_row,
+            textvariable=self._policy_level_var,
+            values=_POLICY_LEVEL_OPTIONS,
+            state="readonly",
+            width=29,
+        ).pack(side="left", padx=(10, 0))
+        policy_info = ttk.Frame(f)
+        policy_info.grid(row=10, column=0, columnspan=2, sticky="w", padx=28, pady=(0, 8))
+        ttk.Label(
+            policy_info,
+            text=(
+                "사람의 Git commit은 항상 경고만 표시합니다. Agent 강제 수준에서는 Claude·Codex의\n"
+                "정책 위반 도구 호출만 차단하며, hook/backend 오류는 경고 후 허용합니다."
+            ),
+            foreground="gray",
+        ).pack(anchor="w")
+        ttk.Label(policy_info, textvariable=self._policy_status_var, foreground="#6a4c00").pack(anchor="w")
 
-        ttk.Label(f, text="튜토리얼", font=("", 9, "bold")).grid(row=10, column=0, columnspan=2, sticky="w", padx=8, pady=(4, 2))
+        ttk.Label(f, text="자동 체크포인트", font=("", 9, "bold")).grid(row=11, column=0, columnspan=2, sticky="w", padx=8, pady=(4, 2))
+        daily_frame = ttk.Frame(f)
+        daily_frame.grid(row=12, column=0, columnspan=2, sticky="ew", padx=16, pady=(2, 0))
+        ttk.Entry(daily_frame, textvariable=self._external_daily_dir_var).pack(side="left", fill="x", expand=True)
+        ttk.Button(daily_frame, text="찾기...", command=self._browse_external_daily_dir).pack(side="left", padx=(6, 0))
+        ttk.Label(
+            f,
+            text="선택 사항입니다. 비워두면 Engram Wiki daily note에만 기록합니다.",
+            foreground="gray",
+        ).grid(row=13, column=0, columnspan=2, sticky="w", padx=28, pady=(0, 8))
+
+        ttk.Separator(f, orient="horizontal").grid(row=14, column=0, columnspan=2, sticky="ew", padx=8, pady=4)
+
+        ttk.Label(f, text="튜토리얼", font=("", 9, "bold")).grid(row=15, column=0, columnspan=2, sticky="w", padx=8, pady=(4, 2))
         ttk.Label(
             f,
             text="튜토리얼 진행 플래그를 초기 상태로 되돌립니다. 기존 메모리/위키 데이터는 삭제되지 않습니다.",
             foreground="gray",
-        ).grid(row=11, column=0, columnspan=2, sticky="w", padx=16, pady=(0, 4))
+        ).grid(row=16, column=0, columnspan=2, sticky="w", padx=16, pady=(0, 4))
         ttk.Button(
             f,
             text="튜토리얼 플래그 초기화",
             command=self._reset_tutorial_flags,
-        ).grid(row=12, column=0, sticky="w", padx=16, pady=(0, 8))
+        ).grid(row=17, column=0, sticky="w", padx=16, pady=(0, 8))
 
         f.columnconfigure(1, weight=1)
 
@@ -1499,6 +1890,19 @@ class _SettingsWindow:
         # 오버레이 탭
         char_name = _nested_get(cfg, ["overlay", "character", "name"], "")
         self._char_path_var.set(str(char_name or ""))
+        mode = _nested_get(cfg, ["overlay", "character", "source_mode"], "")
+        stored_mode = str(mode or ("sequence" if Path(str(char_name or "")).is_dir() else "static"))
+        self._char_source_mode_var.set(character_source_mode_to_display(stored_mode))
+        grid = _nested_get(cfg, ["overlay", "character", "reactions", "grid"], {}) or {}
+        self._grid_path_var.set(str(_nested_get(cfg, ["overlay", "character", "reactions", "sprite_sheet"], "")))
+        self._grid_columns_var.set(str(grid.get("columns", 6)))
+        self._grid_rows_var.set(str(grid.get("rows", 4)))
+        self._grid_cell_width_var.set(str(grid.get("cell_width", 434)))
+        self._grid_cell_height_var.set(str(grid.get("cell_height", 408)))
+        self._grid_chroma_var.set(str(_nested_get(cfg, ["overlay", "character", "reactions", "chroma_key"], "#00FF00")))
+        self._update_grid_status()
+        self._apply_character_source_mode()
+        self._reload_manifest_editor()
         self._flip_var.set(bool(_nested_get(cfg, ["overlay", "flip_horizontal"], False)))
 
         height = _nested_get(cfg, ["overlay", "char_height_ratio"], 0.125)
@@ -1595,13 +1999,45 @@ class _SettingsWindow:
         self._autostart_var.set(_is_autostart_enabled())
         auto_inject = bool(self._engram_user_cfg.get("session", {}).get("auto_inject", False))
         self._auto_inject_var.set(auto_inject)
+        guidance_level = _nested_get(
+            self._engram_user_cfg,
+            ["directives", "policy", "guidance_level"],
+            None,
+        )
+        if guidance_level is None:
+            legacy_enabled = _nested_get(
+                self._engram_user_cfg,
+                ["directives", "policy", "guidance_enabled"],
+                None,
+            )
+            if legacy_enabled is None:
+                legacy_enabled = _nested_get(
+                    self._engram_user_cfg,
+                    ["directives", "policy", "claude_pretool_enforcement"],
+                    True,
+                )
+            guidance_level = "warn" if bool(legacy_enabled) else "off"
+        normalized_policy_level = normalize_policy_guidance_level(guidance_level)
+        self._policy_level_var.set(
+            _POLICY_LEVEL_VALUE_TO_DISPLAY.get(normalized_policy_level, "경고만")
+        )
         self._dashboard_enabled_var.set(bool(_nested_get(cfg, ["dashboard", "enabled"], True)))
+        self._external_daily_dir_var.set(
+            str(
+                _nested_get(
+                    self._engram_user_cfg,
+                    ["memory", "auto_checkpoint", "external_daily_dir"],
+                    "",
+                )
+                or ""
+            )
+        )
 
         self._load_persona_values()
 
     def _load_persona_values(self):
         user_persona = _safe_load_yaml(_USER_PERSONA_PATH)
-        project_persona = _safe_load_yaml(_PROJECT_PERSONA_PATH)
+        effective_persona = get_persona()
 
         def _txt_set(widget: tk.Text, value: str) -> None:
             widget.delete("1.0", "end")
@@ -1618,12 +2054,11 @@ class _SettingsWindow:
 
         for field in _PERSONA_NUMERIC_FIELDS:
             user_raw = user_persona.get(field)
-            project_raw = project_persona.get(field)
             if isinstance(user_raw, (int, float)):
                 value = _coerce_persona_number(user_raw, _PERSONA_DEFAULTS[field])
                 pinned = True
             else:
-                value = _coerce_persona_number(project_raw, _PERSONA_DEFAULTS[field])
+                value = _coerce_persona_number(effective_persona.get(field), _PERSONA_DEFAULTS[field])
                 pinned = False
 
             self._persona_numeric_vars[field].set(value)
@@ -1643,6 +2078,204 @@ class _SettingsWindow:
 
     # ─────────────────────────────────────────────────── 파일 탐색 ──
 
+    def _grid_values_valid(self, path: str) -> tuple[bool, str]:
+        return validate_sprite_grid(
+            path, self._grid_columns_var.get(), self._grid_rows_var.get(),
+            self._grid_cell_width_var.get(), self._grid_cell_height_var.get(), self._grid_chroma_var.get(),
+        )
+
+    def _on_character_source_mode_changed(self, _event=None) -> None:
+        self._apply_character_source_mode()
+        if character_source_mode_from_display(self._char_source_mode_var.get()) == "sprite_grid":
+            self._reload_manifest_editor()
+
+    def _apply_character_source_mode(self) -> None:
+        """Enable only the inputs that belong to the selected mode; retain all values."""
+        mode = character_source_mode_from_display(self._char_source_mode_var.get())
+        static_state = "normal" if mode == "static" else "disabled"
+        sequence_state = "normal" if mode == "sequence" else "disabled"
+        grid_state = "normal" if mode == "sprite_grid" else "disabled"
+        self._char_path_entry.configure(state=static_state if mode == "static" else sequence_state)
+        self._char_file_button.configure(state=static_state)
+        self._char_dir_button.configure(state=sequence_state)
+        for widget in self._grid_controls:
+            widget.configure(state=grid_state)
+        if hasattr(self, "_manifest_controls"):
+            readonly_controls = (
+                self._manifest_state_combo,
+                self._manifest_selection_combo,
+                self._manifest_transform_combo,
+                self._manifest_vfx_combo,
+            )
+            for widget in self._manifest_controls:
+                widget.configure(state=(
+                    "readonly"
+                    if grid_state == "normal" and any(widget is control for control in readonly_controls)
+                    else grid_state
+                ))
+            if mode != "sprite_grid":
+                self._manifest_status_var.set("Sprite state manifest는 sprite grid 모드에서만 편집할 수 있습니다.")
+        self._update_grid_status()
+
+    def _update_grid_status(self) -> None:
+        valid, message = self._grid_values_valid(self._grid_path_var.get().strip())
+        self._grid_status_var.set(("Grid: " + message) if valid else ("Grid 확인: " + message))
+
+    def _on_grid_value_changed(self, *_args) -> None:
+        self._update_grid_status()
+        self._update_grid_chroma_swatch()
+
+    def _manifest_pack_id(self) -> str:
+        return str(_nested_get(self._cfg, ["overlay", "character", "reactions", "pack"], "engram") or "engram")
+
+    def _reload_manifest_editor(self) -> None:
+        if character_source_mode_from_display(self._char_source_mode_var.get()) != "sprite_grid":
+            self._manifest_status_var.set("Sprite state manifest는 sprite grid 모드에서만 편집할 수 있습니다.")
+            return
+        pack = resolve_reaction_pack(self._manifest_pack_id())
+        if pack.source == "disabled" or pack.sprite_sheet is None:
+            self._manifest_status_var.set("유효한 reaction pack을 찾을 수 없습니다.")
+            return
+        try:
+            raw = yaml.safe_load((pack.sprite_sheet.parent / "manifest.yaml").read_text(encoding="utf-8"))
+            states = raw.get("states", {}) if isinstance(raw, dict) else {}
+            if not isinstance(states, dict) or not states:
+                raise ValueError("states가 없습니다.")
+            self._manifest_raw = raw
+            self._manifest_cell_count = pack.columns * pack.rows
+            self._manifest_state_combo["values"] = tuple(states.keys())
+            self._manifest_state_var.set(next(iter(states)))
+            self._manifest_select_state()
+            self._manifest_status_var.set(f"{pack.source} pack '{self._manifest_pack_id()}' — 저장하면 사용자 팩으로 복사됩니다.")
+        except Exception as exc:
+            self._manifest_status_var.set(f"manifest 읽기 실패: {exc}")
+
+    def _manifest_select_state(self, _event=None) -> None:
+        states = getattr(self, "_manifest_raw", {}).get("states", {})
+        state = states.get(self._manifest_state_var.get(), {}) if isinstance(states, dict) else {}
+        self._manifest_frames_var.set(", ".join(str(value) for value in state.get("frames", [])))
+        self._manifest_selection_var.set(str(state.get("selection", "fixed")))
+        self._manifest_transform_var.set(manifest_transform_to_display(state.get("transform", "none")))
+        self._manifest_vfx_var.set(manifest_vfx_to_display(state.get("vfx", "none")))
+        self._manifest_frame_ms_var.set(str(state.get("frame_ms", state.get("dwell_ms", 600))))
+        self._manifest_dwell_ms_var.set(str(state.get("dwell_ms", "")))
+
+    def _save_manifest_state(self) -> None:
+        raw = getattr(self, "_manifest_raw", None)
+        name = self._manifest_state_var.get()
+        if not isinstance(raw, dict) or not name:
+            self._reload_manifest_editor()
+            return
+        value = {
+            "frames": self._manifest_frames_var.get(),
+            "selection": self._manifest_selection_var.get(),
+            "transform": manifest_transform_from_display(self._manifest_transform_var.get()),
+            "vfx": manifest_vfx_from_display(self._manifest_vfx_var.get()),
+            "frame_ms": self._manifest_frame_ms_var.get(),
+            "dwell_ms": self._manifest_dwell_ms_var.get(),
+        }
+        valid, reason = validate_manifest_state(value, getattr(self, "_manifest_cell_count", 0))
+        if not valid:
+            self._manifest_status_var.set("저장하지 않음: " + reason)
+            return
+        states = raw.setdefault("states", {})
+        old = states.get(name, {})
+        states[name] = {**old, "frames": [int(part.strip()) for part in value["frames"].split(",") if part.strip()], "selection": value["selection"], "transform": value["transform"], "vfx": value["vfx"], "frame_ms": int(value["frame_ms"])}
+        if value["dwell_ms"].strip():
+            states[name]["dwell_ms"] = int(value["dwell_ms"])
+        else:
+            states[name].pop("dwell_ms", None)
+        try:
+            save_reaction_manifest(self._manifest_pack_id(), raw)
+            self._manifest_status_var.set("사용자 reaction pack에 저장됨 — overlay가 즉시 다시 읽습니다.")
+            self._reload_manifest_editor()
+            if self._on_saved:
+                self._on_saved()
+        except Exception as exc:
+            self._manifest_status_var.set(f"manifest 저장 실패: {exc}")
+
+    def _open_manifest_editor(self) -> None:
+        try:
+            open_reaction_manifest(self._manifest_pack_id())
+        except Exception as exc:
+            self._manifest_status_var.set(f"YAML 열기 실패: {exc}")
+
+    def _update_grid_chroma_swatch(self) -> None:
+        if not hasattr(self, "_grid_chroma_swatch"):
+            return
+        color = self._grid_chroma_var.get().strip()
+        try:
+            int(color[1:], 16)
+            is_color = len(color) == 7 and color.startswith("#")
+        except ValueError:
+            is_color = False
+        try:
+            if is_color:
+                canonical = color.upper()
+                self._grid_chroma_swatch.config(bg=canonical, activebackground=canonical, text=canonical)
+            else:
+                self._grid_chroma_swatch.config(bg="SystemButtonFace", activebackground="SystemButtonFace", text="색상 선택")
+        except tk.TclError:
+            pass
+
+    def _pick_grid_chroma_color(self) -> None:
+        current = self._grid_chroma_var.get().strip()
+        try:
+            _rgb, hex_color = colorchooser.askcolor(color=current, parent=self.window, title="Sprite chroma 색상 선택")
+        except tk.TclError:
+            _rgb, hex_color = colorchooser.askcolor(parent=self.window, title="Sprite chroma 색상 선택")
+        if hex_color:
+            self._grid_chroma_var.set(hex_color.upper())
+
+    def _virtual_screen_origin(self) -> tuple[int, int]:
+        """Return the virtual desktop origin used by ImageGrab on Windows."""
+        try:
+            user32 = ctypes.windll.user32
+            return int(user32.GetSystemMetrics(76)), int(user32.GetSystemMetrics(77))
+        except Exception:
+            return self.window.winfo_vrootx(), self.window.winfo_vrooty()
+
+    def _start_grid_eyedropper(self) -> None:
+        """Capture first, then use a near-transparent crosshair window for a safe sample."""
+        self._cancel_grid_eyedropper()
+        try:
+            snapshot = ImageGrab.grab(all_screens=True)
+        except Exception as exc:
+            messagebox.showerror("스포이트", f"화면을 캡처할 수 없습니다.\n{exc}", parent=self.window)
+            return
+        origin = self._virtual_screen_origin()
+        try:
+            picker = tk.Toplevel(self.window)
+            picker.overrideredirect(True)
+            picker.attributes("-topmost", True)
+            picker.attributes("-alpha", 0.01)
+            picker.configure(cursor="crosshair")
+            picker.geometry(f"{snapshot.width}x{snapshot.height}{origin[0]:+d}{origin[1]:+d}")
+            picker.bind("<Button-1>", lambda event: self._finish_grid_eyedropper(event, snapshot, origin))
+            picker.bind("<Escape>", lambda _event: self._cancel_grid_eyedropper())
+            picker.focus_force()
+            self._grid_eyedropper_window = picker
+            self._grid_status_var.set("스포이트: 화면의 색을 클릭하세요 (Esc 취소)")
+        except tk.TclError as exc:
+            messagebox.showerror("스포이트", f"스포이트를 시작할 수 없습니다.\n{exc}", parent=self.window)
+
+    def _finish_grid_eyedropper(self, event, snapshot: Image.Image, origin: tuple[int, int]) -> None:
+        color = sample_snapshot_color(snapshot, event.x_root, event.y_root, origin)
+        self._cancel_grid_eyedropper()
+        if color:
+            self._grid_chroma_var.set(color)
+        else:
+            self._grid_status_var.set("스포이트: 화면 범위 밖의 위치입니다.")
+
+    def _cancel_grid_eyedropper(self) -> None:
+        picker = getattr(self, "_grid_eyedropper_window", None)
+        self._grid_eyedropper_window = None
+        if picker is not None:
+            try:
+                picker.destroy()
+            except tk.TclError:
+                pass
+
     def _browse_char_file(self):
         path = filedialog.askopenfilename(
             parent=self.window,
@@ -1651,6 +2284,13 @@ class _SettingsWindow:
         )
         if path:
             self._char_path_var.set(path)
+            self._update_grid_status()
+
+    def _browse_grid_file(self):
+        path = filedialog.askopenfilename(parent=self.window, title="Sprite grid PNG 선택", filetypes=[("PNG 이미지", "*.png")])
+        if path:
+            self._grid_path_var.set(path)
+            self._update_grid_status()
 
     def _browse_char_dir(self):
         path = filedialog.askdirectory(
@@ -1664,6 +2304,11 @@ class _SettingsWindow:
         path = filedialog.askdirectory(parent=self.window, title="작업 디렉토리 선택")
         if path:
             self._workdir_var.set(path)
+
+    def _browse_external_daily_dir(self):
+        path = filedialog.askdirectory(parent=self.window, title="외부 daily note 폴더 선택")
+        if path:
+            self._external_daily_dir_var.set(path)
 
     def _ensure_user_persona_file(self) -> Path:
         if _USER_PERSONA_PATH.exists():
@@ -1741,15 +2386,6 @@ class _SettingsWindow:
 
         rendered = self._render_persona_user_yaml(persona_values, numeric_values, pin_map)
         _USER_PERSONA_PATH.write_text(rendered, encoding="utf-8")
-        # pin 여부와 무관하게 현재 슬라이더/입력값을 DB baseline에도 반영해 즉시 체감 가능하게 한다.
-        baseline_updates = {**numeric_values}
-        for key in ("voice", "traits", "quirks", "values", "fewshot"):
-            if key in persona_values:
-                baseline_updates[key] = persona_values[key]
-        try:
-            set_persona_baseline(baseline_updates)
-        except Exception:
-            pass
         return pinned_count
 
     def _open_persona_file(self):
@@ -1785,24 +2421,53 @@ class _SettingsWindow:
                 except Exception:
                     pass
             self._show_toast(f"저장되었습니다. 슬라이더 고정 {pinned_count}/4, 나머지는 adaptive로 유지됩니다.")
+            if self._policy_sync_warnings:
+                messagebox.showwarning(
+                    "정책 가이드 일부 적용 실패",
+                    "설정은 저장되었고 작업은 차단되지 않습니다.\n\n" + "\n".join(self._policy_sync_warnings),
+                    parent=self.window,
+                )
         except Exception as e:
             messagebox.showerror("저장 실패", str(e), parent=self.window)
 
     def _do_save(self):
+        # Validate the active source before loading/mutating/saving the user YAML.  _save()
+        # owns user-visible error handling, so failed validation cannot invoke callbacks/toasts.
+        mode = character_source_mode_from_display(self._char_source_mode_var.get())
+        grid_values = (
+            self._grid_path_var.get().strip(), self._grid_columns_var.get(), self._grid_rows_var.get(),
+            self._grid_cell_width_var.get(), self._grid_cell_height_var.get(), self._grid_chroma_var.get().strip(),
+        )
+        valid, reason = validate_character_source(mode, self._char_path_var.get().strip(), grid_values)
+        if not valid:
+            raise ValueError(f"캐릭터 소스 설정: {reason}")
+
         # 기존 user.yaml을 베이스로 사용 (기존 설정 보존)
         user = _safe_load_yaml(_USER_CONFIG_PATH)
 
         # ── 오버레이 탭 ──
         char_path = self._char_path_var.get().strip()
         _nested_set(user, ["overlay", "character", "name"], char_path or None)
+        _nested_set(user, ["overlay", "character", "source_mode"], mode)
+        if mode == "sprite_grid":
+            _nested_set(user, ["overlay", "character", "reactions", "grid"], {
+                "columns": int(self._grid_columns_var.get()), "rows": int(self._grid_rows_var.get()),
+                "cell_width": int(self._grid_cell_width_var.get()), "cell_height": int(self._grid_cell_height_var.get()),
+            })
+            _nested_set(user, ["overlay", "character", "reactions", "chroma_key"], self._grid_chroma_var.get().strip())
+            _nested_set(user, ["overlay", "character", "reactions", "sprite_sheet"], self._grid_path_var.get().strip())
 
         flip_on = bool(self._flip_var.get())
         _nested_set(user, ["overlay", "flip_horizontal"], True if flip_on else None)
 
         height = round(self._char_height_var.get(), 3)
-        default_height = _nested_get(self._cfg, ["overlay", "char_height_ratio"], 0.125)
-        if abs(height - float(default_height)) > 0.001:
-            _nested_set(user, ["overlay", "char_height_ratio"], height)
+        # Compare with the shipped/editable base config, not the currently
+        # merged setting. Otherwise moving an existing user override back to
+        # the default leaves the old override in place and the live reload sees
+        # no size change.
+        base_cfg = _safe_load_yaml(resolve_editable_overlay_path("config/overlay.yaml"))
+        default_height = _nested_get(base_cfg, ["overlay", "char_height_ratio"], 0.125)
+        _nested_set(user, ["overlay", "char_height_ratio"], character_height_override_value(height, float(default_height)))
 
         workdir = self._workdir_var.get().strip()
         _nested_set(user, ["cli", "workdir"], workdir or None)
@@ -1945,19 +2610,66 @@ class _SettingsWindow:
         engram_user = _safe_load_yaml(_ENGRAM_USER_CONFIG_PATH)
         auto_inject = bool(self._auto_inject_var.get())
         _nested_set(engram_user, ["session", "auto_inject"], auto_inject if auto_inject else None)
+        _nested_set(
+            engram_user,
+            ["memory", "auto_checkpoint", "external_daily_dir"],
+            self._external_daily_dir_var.get().strip(),
+        )
+        policy_level = _POLICY_LEVEL_DISPLAY_TO_VALUE.get(
+            self._policy_level_var.get(),
+            "warn",
+        )
+        policy_guidance = policy_level != "off"
+        _nested_set(
+            engram_user,
+            ["directives", "policy", "guidance_level"],
+            policy_level,
+        )
+        _nested_set(engram_user, ["directives", "policy", "guidance_enabled"], None)
+        _nested_set(
+            engram_user,
+            ["directives", "policy", "claude_pretool_enforcement"],
+            None,
+        )
         _ENGRAM_USER_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
         _ENGRAM_USER_CONFIG_PATH.write_text(
             yaml.safe_dump(engram_user, allow_unicode=True, sort_keys=False),
             encoding="utf-8",
         )
-        # auto_inject 토글 즉시 반영 — 전역 SessionStart hook 설치/제거(멱등).
         # runtime_config 캐시가 예전 값을 들고 있을 수 있어 방금 저장한 값으로 직접 동기화한다.
-        try:
-            from core.integrations.engram_bootstrap import sync_sessionstart_hook
+        from core.integrations.engram_bootstrap import (
+            sync_claude_pretool_hook,
+            sync_codex_pretool_hook,
+            sync_sessionstart_hook,
+        )
+        from core.integrations.policy_guidance_state import sync_policy_guidance_disabled_marker
 
-            sync_sessionstart_hook(auto_inject)
-        except Exception:
-            pass
+        sync_results = {
+            "상태 marker": sync_policy_guidance_disabled_marker(policy_guidance),
+            "SessionStart": sync_sessionstart_hook(auto_inject),
+            "Claude": sync_claude_pretool_hook(policy_guidance),
+            "Codex": sync_codex_pretool_hook(policy_guidance),
+        }
+        self._policy_sync_warnings = [
+            f"{name}: {result.get('error') or '적용 실패'}"
+            for name, result in sync_results.items()
+            if not result.get("ok")
+        ]
+        if self._policy_sync_warnings:
+            self._policy_status_var.set("일부 적용 실패 — 작업 차단 없음")
+        elif policy_guidance:
+            codex_status = sync_results["Codex"]
+            codex_note = (
+                "/hooks 승인 필요"
+                if codex_status.get("trust_required")
+                else "/hooks에서 승인 상태 확인"
+            )
+            behavior = "Agent 위반 차단 · 사람 경고" if policy_level == "enforce_agents" else "모두 경고만"
+            self._policy_status_var.set(
+                f"{behavior} · Claude 적용됨 · Codex 설정됨 — {codex_note}"
+            )
+        else:
+            self._policy_status_var.set("정책 가이드 OFF · Git advisor backend 실행 안 함")
 
         # ── 전역 탭 — 자동 시작 토글 ──
         _set_autostart(bool(self._autostart_var.get()))
