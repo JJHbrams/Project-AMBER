@@ -20,6 +20,12 @@ $DefaultDist = Join-Path $Root "dist\engram-overlay"
 $ModelDir = Join-Path $Root "resource\embedding-model"
 $ModelManifest = Join-Path $ModelDir "manifest.json"
 $ModelId = "intfloat/multilingual-e5-small"
+$ProcessStopHelper = Join-Path $PSScriptRoot "stop-engram-processes.ps1"
+
+if (-not (Test-Path $ProcessStopHelper)) {
+    throw "Engram process stop helper not found: $ProcessStopHelper"
+}
+. $ProcessStopHelper
 
 function Write-OverlayStep([string]$Message) {
     Write-Host "`n==> $Message" -ForegroundColor Cyan
@@ -81,50 +87,24 @@ function Invoke-OverlayPython {
 
     $output = @()
     $exitCode = 1
+    $previousErrorActionPreference = $ErrorActionPreference
     Push-Location $Root
     try {
+        # PyInstaller writes normal progress records to stderr. Under Windows
+        # PowerShell, ErrorActionPreference=Stop can turn the first INFO line
+        # into a terminating NativeCommandError before we can inspect its exit
+        # code or persist the build log.
+        $ErrorActionPreference = "Continue"
         $output = @(& $Python @Arguments 2>&1)
         $exitCode = $LASTEXITCODE
     } finally {
+        $ErrorActionPreference = $previousErrorActionPreference
         Pop-Location
     }
     return [PSCustomObject]@{
         ExitCode = [int]$exitCode
         Output = $output
     }
-}
-
-function Stop-OverlayProcesses {
-    $runningPath = ""
-    $stoppedDesktopProcess = $false
-    $processes = @(Get-Process -Name "engram-overlay" -ErrorAction SilentlyContinue)
-    if ($processes.Count -gt 0) {
-        try { $runningPath = $processes[0].Path } catch {}
-        $processes | Stop-Process -Force -ErrorAction SilentlyContinue
-        $stoppedDesktopProcess = $true
-    }
-    # The frozen dashboard lives beside the overlay artifact and keeps its exe
-    # open while Streamlit is running. It must be stopped before the staged
-    # artifact can replace that directory, but it is not a restart target.
-    $dashboardProcesses = @(Get-Process -Name "engram-dashboard" -ErrorAction SilentlyContinue)
-    if ($dashboardProcesses.Count -gt 0) {
-        $dashboardProcesses | Stop-Process -Force -ErrorAction SilentlyContinue
-        $stoppedDesktopProcess = $true
-    }
-    if ($stoppedDesktopProcess) {
-        Start-Sleep -Milliseconds 800
-    }
-    foreach ($pattern in @("mcp_server.py", "engram_dashboard.py", "kg_watcher.py")) {
-        $processIds = Get-CimInstance Win32_Process -Filter "Name='python.exe'" -ErrorAction SilentlyContinue |
-            Where-Object { $_.CommandLine -like "*$pattern*" } |
-            Select-Object -ExpandProperty ProcessId
-        foreach ($processId in $processIds) {
-            try {
-                Stop-Process -Id $processId -Force -ErrorAction SilentlyContinue
-            } catch {}
-        }
-    }
-    return $runningPath
 }
 
 function Invoke-OverlayRole {
@@ -242,8 +222,9 @@ function Publish-OverlayArtifact {
     $oldMoved = $false
     $published = $false
     try {
-        New-Item -ItemType Directory -Path $stage -Force | Out-Null
-        Copy-Item -Path (Join-Path $SourceDir "*") -Destination $stage -Recurse -Force
+        # The verified artifact is disposable build output. Moving its directory
+        # avoids copying 1+ GiB / 20k files before the atomic publish swap.
+        Move-Item -LiteralPath $SourceDir -Destination $stage
 
         if (Test-Path $target) {
             Move-Item -Path $target -Destination $backup
@@ -288,7 +269,7 @@ if ($Mode -eq "skip") {
 }
 
 $python = $null
-$runningPath = ""
+$previousOverlayPaths = @()
 $tempRoot = $null
 $success = $false
 $exitCode = 1
@@ -299,17 +280,25 @@ try {
         throw "Overlay spec not found: $Spec"
     }
 
+    # Callers own the publish destination.  A running process is never used to
+    # choose it, because multiple installed/development copies can coexist.
+    $deployTarget = if ($Deploy) { $Deploy } else { $DefaultDist }
+    if (-not [IO.Path]::IsPathRooted($deployTarget)) {
+        $deployTarget = Join-Path $Root $deployTarget
+    }
+    $deployTarget = [IO.Path]::GetFullPath($deployTarget)
+
     if ($ValidateOnly) {
         $validation = Invoke-OverlayPython $python @(
             "-m", "core.install.overlay_manifest",
             "--root", $Root,
-            "--artifact", $DefaultDist,
+            "--artifact", $deployTarget,
             "--model-manifest", $ModelManifest,
             "--validate"
         )
         $last = Get-LastOutput $validation.Output
         if ($validation.ExitCode -eq 0) {
-            Write-OverlayOk "Validated overlay artifact: $DefaultDist"
+            Write-OverlayOk "Validated overlay artifact: $deployTarget"
             exit 0
         }
         Write-OverlayWarn "Overlay artifact is not reusable: $last"
@@ -337,7 +326,17 @@ try {
         "--validate"
     )
     $reuseValid = ($validation.ExitCode -eq 0)
-    if ($Mode -eq "auto" -and $reuseValid -and -not $Deploy) {
+    $deploysToDefault = (-not $Deploy)
+    if ($Deploy) {
+        $requestedDeploy = if ([IO.Path]::IsPathRooted($Deploy)) {
+            [IO.Path]::GetFullPath($Deploy)
+        } else {
+            [IO.Path]::GetFullPath((Join-Path $Root $Deploy))
+        }
+        $deploysToDefault = $requestedDeploy.TrimEnd('\') -eq `
+            ([IO.Path]::GetFullPath($DefaultDist)).TrimEnd('\')
+    }
+    if ($Mode -eq "auto" -and $reuseValid -and $deploysToDefault) {
         Write-OverlayOk "Reusing validated overlay artifact: $DefaultDist"
         if (-not $NoStart) {
             $targetExe = Join-Path $DefaultDist "engram-overlay.exe"
@@ -348,17 +347,8 @@ try {
         exit 0
     }
 
-    $runningPath = Stop-OverlayProcesses
-    $deployTarget = if ($Deploy) {
-        $Deploy
-    } elseif ($runningPath) {
-        Split-Path -Parent $runningPath
-    } else {
-        $DefaultDist
-    }
-    if (-not [IO.Path]::IsPathRooted($deployTarget)) {
-        $deployTarget = Join-Path $Root $deployTarget
-    }
+    $stoppedProcesses = Stop-EngramArtifactProcesses -ArtifactDir $deployTarget
+    $previousOverlayPaths = @($stoppedProcesses.OverlayPaths)
     $buildWorkPath = Join-Path $Root "build\engram-overlay"
     Write-OverlayOk "Deploy target: $deployTarget"
 
@@ -454,8 +444,12 @@ try {
     if ($tempRoot -and (Test-Path $tempRoot)) {
         Remove-Item -Path $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
     }
-    if (-not $success -and -not $NoStart -and $runningPath -and (Test-Path $runningPath)) {
-        Start-Process -FilePath $runningPath
+    if (-not $success -and -not $NoStart) {
+        foreach ($previousOverlayPath in $previousOverlayPaths) {
+            if (Test-Path $previousOverlayPath) {
+                Start-Process -FilePath $previousOverlayPath
+            }
+        }
     }
 }
 

@@ -1,5 +1,51 @@
 # Release Notes
 
+## 2026-08-17 - v1.5.2: Built-in Manual and Faster Reproducible Installer Builds
+
+> Patch release. Install with the attached setup executable. Existing DB, Wiki, workspace, and
+> user-authored Wiki files remain untouched unless the installer is explicitly pointed elsewhere.
+
+### Highlights
+
+- **An 11-page Korean manual is available inside the dashboard and Obsidian Wiki.** It includes
+  search, Wiki-link navigation, tables of contents, operating scenarios, diagrams with text
+  alternatives, and symptom-based troubleshooting.
+- **Installer-managed manual files update safely.** Engram replaces only versioned manual files;
+  ordinary Wiki templates and user-authored notes are preserved.
+- **Repeat release builds are dramatically faster.** Validated frozen bundles and final setup
+  artifacts are reused by input signature. An identical `-Release` build completed in 6.2 seconds
+  during release validation; `-FreshBuild -Release` remains available for full regeneration.
+
+### Fixed
+
+- Embedding-model hydration now copies exact files from a pinned Hugging Face revision and verifies
+  their SHA-256 hashes, avoiding environment-dependent `SentenceTransformer.save()` output.
+- Windows PowerShell no longer treats PyInstaller's normal stderr progress as a build failure.
+- Long Inno Setup input paths are mapped automatically, large frozen bundles are published by an
+  atomic directory move, and duplicate release-role smoke checks are skipped safely.
+- Direct `engram_get_context` calls now bootstrap repository policy, so managed Git guidance is not
+  omitted outside the one-time context path.
+- Installer upgrades wait for user-config and Wiki-bootstrap helper roles and stop frozen Engram
+  processes before replacing files.
+- Provider/model selections made in Settings are synchronized consistently with the active CLI.
+- The external checkpoint field is labeled **Obsidian Daily Note directory** to make its purpose
+  explicit.
+
+### Validation
+
+- Full Python suite: 358 tests passed.
+- Installer: `EngramOverlay_1.5.2_x64-setup.exe` (419,539,153 bytes).
+- SHA-256: `D0D755AD92CE6BB130B04B39FA1994712001482871E33C1D347078E4E7BF2365`.
+
+### Upgrade Notes
+
+- Exit the running overlay before installing; the installer also stops remaining frozen roles.
+- Keep the prefilled DB/Wiki and workspace paths to reuse the current environment.
+- Selecting a new DB/Wiki directory initializes a fresh store and managed templates there. It does
+  not migrate, modify, or delete the previous store.
+- Start a new terminal or CLI session after installation so updated hooks, skills, and manual
+  content are discovered.
+
 ## 2026-08-17 - v1.5.0: Character Reactions, Installer Reconfiguration, and Agent Policy
 
 > Minor release. This public AMBER release also includes the previously unreleased v1.4 line.

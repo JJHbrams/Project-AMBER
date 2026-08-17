@@ -994,34 +994,27 @@ class CharacterOverlay:
         current_model = self._get_ollama_model_value()
         models = self._get_ollama_models_value()
 
-        # ── 상위 flat 항목: Copilot / Gemini / Codex ───────────────
+        # ── Provider model submenus ────────────────────────────────
         self._provider_var.set(current_provider)
-        self._provider_menu.add_checkbutton(
-            label="Copilot CLI",
-            onvalue="copilot",
-            offvalue="",
-            variable=self._provider_var,
-            command=lambda: self._select_provider_model("copilot", None),
-        )
-        self._provider_menu.add_checkbutton(
-            label="Gemini CLI",
-            onvalue="gemini",
-            offvalue="",
-            variable=self._provider_var,
-            command=lambda: self._select_provider_model("gemini", None),
-        )
-        self._provider_menu.add_checkbutton(
-            label="Codex CLI",
-            onvalue="codex",
-            offvalue="",
-            variable=self._provider_var,
-            command=lambda: self._select_provider_model("codex", None),
-        )
+        from overlay.cli_capabilities import models as provider_models
+        cfg_cli = (load_cfg().get("cli") or {})
+        for provider, label in (("copilot", "Copilot CLI"), ("gemini", "Gemini CLI"), ("codex", "Codex CLI")):
+            submenu = tk.Menu(self._provider_menu, tearoff=0)
+            selected = str(cfg_cli.get({"copilot":"copilot_model", "gemini":"gemini_model", "codex":"codex_model"}[provider]) or "")
+            choices = provider_models(provider, cfg_cli, models)
+            if choices:
+                var = tk.StringVar(value=selected if current_provider == provider else "")
+                for model in choices:
+                    submenu.add_radiobutton(label=model, value=model, variable=var, command=lambda p=provider, m=model: self._select_provider_model(p, m))
+            else:
+                submenu.add_command(label="기본값", command=lambda p=provider: self._select_provider_model(p, None))
+            self._provider_menu.add_cascade(label=f"{'✓' if current_provider == provider else ' '} {label}", menu=submenu)
         self._provider_menu.add_separator()
 
         # ── Claude Code 서브메뉴 ────────────────────────────────────
         if current_provider in {"claude-code", "claude-code-ollama"}:
-            self._claude_model_var.set(current_model if current_provider == "claude-code-ollama" else "direct")
+            direct_model = str(cfg_cli.get("claude_model") or "direct")
+            self._claude_model_var.set(current_model if current_provider == "claude-code-ollama" else direct_model)
         else:
             self._claude_model_var.set("")
 
@@ -1032,6 +1025,14 @@ class CharacterOverlay:
             variable=self._claude_model_var,
             command=lambda: self._select_provider_model("claude-code", ""),
         )
+        for alias in provider_models("claude-code", cfg_cli, models):
+            self._claude_submenu.add_checkbutton(
+                label=f"claude: {alias}",
+                onvalue=alias,
+                offvalue="",
+                variable=self._claude_model_var,
+                command=lambda mod=alias: self._select_provider_model("claude-code", mod),
+            )
         self._claude_submenu.add_separator()
         if models:
             for _m in models:

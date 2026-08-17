@@ -9,9 +9,18 @@
 ; ============================================================
 
 #define AppName "Engram Overlay"
-#define AppVersion "1.5.0"
+#define AppVersion "1.5.2"
 #define AppPublisher "DRTECH"
 #define AppExeName "engram-overlay.exe"
+#ifndef BuildCompression
+  #define BuildCompression "zip"
+#endif
+#ifndef BuildSolidCompression
+  #define BuildSolidCompression "no"
+#endif
+#ifndef BuildOutputSuffix
+  #define BuildOutputSuffix "-dev"
+#endif
 
 [Setup]
 AppId={{A7E3C1D2-9B4F-4E6A-8C11-5D2F1A0B3E64}
@@ -24,9 +33,9 @@ DisableProgramGroupPage=yes
 PrivilegesRequired=lowest
 ; drt-notebookLM 처럼 setup.exe 를 프로젝트 루트에 생성 (.iss 기준 상위 = repo 루트)
 OutputDir=..
-OutputBaseFilename=EngramOverlay_{#AppVersion}_x64-setup
-Compression=lzma2
-SolidCompression=yes
+OutputBaseFilename=EngramOverlay_{#AppVersion}{#BuildOutputSuffix}_x64-setup
+Compression={#BuildCompression}
+SolidCompression={#BuildSolidCompression}
 WizardStyle=modern
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
@@ -39,6 +48,8 @@ Name: "korean"; MessagesFile: "compiler:Languages\Korean.isl"
 Name: "autostart"; Description: "Windows 시작 시 자동 실행 (Startup 등록)"; Flags: unchecked
 
 [Files]
+; install 전 실행 중인 동일 설치본을 종료하기 위한 공통 helper (PrepareToInstall에서 추출)
+Source: "stop-engram-processes.ps1"; Flags: dontcopy
 ; frozen 번들 전체 (dist\engram-overlay\*)
 Source: "..\dist\engram-overlay\*"; DestDir: "{app}\dist\engram-overlay"; Flags: recursesubdirs createallsubdirs ignoreversion
 Source: "..\config\overlay.yaml"; DestDir: "{app}\dist\engram-overlay\config"; Flags: ignoreversion
@@ -102,7 +113,7 @@ var
   Clean: String;
   InDb: Boolean;
 begin
-  ConfigPath := ExpandConstant('{userprofile}\.engram\user.config.yaml');
+  ConfigPath := ExpandConstant('{%USERPROFILE}\.engram\user.config.yaml');
   if not LoadStringsFromFile(ConfigPath, Lines) then
     Exit;
 
@@ -203,4 +214,24 @@ begin
     R := R + ' -EnableAutoStart';
   R := R + ' -LaunchNow';
   Result := R;
+end;
+
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+var
+  ResultCode: Integer;
+  HelperPath: String;
+  Params: String;
+begin
+  ExtractTemporaryFile('stop-engram-processes.ps1');
+  HelperPath := ExpandConstant('{tmp}\stop-engram-processes.ps1');
+  Params := '-NoProfile -ExecutionPolicy Bypass -File "' + HelperPath +
+    '" -ArtifactDir "' + ExpandConstant('{app}\dist\engram-overlay') + '"';
+  if (not Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'), Params,
+    '', SW_HIDE, ewWaitUntilTerminated, ResultCode)) then
+  begin
+    Result := '실행 중인 Engram 프로세스를 종료하지 못했습니다.';
+    Exit;
+  end;
+  if ResultCode <> 0 then
+    Result := '실행 중인 Engram 프로세스를 종료하지 못했습니다. (exit=' + IntToStr(ResultCode) + ')';
 end;

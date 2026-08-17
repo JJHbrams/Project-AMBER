@@ -382,6 +382,24 @@ def set_ollama_model(model: str, sync_user: bool = False) -> str:
     return model
 
 
+def get_cli_model(provider: str, cfg: dict | None = None) -> str:
+    if cfg is None: cfg = load_cfg()
+    cli = cfg.get("cli", {}) if isinstance(cfg, dict) else {}
+    keys = {"copilot": "copilot_model", "gemini": "gemini_model", "codex": "codex_model", "claude-code": "claude_model", "claude-code-ollama": "ollama_model", "ollama": "ollama_model"}
+    return str(cli.get(keys.get(normalize_cli_provider(provider), "")) or "").strip() if isinstance(cli, dict) else ""
+
+
+def set_cli_model(provider: str, model: str, sync_user: bool = False) -> str:
+    provider, model = normalize_cli_provider(provider), str(model or "").strip()
+    keys = {"copilot": "copilot_model", "gemini": "gemini_model", "codex": "codex_model", "claude-code": "claude_model", "claude-code-ollama": "ollama_model", "ollama": "ollama_model"}
+    key = keys[provider]
+    def update(state: dict) -> None:
+        cli = state.get("cli") if isinstance(state.get("cli"), dict) else {}; cli[key] = model; state["cli"] = cli
+    update_overlay_state(update)
+    if sync_user: _set_user_cli_value(key, model)
+    return model
+
+
 def get_flip_horizontal(cfg: dict | None = None) -> bool:
     if cfg is None:
         cfg = load_cfg()

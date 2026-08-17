@@ -2,6 +2,7 @@
 param(
     [string]$Deploy = "",
     [switch]$NoStart,
+    [switch]$FreshBuild,
     [string]$CondaEnv = "intel_engram"
 )
 
@@ -13,10 +14,10 @@ if (-not (Test-Path $engine)) {
 }
 
 $arguments = @{
-    Mode = "rebuild"
+    Mode = if ($FreshBuild) { "rebuild" } else { "auto" }
     CondaEnv = $CondaEnv
+    Deploy = $(if ($Deploy) { $Deploy } else { Join-Path $PSScriptRoot "dist\\engram-overlay" })
 }
-if ($Deploy) { $arguments.Deploy = $Deploy }
 if ($NoStart) { $arguments.NoStart = $true }
 
 & $engine @arguments

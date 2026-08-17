@@ -24,6 +24,7 @@ import win32gui
 import win32process
 
 from overlay.config import get_cli_provider, get_workdir, load_cfg, normalize_cli_provider
+from overlay.cli_capabilities import supported_efforts
 
 ENGRAM_CMD = Path.home() / ".engram" / "engram-copilot.cmd"
 ENGRAM_GEMINI_CMD = Path.home() / ".engram" / "engram-gemini.cmd"
@@ -419,8 +420,12 @@ def _resolve_provider_launch(cfg: dict, provider: str) -> tuple[str, list[str], 
 
             claude_args = ["--model", selected_model]
             label = f"claude --model {selected_model}"
+        effort = str(cli_cfg.get("claude_effort") or "").strip()
+        if effort:
+            claude_args += ["--effort", effort]
+            label = f"{label} --effort {effort}"
         if ENGRAM_CLAUDE_CMD.exists():
-            return normalized, ["cmd", "/k", str(ENGRAM_CLAUDE_CMD), *claude_args], ENGRAM_CLAUDE_CMD.name, env_overrides, warnings
+            return normalized, ["cmd", "/k", str(ENGRAM_CLAUDE_CMD), *claude_args], label, env_overrides, warnings
         return normalized, ["cmd", "/k", CLAUDE_CODE_CMD, *claude_args], label, env_overrides, warnings
 
     if normalized == "ollama":
@@ -429,19 +434,29 @@ def _resolve_provider_launch(cfg: dict, provider: str) -> tuple[str, list[str], 
         return resolved_provider, launch_args, label, env_overrides, warnings
 
     if normalized == "gemini":
+        model = str(cli_cfg.get("gemini_model") or "").strip()
+        args = ["--model", model] if model and model != "auto" else []
         if ENGRAM_GEMINI_CMD.exists():
-            return normalized, ["cmd", "/k", str(ENGRAM_GEMINI_CMD)], ENGRAM_GEMINI_CMD.name, env_overrides, warnings
+            return normalized, ["cmd", "/k", str(ENGRAM_GEMINI_CMD), *args], ENGRAM_GEMINI_CMD.name, env_overrides, warnings
         gemini_command = str(cli_cfg.get("gemini_command") or "gemini").strip() or "gemini"
         label = "gemini"
-        return normalized, ["cmd", "/k", gemini_command], label, env_overrides, warnings
+        return normalized, ["cmd", "/k", gemini_command, *args], label, env_overrides, warnings
 
     if normalized == "codex":
+        model = str(cli_cfg.get("codex_model") or "").strip(); effort = str(cli_cfg.get("codex_reasoning_effort") or "").strip()
+        supported = supported_efforts("codex", model)
+        if effort and supported and effort not in supported:
+            warnings.append(f"Codex effort '{effort}' is unsupported for model '{model}'; omitting it.")
+            effort = ""
+        args = (["-m", model] if model else []) + (["-c", f"model_reasoning_effort={effort}"] if effort else [])
         if ENGRAM_CODEX_CMD.exists():
-            return normalized, ["cmd", "/k", str(ENGRAM_CODEX_CMD)], ENGRAM_CODEX_CMD.name, env_overrides, warnings
+            return normalized, ["cmd", "/k", str(ENGRAM_CODEX_CMD), *args], ENGRAM_CODEX_CMD.name, env_overrides, warnings
         codex_command = str(cli_cfg.get("codex_command") or "codex").strip() or "codex"
-        return normalized, ["cmd", "/k", codex_command], codex_command, env_overrides, warnings
+        return normalized, ["cmd", "/k", codex_command, *args], codex_command, env_overrides, warnings
 
-    return "copilot", ["cmd", "/k", str(ENGRAM_CMD)], "engram-copilot.cmd", env_overrides, warnings
+    model = str(cli_cfg.get("copilot_model") or "").strip(); effort = str(cli_cfg.get("copilot_effort") or "").strip()
+    args = (["--model", model] if model and model != "auto" else []) + (["--effort", effort] if effort else [])
+    return "copilot", ["cmd", "/k", str(ENGRAM_CMD), *args], "engram-copilot.cmd", env_overrides, warnings
 
 
 class ChatTerminal:

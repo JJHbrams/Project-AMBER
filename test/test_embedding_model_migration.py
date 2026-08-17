@@ -1,11 +1,12 @@
 import tempfile
 import types
 import unittest
+import json
 from pathlib import Path
 from unittest.mock import patch
 
 from core.graph.semantic.semantic_graph import SemanticGraph
-from core.install.model_manifest import ensure_model, read_manifest
+from core.install.model_manifest import create_manifest, ensure_model, read_manifest
 
 
 async def _embedding(_text: str, _prefix: str) -> list[float]:
@@ -92,22 +93,31 @@ class EmbeddingModelMigrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(results, [])
         self.assertEqual(stale["episodes"], 1)
 
-    def test_unstamped_export_is_replaced_instead_of_relabelled(self):
+    def test_manifest_pinned_export_is_replaced_instead_of_relabelled(self):
         model_dir = Path(self._tmpdir.name) / "legacy-model"
         model_dir.mkdir()
+        (model_dir / "config.json").write_text("{}", encoding="utf-8")
+        (model_dir / "model.safetensors").write_bytes(b"e5")
+        manifest = create_manifest(
+            model_dir,
+            model_id="intfloat/multilingual-e5-small",
+            resolved_revision="test-revision",
+        )
+        (model_dir / "manifest.json").write_text(
+            json.dumps(manifest), encoding="utf-8"
+        )
         (model_dir / "legacy.bin").write_bytes(b"legacy")
 
-        class _Model:
-            def __init__(self, *_args, **_kwargs):
-                pass
+        cache = Path(self._tmpdir.name) / "hub-cache"
+        cache.mkdir()
+        (cache / "config.json").write_text("{}", encoding="utf-8")
+        (cache / "model.safetensors").write_bytes(b"e5")
 
-            def save(self, path):
-                target = Path(path)
-                (target / "config.json").write_text("{}", encoding="utf-8")
-                (target / "model.safetensors").write_bytes(b"e5")
+        def fake_download(**kwargs):
+            return cache / kwargs["filename"]
 
-        fake_module = types.SimpleNamespace(SentenceTransformer=_Model)
-        with patch.dict("sys.modules", {"sentence_transformers": fake_module}):
+        fake_module = types.SimpleNamespace(hf_hub_download=fake_download)
+        with patch.dict("sys.modules", {"huggingface_hub": fake_module}):
             result = ensure_model(
                 model_dir,
                 model_id="intfloat/multilingual-e5-small",

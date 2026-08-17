@@ -41,6 +41,7 @@ from overlay.character_assets import (
     normalize_sprite_vfx,
     resolve_reaction_pack,
 )
+from overlay.cli_capabilities import effort_key, efforts as provider_efforts, model_key, models as provider_models, validate as validate_cli
 from core.identity import get_persona, set_persona_baseline
 from core.config.runtime_config import normalize_policy_guidance_level
 from core.tutorial import complete_tutorial_step, has_user_persona_override, reset_tutorial_state
@@ -922,6 +923,7 @@ class _SettingsWindow:
         self._provider_var = tk.StringVar()
         provider_combo = ttk.Combobox(f, textvariable=self._provider_var, values=_PROVIDER_OPTIONS, state="readonly", width=18)
         provider_combo.grid(row=0, column=1, sticky="ew", **PAD)
+        provider_combo.bind("<<ComboboxSelected>>", lambda _event: self._update_provider_capability_controls())
 
         # Ollama 모델
         ttk.Label(f, text="Ollama 모델:").grid(row=1, column=0, sticky="w", **PAD)
@@ -948,6 +950,16 @@ class _SettingsWindow:
         self._gemini_cmd_var = tk.StringVar()
         ttk.Entry(f, textvariable=self._gemini_cmd_var, width=22).grid(row=4, column=1, sticky="ew", **PAD)
 
+        ttk.Label(f, text="공급자 모델:").grid(row=7, column=0, sticky="w", **PAD)
+        self._provider_model_var = tk.StringVar()
+        self._provider_model_combo = ttk.Combobox(f, textvariable=self._provider_model_var, width=19)
+        self._provider_model_combo.grid(row=7, column=1, sticky="ew", **PAD)
+        self._provider_model_combo.bind("<<ComboboxSelected>>", lambda _event: self._update_provider_capability_controls())
+        ttk.Label(f, text="Reasoning effort:").grid(row=8, column=0, sticky="w", **PAD)
+        self._provider_effort_var = tk.StringVar()
+        self._provider_effort_combo = ttk.Combobox(f, textvariable=self._provider_effort_var, width=19)
+        self._provider_effort_combo.grid(row=8, column=1, sticky="ew", **PAD)
+
         ttk.Label(
             f,
             text="힌트: persona.user.yaml에 작성한 값은 자동 진화보다 우선 적용됩니다.",
@@ -972,6 +984,24 @@ class _SettingsWindow:
         self._ollama_model_combo["values"] = models
         if models and current not in models:
             self._ollama_model_combo.set(models[0])
+
+    def _update_provider_capability_controls(self) -> None:
+        provider = _PROVIDER_DISPLAY_TO_VALUE.get(self._provider_var.get(), self._provider_var.get())
+        cli = (self._cfg.get("cli") or {}) if isinstance(self._cfg, dict) else {}
+        available = provider_models(provider, cli, self._on_get_ollama_models() if self._on_get_ollama_models else [])
+        self._provider_model_combo["values"] = available
+        key = model_key(provider)
+        configured_model = str(cli.get(key) or "") if key else ""
+        if not self._provider_model_var.get() or self._provider_model_var.get() not in available:
+            self._provider_model_var.set(configured_model)
+        effort_values = provider_efforts(provider, cli, self._provider_model_var.get())
+        self._provider_effort_combo["values"] = effort_values
+        ekey = effort_key(provider)
+        configured_effort = str(cli.get(ekey) or "") if ekey else ""
+        if not self._provider_effort_var.get() or self._provider_effort_var.get() not in effort_values:
+            self._provider_effort_var.set(configured_effort)
+        self._provider_model_combo.configure(state="readonly" if available else "disabled")
+        self._provider_effort_combo.configure(state="readonly" if effort_values else "disabled")
 
     @staticmethod
     def _make_resizable_text(parent, height: int = 3):
@@ -1841,14 +1871,14 @@ class _SettingsWindow:
         ).pack(anchor="w")
         ttk.Label(policy_info, textvariable=self._policy_status_var, foreground="#6a4c00").pack(anchor="w")
 
-        ttk.Label(f, text="자동 체크포인트", font=("", 9, "bold")).grid(row=11, column=0, columnspan=2, sticky="w", padx=8, pady=(4, 2))
+        ttk.Label(f, text="Obsidian Daily Note 디렉터리", font=("", 9, "bold")).grid(row=11, column=0, columnspan=2, sticky="w", padx=8, pady=(4, 2))
         daily_frame = ttk.Frame(f)
         daily_frame.grid(row=12, column=0, columnspan=2, sticky="ew", padx=16, pady=(2, 0))
         ttk.Entry(daily_frame, textvariable=self._external_daily_dir_var).pack(side="left", fill="x", expand=True)
         ttk.Button(daily_frame, text="찾기...", command=self._browse_external_daily_dir).pack(side="left", padx=(6, 0))
         ttk.Label(
             f,
-            text="선택 사항입니다. 비워두면 Engram Wiki daily note에만 기록합니다.",
+            text="선택 사항입니다. 지정하면 Engram Wiki daily note와 함께 Obsidian Daily Note에도 기록합니다.",
             foreground="gray",
         ).grid(row=13, column=0, columnspan=2, sticky="w", padx=28, pady=(0, 8))
 
@@ -1950,6 +1980,7 @@ class _SettingsWindow:
 
         gemini_cmd = _nested_get(cfg, ["cli", "gemini_command"], "gemini")
         self._gemini_cmd_var.set(str(gemini_cmd or "gemini"))
+        self._update_provider_capability_controls()
 
         # 터미널 탭
         font_size = _nested_get(cfg, ["terminal", "base_font_size"], 8)
@@ -2306,7 +2337,7 @@ class _SettingsWindow:
             self._workdir_var.set(path)
 
     def _browse_external_daily_dir(self):
-        path = filedialog.askdirectory(parent=self.window, title="외부 daily note 폴더 선택")
+        path = filedialog.askdirectory(parent=self.window, title="Obsidian Daily Note 디렉터리 선택")
         if path:
             self._external_daily_dir_var.set(path)
 
@@ -2434,6 +2465,15 @@ class _SettingsWindow:
         # Validate the active source before loading/mutating/saving the user YAML.  _save()
         # owns user-visible error handling, so failed validation cannot invoke callbacks/toasts.
         mode = character_source_mode_from_display(self._char_source_mode_var.get())
+        provider_display = self._provider_var.get().strip()
+        provider = normalize_cli_provider(_PROVIDER_DISPLAY_TO_VALUE.get(provider_display, provider_display))
+        provider_cli: dict[str, str] = {}
+        key = model_key(provider)
+        if key: provider_cli[key] = self._provider_model_var.get().strip()
+        ekey = effort_key(provider)
+        if ekey: provider_cli[ekey] = self._provider_effort_var.get().strip()
+        invalid = validate_cli(provider, provider_cli, self._on_get_ollama_models() if self._on_get_ollama_models else [])
+        if invalid: raise ValueError(invalid)
         grid_values = (
             self._grid_path_var.get().strip(), self._grid_columns_var.get(), self._grid_rows_var.get(),
             self._grid_cell_width_var.get(), self._grid_cell_height_var.get(), self._grid_chroma_var.get().strip(),
@@ -2511,6 +2551,18 @@ class _SettingsWindow:
 
         ollama_model = self._ollama_model_var.get().strip()
         _nested_set(user, ["cli", "ollama_model"], ollama_model or None)
+
+        provider_key = model_key(normalize_cli_provider(provider_value))
+        provider_model = self._provider_model_var.get().strip()
+        if provider_key:
+            _nested_set(user, ["cli", provider_key], provider_model or None)
+        if normalize_cli_provider(provider_value) == "claude-code" and not provider_model:
+            # Explicit GUI "direct" selection must not retain legacy local routing.
+            _nested_set(user, ["cli", "ollama_model"], None)
+        effort = self._provider_effort_var.get().strip()
+        effort_cfg_key = effort_key(normalize_cli_provider(provider_value))
+        if effort_cfg_key:
+            _nested_set(user, ["cli", effort_cfg_key], effort or None)
 
         ollama_cmd = self._ollama_cmd_var.get().strip()
         if ollama_cmd and ollama_cmd != "ollama":

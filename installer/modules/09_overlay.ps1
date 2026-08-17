@@ -14,6 +14,7 @@ if (-not (Test-Path $overlayEngine)) {
         Mode = $OverlayBuildMode
         CondaEnv = $CondaEnv
         PythonPath = $PythonExe
+        Deploy = (Join-Path $ProjectRoot "dist\\engram-overlay")
         NoStart = $true
     }
     & $overlayEngine @engineArguments

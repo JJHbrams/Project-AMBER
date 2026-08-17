@@ -24,6 +24,7 @@ from core.dashboard.pages import (  # noqa: E402
     render_identity,
     render_kg_graph,
     render_memories,
+    render_manual,
     render_overview,
     render_semantic,
     render_wiki_nodes,
@@ -41,9 +42,24 @@ st.markdown(f"<style>\n{_sidebar_css}</style>", unsafe_allow_html=True)
 
 st.sidebar.markdown("## 🧠 engram")
 st.sidebar.markdown("---")
+_manual_requested = str(st.query_params.get("page", "")) == "manual"
+_pages = ["📊 Overview", "🕸️ KG Graph", "📝 Wiki Nodes", "💭 Memories", "📘 Manual", "📋 Directives", "🌐 Semantic", "🧬 Identity"]
+
+
+def _sync_page_query() -> None:
+    if st.session_state.get("dashboard_page") == "📘 Manual":
+        return
+    for key in ("page", "manual"):
+        if key in st.query_params:
+            del st.query_params[key]
+
+
 page = st.sidebar.radio(
     "nav",
-    ["📊 Overview", "🕸️ KG Graph", "📝 Wiki Nodes", "💭 Memories", "📋 Directives", "🌐 Semantic", "🧬 Identity"],
+    _pages,
+    index=_pages.index("📘 Manual") if _manual_requested else 0,
+    key="dashboard_page",
+    on_change=_sync_page_query,
     label_visibility="collapsed",
 )
 st.sidebar.markdown("---")
@@ -60,6 +76,8 @@ elif page == "📝 Wiki Nodes":
     render_wiki_nodes()
 elif page == "💭 Memories":
     render_memories()
+elif page == "📘 Manual":
+    render_manual()
 elif page == "📋 Directives":
     render_directives()
 elif page == "🌐 Semantic":

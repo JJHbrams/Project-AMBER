@@ -48,6 +48,22 @@ $Utf8NoBom     = [System.Text.UTF8Encoding]::new($false)
 
 if (-not (Test-Path $ShimDir)) { New-Item $ShimDir -ItemType Directory -Force | Out-Null }
 
+function Invoke-EngramFrozenRole {
+    param(
+        [Parameter(Mandatory)][string]$Role,
+        [Parameter(Mandatory)][string[]]$ArgumentList
+    )
+
+    $process = Start-Process `
+        -FilePath $DistExe `
+        -ArgumentList (@("--role", $Role) + $ArgumentList) `
+        -WorkingDirectory (Split-Path $DistExe) `
+        -Wait `
+        -PassThru `
+        -WindowStyle Hidden
+    return $process.ExitCode
+}
+
 function Remove-EngramManagedClaudeHooks {
     $settingsPath = Join-Path $env:USERPROFILE ".claude\settings.json"
     $markers = @("engram-sessionstart-hook", "engram-claude-pretool-hook")
@@ -244,12 +260,16 @@ workdir: "$($WorkDir -replace '\\','/')"
     [System.IO.File]::WriteAllText($UserConfig, $u, $Utf8NoBom)
     Write-Ok "Created: $UserConfig"
 } else {
-    & $DistExe --role install-user-config `
-        --config-path $UserConfig `
-        --db-dir $DbDir `
-        --workdir $WorkDir
-    if ($LASTEXITCODE -ne 0) {
-        Write-Warn "사용자 설정 경로 갱신 실패 (exit=$LASTEXITCODE)"
+    $installUserConfigArgs = @(
+        "--config-path", ('"{0}"' -f $UserConfig),
+        "--db-dir", ('"{0}"' -f $DbDir),
+        "--workdir", ('"{0}"' -f $WorkDir)
+    )
+    $installUserConfigExitCode = Invoke-EngramFrozenRole `
+        -Role "install-user-config" `
+        -ArgumentList $installUserConfigArgs
+    if ($installUserConfigExitCode -ne 0) {
+        Write-Warn "사용자 설정 경로 갱신 실패 (exit=$installUserConfigExitCode)"
         exit 1
     }
     Write-Ok "Updated: $UserConfig (db.root_dir, workdir)"
@@ -269,8 +289,11 @@ if (-not (Test-Path $OverlayConfig)) {
     [System.IO.File]::WriteAllText($OverlayConfig, $o, $Utf8NoBom)
     Write-Ok "Created: $OverlayConfig"
 } else {
-    # 기존 보존, provider/포트만 라인 치환은 생략 — 이미 있으면 사용자 설정 존중
-    Write-Ok "Exists (보존): $OverlayConfig"
+    $overlayConfigArgs = @("--config-path", ('"{0}"' -f $OverlayConfig), "--overlay-provider", $CliProvider, "--overlay-mcp-port", $MCP_HTTP_PORT)
+    if ($OllamaModel) { $overlayConfigArgs += @("--overlay-ollama-model", $OllamaModel) }
+    $overlayConfigExitCode = Invoke-EngramFrozenRole -Role "install-user-config" -ArgumentList $overlayConfigArgs
+    if ($overlayConfigExitCode -ne 0) { Write-Warn "overlay.user.yaml provider 갱신 실패 (exit=$overlayConfigExitCode)"; exit 1 }
+    Write-Ok "Updated: $OverlayConfig (cli.provider, mcp.http_port)"
 }
 
 # ── 3. MCP 설정 (JSON, PowerShell 네이티브) ──────────────────
@@ -352,9 +375,15 @@ if (Test-Path $CopilotInstructionsSource) {
 
 # ── 6. DB / Wiki / Directives bootstrap ─────────────────────
 Write-Step "DB / Wiki / Directives 초기화"
-& $DistExe --role install-bootstrap --db-dir $DbDir --templates-dir $InstallerTemplates
-if ($LASTEXITCODE -ne 0) {
-    Write-Warn "초기화 실패 (exit=$LASTEXITCODE)"
+$installBootstrapArgs = @(
+    "--db-dir", ('"{0}"' -f $DbDir),
+    "--templates-dir", ('"{0}"' -f $InstallerTemplates)
+)
+$installBootstrapExitCode = Invoke-EngramFrozenRole `
+    -Role "install-bootstrap" `
+    -ArgumentList $installBootstrapArgs
+if ($installBootstrapExitCode -ne 0) {
+    Write-Warn "초기화 실패 (exit=$installBootstrapExitCode)"
     exit 1
 }
 Write-Ok "DB schema, wiki starter files, directives"
