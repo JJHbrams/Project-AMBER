@@ -61,10 +61,10 @@ session:
         self.assertIn('["memory", "auto_checkpoint", "external_daily_dir"]', settings)
         self.assertNotIn('text="자동 체크포인트"', settings)
 
-    def test_installer_version_is_1_5_2(self):
+    def test_installer_version_is_1_5_3(self):
         iss = (ROOT / "installer" / "engram-overlay.iss").read_text(encoding="utf-8-sig")
 
-        self.assertIn('#define AppVersion "1.5.2"', iss)
+        self.assertIn('#define AppVersion "1.5.3"', iss)
         self.assertIn(
             'OutputBaseFilename=EngramOverlay_{#AppVersion}{#BuildOutputSuffix}_x64-setup',
             iss,
@@ -133,6 +133,50 @@ session:
             with self.assertRaisesRegex(ValueError, "'cli' value must be a mapping"):
                 update_overlay_installer_config(config_path, provider="codex", mcp_port=17385)
             self.assertEqual(config_path.read_text(encoding="utf-8"), original)
+
+    def test_overlay_update_migrates_legacy_custom_character_without_overwriting_it(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            static_image = root / "custom.png"
+            static_image.touch()
+            frames = root / "frames"
+            frames.mkdir()
+
+            cases = ((static_image, "static"), (frames, "sequence"))
+            for index, (source, expected_mode) in enumerate(cases):
+                config_path = root / f"overlay-{index}.user.yaml"
+                config_path.write_text(
+                    yaml.safe_dump({"overlay": {"character": {"name": str(source)}}}),
+                    encoding="utf-8",
+                )
+
+                update_overlay_installer_config(config_path, provider="codex", mcp_port=17385)
+
+                updated = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+                self.assertEqual(updated["overlay"]["character"]["name"], str(source))
+                self.assertEqual(updated["overlay"]["character"]["source_mode"], expected_mode)
+
+    def test_overlay_update_keeps_explicit_mode_and_leaves_untouched_default_legacy_name(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            explicit_path = root / "explicit.yaml"
+            explicit_path.write_text(
+                "overlay:\n  character:\n    name: C:/custom/image.png\n    source_mode: sequence\n",
+                encoding="utf-8",
+            )
+            default_path = root / "default.yaml"
+            default_path.write_text(
+                "overlay:\n  character:\n    name: engram\n",
+                encoding="utf-8",
+            )
+
+            update_overlay_installer_config(explicit_path, provider="codex", mcp_port=17385)
+            update_overlay_installer_config(default_path, provider="codex", mcp_port=17385)
+
+            explicit = yaml.safe_load(explicit_path.read_text(encoding="utf-8"))
+            default = yaml.safe_load(default_path.read_text(encoding="utf-8"))
+            self.assertEqual(explicit["overlay"]["character"]["source_mode"], "sequence")
+            self.assertNotIn("source_mode", default["overlay"]["character"])
 
 
 if __name__ == "__main__":

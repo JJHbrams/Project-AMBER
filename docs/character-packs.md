@@ -6,6 +6,8 @@ Character packs provide a static fallback and optional VFX. A reaction pack supp
 
 Bundled packs live under the installation directory; user packs use the same layout below `~/.engram` and take priority when valid.
 
+Standalone bundled sources use `resource/character/static/<id>.png` and numbered frame sequences use `resource/character/sequences/<id>/`. The historical bundled relative forms `resource/character/<id>.png` and `resource/character/<id>/` remain accepted as constrained aliases; arbitrary missing absolute user paths are never redirected.
+
 ```text
 resource/character/sets/<id>/manifest.yaml
 resource/character/sets/<id>/character.png
@@ -28,13 +30,15 @@ For both types, a valid user manifest is selected before the bundled manifest. A
 
 ## Settings GUI source modes
 
-The overlay settings window has three mutually exclusive character-source modes. Switching modes only changes which inputs are enabled; it does not erase values for the other modes.
+The overlay settings window has three mutually exclusive character-source modes. Switching modes only changes which inputs are enabled; it does not erase values for the other modes. The persisted `source_mode` is authoritative, so a stored path from another mode cannot override the active sprite grid, static image, or sequence.
 
 | GUI mode | Persisted value | Required selection |
 |---|---|---|
 | `단일 이미지` | `static` | A readable `.png` file |
 | `애니메이션 폴더` | `sequence` | A directory of animation frames |
 | `스프라이트 그리드` | `sprite_grid` | A `.png`, columns, rows, cell width/height and `#RRGGBB` chroma key |
+
+Static VFX preserve body geometry by default. `overlay.character.effects.legacy_body_motion: true` is the explicit opt-in for the earlier squash/stretch, shake, and vertical bob behavior; composited VFX remain active when it is false. Existing sequence motion remains unchanged.
 
 For an inline custom grid selected in the GUI, saving is blocked unless its dimensions are exactly `columns * cell_width` by `rows * cell_height`. The GUI inline format intentionally supplies generic default/idle/hover/click/input/work/error states using cell `0`; it cannot infer which drawing represents a semantic event. Use a reaction-pack manifest for a custom event-to-cell mapping, frame rotation, transforms, or VFX.
 

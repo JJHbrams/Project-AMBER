@@ -19,13 +19,14 @@ from overlay.character_assets import (
     USER_REACTION_PACKS_DIR,
     ReactionPackResolution,
     inline_reaction_pack,
+    resolve_bundled_character_source,
     resolve_character_set,
     resolve_legacy_asset,
     resolve_reaction_pack,
 )
 from overlay.reaction_badge import crop_sprite, key_chroma, public_event
 from overlay.config import (
-    _USER_CONFIG_PATH, resolve_path, resolve_editable_overlay_path, load_cfg,
+    _USER_CONFIG_PATH, resolve_editable_overlay_path, load_cfg,
     get_overlay_state, set_flip_horizontal, update_overlay_state,
 )
 
@@ -33,7 +34,6 @@ USER_CONFIG_DIR = Path.home() / ".engram"
 USER_OVERLAY_RESOURCE = USER_CONFIG_DIR / "overlay.png"
 USER_CHARACTER_DIR = USER_CONFIG_DIR / "character"
 RESOURCE_OVERLAY = resolve_editable_overlay_path("resource/overlay.png")
-CHARACTER_DIR = resolve_editable_overlay_path("resource/character")
 _CHROMA = "#010101"
 _SMALL_MODEL_RE = re.compile(r"\b[0-4](?:\.\d+)?b\b", re.IGNORECASE)
 log = logging.getLogger(__name__)
@@ -361,7 +361,11 @@ class _CharacterProfile:
 
         self.name = str(character_cfg.get("name", "")).strip()
         self.set_id = str(character_cfg.get("set", "")).strip()
-        self.source_mode = str(character_cfg.get("source_mode", "sprite_grid")).strip().lower()
+        stored_source_mode = str(character_cfg.get("source_mode") or "").strip().lower()
+        legacy_sequence = Path(self.name).is_dir() or resolve_bundled_character_source(self.name, "sequence") is not None
+        self.source_mode = stored_source_mode or ("sequence" if legacy_sequence else "static")
+        if self.source_mode not in {"static", "sequence", "sprite_grid"}:
+            self.source_mode = "static"
         self.set_resolution = resolve_character_set(self.set_id)
         reactions_cfg = character_cfg.get("reactions", {})
         reactions_cfg = reactions_cfg if isinstance(reactions_cfg, dict) else {}
@@ -389,10 +393,9 @@ class _CharacterProfile:
                 configured_offset = -1
             if not isinstance(reactions_cfg["crop_y_offset_px"], bool) and 0 <= configured_offset < self.reaction_pack.cell_height:
                 self.reaction_pack = replace(self.reaction_pack, crop_y_offset_px=configured_offset)
-        identity = Path(self.name or self.set_id).stem.lower()
-        self.sprite_enabled = self.source_mode == "sprite_grid" and bool(reactions_cfg.get("enabled", False)) and self.reaction_pack.source != "disabled" and (
-            bool(reactions_cfg.get("apply_to_custom", False)) or identity == str(reactions_cfg.get("pack", self.set_id)).lower()
-        ) and bool(self.reaction_pack.states)
+        # source_mode is authoritative.  In particular, a stale static/sequence
+        # name must not veto an explicitly selected sprite-grid pack.
+        self.sprite_enabled = self.source_mode == "sprite_grid" and bool(reactions_cfg.get("enabled", False)) and self.reaction_pack.source != "disabled" and bool(self.reaction_pack.states)
 
         self.sequence_enabled = bool(seq_cfg.get("enabled", True))
         self.trigger_chance = _clamp_float(seq_cfg.get("trigger_chance", 0.12), 0.0, 1.0, 0.12)
@@ -404,6 +407,9 @@ class _CharacterProfile:
         self.idle_check_interval_sec = _clamp_float(seq_cfg.get("idle_check_interval_sec", 1.0), 0.1, 30.0, 1.0)
 
         self.effects_enabled = bool(effects_cfg.get("enabled", False))
+        # Sequence animation keeps its historical body motion.  Only explicit
+        # static mode becomes geometry-stable by default.
+        self.legacy_body_motion = self.source_mode != "static" or bool(effects_cfg.get("legacy_body_motion", False))
         self.effects_chroma_key = _parse_chroma_key(effects_cfg.get("chroma_key", _CHROMA))
         self.effects_idle_interval_ms = _clamp_int(effects_cfg.get("idle_interval_ms", 2400), 800, 12000, 2400)
         self.effects_click_frame_ms = _clamp_int(effects_cfg.get("click_frame_ms", 420), 120, 2000, 420)
@@ -443,67 +449,73 @@ class _CharacterProfile:
             pack_id = str(self.reactions_cfg.get("pack", self.set_id)).strip().lower()
             return self.sprite_enabled and self.reaction_pack.source == "bundled" and pack_id == "engram"
 
-        bundled_engram_png = resolve_path("resource/character/engram.png")
         bundled_set_image = self.set_resolution.base_image if self.set_resolution.source == "bundled" else None
-        return self._same_path(self.default_frame, bundled_engram_png) or self._same_path(self.default_frame, bundled_set_image)
+        default_engram_set = resolve_character_set("engram")
+        canonical_engram_image = default_engram_set.base_image if default_engram_set.source == "bundled" else None
+        return self._same_path(self.default_frame, bundled_set_image) or self._same_path(self.default_frame, canonical_engram_image)
+
+    @staticmethod
+    def _fallback_frame() -> Path:
+        return USER_OVERLAY_RESOURCE if USER_OVERLAY_RESOURCE.exists() else RESOURCE_OVERLAY
+
+    def _use_sequence_directory(self, directory: Path) -> bool:
+        numbered = _discover_numbered_frames(directory.name, (directory,))
+        if not numbered:
+            return False
+        self.frames_by_index = numbered
+        self.has_numbered_frames = True
+        self.default_frame = numbered.get(0, numbered[min(numbered.keys())])
+        return True
 
     def _discover_frames(self):
         # A valid reaction pack is the character itself, not a floating badge.
         if self.sprite_enabled:
             return
-        # 이름이 비어 있거나 set id와 같은 기본 이름이면 유효 manifest pack을 쓴다.
-        if self.set_resolution.base_image is not None and self.name in {"", self.set_id}:
-            self.default_frame = self.set_resolution.base_image
+        # Sprite-grid selection never falls through to a stale static/sequence
+        # path.  Keep a stable base only as a graceful invalid-pack fallback.
+        if self.source_mode == "sprite_grid":
+            self.default_frame = self.set_resolution.base_image or self._fallback_frame()
             return
 
-        # 이름 미설정 → 바로 fallback
-        if not self.name:
-            self.default_frame = USER_OVERLAY_RESOURCE if USER_OVERLAY_RESOURCE.exists() else RESOURCE_OVERLAY
-            return
-
-        # 절대경로 직접 참조 (설정 창에서 파일/폴더를 선택한 경우)
         name_path = Path(self.name)
         if name_path.is_absolute():
-            if name_path.is_dir():
-                numbered = _discover_numbered_frames(name_path.name, (name_path,))
-                if numbered:
-                    self.frames_by_index = numbered
-                    self.has_numbered_frames = True
-                    self.default_frame = numbered.get(0, numbered[min(numbered.keys())])
-                    return
-                # 디렉토리에 번호 프레임이 없으면 첫 번째 .png 를 정적 이미지로
-                pngs = sorted(name_path.glob("*.png"))
-                if pngs:
-                    self.default_frame = pngs[0]
-                    return
-            elif name_path.is_file() and name_path.suffix.lower() == ".png":
+            if self.source_mode == "static" and name_path.is_file() and name_path.suffix.lower() == ".png":
                 self.default_frame = name_path
                 return
-            # 절대경로가 존재하지 않으면 fallback
-            self.default_frame = USER_OVERLAY_RESOURCE if USER_OVERLAY_RESOURCE.exists() else RESOURCE_OVERLAY
+            if self.source_mode == "sequence" and name_path.is_dir() and self._use_sequence_directory(name_path):
+                return
+            legacy_bundled = resolve_bundled_character_source(self.name, self.source_mode)
+            if self.source_mode == "static" and legacy_bundled is not None:
+                self.default_frame = legacy_bundled
+                return
+            if self.source_mode == "sequence" and legacy_bundled is not None and self._use_sequence_directory(legacy_bundled):
+                return
+            self.default_frame = self._fallback_frame()
             return
 
-        # 2-1: {name}/ 서브디렉토리 탐색 (애니메이션)
-        for char_subdir in (USER_CHARACTER_DIR / self.name, CHARACTER_DIR / self.name):
-            if char_subdir.is_dir():
-                numbered = _discover_numbered_frames(self.name, (char_subdir,))
-                if numbered:
-                    self.frames_by_index = numbered
-                    self.has_numbered_frames = True
-                    self.default_frame = numbered.get(0, numbered[min(numbered.keys())])
-                    return
-
-        # 2-2: {name}.png 단일 이미지 파일 탐색 (정적)
-        for single in (USER_CHARACTER_DIR / f"{self.name}.png", CHARACTER_DIR / f"{self.name}.png"):
-            if single.exists():
-                self.default_frame = single
+        if self.source_mode == "static":
+            if self.set_resolution.base_image is not None and self.name in {"", self.set_id}:
+                self.default_frame = self.set_resolution.base_image
                 return
-
-        # 2-3: overlay.png fallback
-        if USER_OVERLAY_RESOURCE.exists():
-            self.default_frame = USER_OVERLAY_RESOURCE
-        else:
-            self.default_frame = RESOURCE_OVERLAY
+            candidates = []
+            if self.name:
+                candidates.append(USER_CHARACTER_DIR / f"{self.name}.png")
+                resolved = resolve_bundled_character_source(self.name, "static")
+                if resolved is not None:
+                    candidates.append(resolved)
+            for single in candidates:
+                if single.is_file() and single.suffix.lower() == ".png":
+                    self.default_frame = single
+                    return
+        elif self.source_mode == "sequence" and self.name:
+            candidates = [USER_CHARACTER_DIR / self.name]
+            resolved = resolve_bundled_character_source(self.name, "sequence")
+            if resolved is not None:
+                candidates.append(resolved)
+            for directory in candidates:
+                if directory.is_dir() and self._use_sequence_directory(directory):
+                    return
+        self.default_frame = self._fallback_frame()
 
     def build_sequence_paths(self) -> list[Path]:
         if not (self.sequence_enabled and self.has_numbered_frames and self.frames_by_index):
@@ -1287,26 +1299,28 @@ class CharacterOverlay:
         interval = self._profile.effects_idle_interval_ms
         phase = (now_ms % interval) / interval
         pulse = (1.0 - abs(2.0 * phase - 1.0))
-        bob = round(-2 * pulse)
+        legacy_motion = bool(getattr(self._profile, "legacy_body_motion", False))
+        bob = round(-2 * pulse) if legacy_motion else 0
         self._render_current_image(
             effect=self._effect_images.get("twinkle"),
             opacity=0.18 + 0.26 * pulse,
-            scale_x=1.0 - 0.008 * pulse,
-            scale_y=1.0 + 0.012 * pulse,
+            scale_x=1.0 - 0.008 * pulse if legacy_motion else 1.0,
+            scale_y=1.0 + 0.012 * pulse if legacy_motion else 1.0,
             offset_y=bob,
             effect_thickness_px=self._profile.effects_idle_thickness_px,
         )
 
     def _render_click_effect(self, progress: float) -> None:
         pulse = 1.0 - abs(2.0 * progress - 1.0)
-        shake = round(2 * (1.0 - progress) * (1 if int(progress * 20) % 2 else -1))
+        legacy_motion = bool(getattr(self._profile, "legacy_body_motion", False))
+        shake = round(2 * (1.0 - progress) * (1 if int(progress * 20) % 2 else -1)) if legacy_motion else 0
         self._render_current_image(
             effect=self._effect_images.get("sparkle_burst"),
             opacity=min(1.0, 0.25 + 0.9 * pulse),
-            scale_x=1.0 - 0.055 * pulse,
-            scale_y=1.0 + 0.055 * pulse,
+            scale_x=1.0 - 0.055 * pulse if legacy_motion else 1.0,
+            scale_y=1.0 + 0.055 * pulse if legacy_motion else 1.0,
             offset_x=shake,
-            offset_y=round(-2 * pulse),
+            offset_y=round(-2 * pulse) if legacy_motion else 0,
             effect_thickness_px=self._profile.effects_click_thickness_px,
         )
 

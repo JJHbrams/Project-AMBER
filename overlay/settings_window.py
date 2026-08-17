@@ -39,6 +39,8 @@ from overlay.character_assets import (
     USER_REACTION_PACKS_DIR,
     normalize_sprite_transform,
     normalize_sprite_vfx,
+    resolve_bundled_character_source,
+    resolve_bundled_reaction_sheet,
     resolve_reaction_pack,
 )
 from overlay.cli_capabilities import effort_key, efforts as provider_efforts, model_key, models as provider_models, validate as validate_cli
@@ -304,9 +306,18 @@ def character_source_mode_from_display(value: object) -> str:
     return _CHARACTER_SOURCE_MODE_DISPLAY_TO_VALUE.get(str(value or "").strip(), "static")
 
 
-def _resolve_character_source_path(value: object) -> Path:
+def _resolve_character_source_path(value: object, source_mode: str = "") -> Path:
     path = Path(str(value or "").strip()).expanduser()
-    return path if path.is_absolute() else resolve_path(str(path))
+    if path.is_absolute():
+        if source_mode == "sprite_grid":
+            return resolve_bundled_reaction_sheet(value) or path
+        return resolve_bundled_character_source(value, source_mode) or path
+    if source_mode == "sprite_grid":
+        reaction_sheet = resolve_bundled_reaction_sheet(value)
+        if reaction_sheet is not None:
+            return reaction_sheet
+    bundled = resolve_bundled_character_source(value, source_mode)
+    return bundled if bundled is not None else resolve_path(str(path))
 
 
 def validate_sprite_grid(
@@ -332,7 +343,7 @@ def validate_sprite_grid(
         int(chroma[1:], 16)
     except ValueError:
         return False, "chroma는 #RRGGBB 형식이어야 합니다."
-    image_path = _resolve_character_source_path(path)
+    image_path = _resolve_character_source_path(path, "sprite_grid")
     if not image_path.is_file() or image_path.suffix.lower() != ".png":
         return False, "스프라이트 그리드는 PNG 파일을 선택해야 합니다."
     try:
@@ -351,7 +362,7 @@ def validate_character_source(mode: object, character_path: object, grid_values:
     normalized_mode = str(mode or "").strip()
     if normalized_mode == "sprite_grid":
         return validate_sprite_grid(*grid_values)
-    source_path = _resolve_character_source_path(character_path)
+    source_path = _resolve_character_source_path(character_path, normalized_mode)
     if normalized_mode == "static":
         if source_path.is_file() and source_path.suffix.lower() == ".png":
             return True, "유효"
@@ -729,6 +740,12 @@ class _SettingsWindow:
         self._char_dir_button.pack(side="left")
         self._flip_var = tk.BooleanVar()
         ttk.Checkbutton(source_box, text="기본 좌우 반전", variable=self._flip_var).grid(row=1, column=3, sticky="w", padx=(4, 8), pady=4)
+        self._legacy_body_motion_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            source_box,
+            text="단일 이미지 레거시 움직임 (늘림/상하 이동)",
+            variable=self._legacy_body_motion_var,
+        ).grid(row=0, column=2, columnspan=2, sticky="w", padx=(4, 8), pady=4)
         self._grid_path_var = tk.StringVar()
         self._grid_columns_var, self._grid_rows_var = tk.StringVar(), tk.StringVar()
         self._grid_cell_width_var, self._grid_cell_height_var, self._grid_chroma_var = tk.StringVar(), tk.StringVar(), tk.StringVar()
@@ -1934,6 +1951,7 @@ class _SettingsWindow:
         self._apply_character_source_mode()
         self._reload_manifest_editor()
         self._flip_var.set(bool(_nested_get(cfg, ["overlay", "flip_horizontal"], False)))
+        self._legacy_body_motion_var.set(bool(_nested_get(cfg, ["overlay", "character", "effects", "legacy_body_motion"], False)))
 
         height = _nested_get(cfg, ["overlay", "char_height_ratio"], 0.125)
         self._char_height_var.set(float(height))
@@ -2489,6 +2507,8 @@ class _SettingsWindow:
         char_path = self._char_path_var.get().strip()
         _nested_set(user, ["overlay", "character", "name"], char_path or None)
         _nested_set(user, ["overlay", "character", "source_mode"], mode)
+        legacy_body_motion = bool(self._legacy_body_motion_var.get())
+        _nested_set(user, ["overlay", "character", "effects", "legacy_body_motion"], True if legacy_body_motion else None)
         if mode == "sprite_grid":
             _nested_set(user, ["overlay", "character", "reactions", "grid"], {
                 "columns": int(self._grid_columns_var.get()), "rows": int(self._grid_rows_var.get()),

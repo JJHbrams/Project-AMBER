@@ -344,11 +344,15 @@ Claude Code 또는 Goose에서 Ollama 로컬 모델을 백엔드로 사용할 �
 
 설정 창의 `캐릭터 소스`에서 세 가지 방식을 고를 수 있습니다.
 
+선택한 방식이 유일한 활성 소스입니다. 예전에 저장한 이미지/폴더 경로는 다음 전환을 위해 보존되지만 현재 렌더링을 덮어쓰지 않습니다. 번들 정적 이미지는 `resource/character/static/`, 프레임 묶음은 `resource/character/sequences/`, 본체·VFX 세트는 `sets/`, 상태 시트는 `reactions/`에 정리되어 있습니다. 예전 `resource/character/<name>.png`와 `resource/character/<name>/` 상대 경로도 제한된 번들 별칭으로 계속 읽습니다.
+
 | 방식 | 선택할 것 | 용도 |
 |---|---|---|
 | `단일 이미지` | PNG 파일 | 정적 캐릭터 |
 | `애니메이션 폴더` | 번호가 붙은 PNG 프레임 폴더 | 기존 frame sequence |
 | `스프라이트 그리드` | PNG 시트, 열·행, 셀 너비·높이, chroma | 이벤트별 캐릭터 본체 상태 |
+
+단일 이미지 VFX는 기본적으로 본체의 원래 폭·높이와 위치를 유지합니다. 이전처럼 squash/stretch·상하 이동 효과까지 원하면 설정의 **단일 이미지 레거시 움직임**을 켜거나 `overlay.character.effects.legacy_body_motion: true`를 지정하세요. VFX 자체는 이 옵션을 꺼도 표시되며, 기존 frame sequence의 동작은 그대로 유지됩니다.
 
 스프라이트 시트는 원하는 N열×M행 크기를 사용할 수 있습니다. `grid`에 열·행과 셀 크기를 정확히 기록해야 하며, 전체 이미지 크기는 반드시 `columns × cell_width` × `rows × cell_height`여야 합니다. GUI에서 고른 임의 그리드는 기본 상태 계약으로만 동작합니다. 이벤트별 셀·애니메이션·VFX를 세밀하게 바꾸려면 아래의 reaction manifest를 사용하세요.
 
