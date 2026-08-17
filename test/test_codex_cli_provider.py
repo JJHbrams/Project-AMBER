@@ -4,6 +4,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from overlay.chat_window import _resolve_provider_launch
+from overlay.main import _make_tray_icon
 from overlay.config import get_cli_provider, normalize_cli_provider
 
 
@@ -33,6 +34,91 @@ class CodexCliProviderTests(unittest.TestCase):
         self.assertEqual(provider, "codex")
         self.assertEqual(args, ["cmd", "/k", str(shim)])
         self.assertEqual(label, "engram-codex.cmd")
+
+    def test_direct_claude_has_no_legacy_ollama_model_or_base_url(self):
+        missing_shim = Path(tempfile.gettempdir()) / "missing-engram-claude.cmd"
+        with patch("overlay.chat_window.ENGRAM_CLAUDE_CMD", missing_shim):
+            provider, args, label, env, _warnings = _resolve_provider_launch(
+                {"cli": {"claude_model": "", "ollama_model": ""}}, "claude-code"
+            )
+        self.assertEqual(provider, "claude-code")
+        self.assertEqual(args, ["cmd", "/k", "claude"])
+        self.assertEqual(label, "claude")
+        self.assertNotIn("ANTHROPIC_BASE_URL", env)
+
+    def test_legacy_claude_ollama_value_still_routes_when_untouched(self):
+        missing_shim = Path(tempfile.gettempdir()) / "missing-engram-claude.cmd"
+        with patch("overlay.chat_window.ENGRAM_CLAUDE_CMD", missing_shim), patch(
+            "overlay.chat_window._query_ollama_capabilities", return_value={"tools"}
+        ):
+            _provider, args, label, env, _warnings = _resolve_provider_launch(
+                {"cli": {"ollama_model": "qwen-local"}}, "claude-code"
+            )
+        self.assertEqual(args, ["cmd", "/k", "claude", "--model", "qwen-local"])
+        self.assertEqual(label, "claude --model qwen-local")
+        self.assertEqual(env["ANTHROPIC_BASE_URL"], "http://localhost:11434")
+
+    def test_claude_alias_launch_uses_anthropic_without_ollama_base_url(self):
+        missing_shim = Path(tempfile.gettempdir()) / "missing-engram-claude.cmd"
+        with patch("overlay.chat_window.ENGRAM_CLAUDE_CMD", missing_shim):
+            provider, args, label, env, _warnings = _resolve_provider_launch(
+                {"cli": {"claude_model": "opus", "ollama_model": "qwen-local"}}, "claude-code"
+            )
+        self.assertEqual(provider, "claude-code")
+        self.assertEqual(args, ["cmd", "/k", "claude", "--model", "opus"])
+        self.assertEqual(label, "claude --model opus")
+        self.assertNotIn("ANTHROPIC_BASE_URL", env)
+
+    def test_tray_model_item_binds_model_not_pystray_menu_item(self):
+        class App:
+            _ollama_model = ""
+            selected = None
+            def get_cli_provider(self): return "copilot"
+            def get_cli_model(self, _provider): return "auto"
+            def _set_provider_model(self, provider, model): self.selected = (provider, model)
+            def toggle_chat(self): pass
+            def show_bubble_history(self): pass
+            def open_settings(self): pass
+            def request_quit(self): pass
+        with tempfile.TemporaryDirectory() as tmp:
+            from PIL import Image
+            icon_path = Path(tmp) / "icon.png"
+            Image.new("RGBA", (2, 2)).save(icon_path)
+            app = App()
+            with patch("overlay.main._resolve_icon_path", return_value=icon_path), patch(
+                "overlay.main.provider_models", return_value=["gpt-5.4"]
+            ):
+                tray = _make_tray_icon(app)
+                provider_menu = list(tray.menu)[2].submenu
+                copilot_model_item = list(list(provider_menu)[0].submenu)[0]
+                copilot_model_item(None)
+        self.assertEqual(app.selected, ("copilot", "gpt-5.4"))
+
+    def test_tray_claude_alias_item_binds_alias_string(self):
+        class App:
+            _ollama_model = ""
+            selected = None
+            def get_cli_provider(self): return "claude-code"
+            def get_cli_model(self, _provider): return "opus"
+            def _set_provider_model(self, provider, model): self.selected = (provider, model)
+            def toggle_chat(self): pass
+            def show_bubble_history(self): pass
+            def open_settings(self): pass
+            def request_quit(self): pass
+        with tempfile.TemporaryDirectory() as tmp:
+            from PIL import Image
+            icon_path = Path(tmp) / "icon.png"
+            Image.new("RGBA", (2, 2)).save(icon_path)
+            app = App()
+            with patch("overlay.main._resolve_icon_path", return_value=icon_path), patch(
+                "overlay.main.load_cfg", return_value={"cli": {"claude_model": "opus"}}
+            ):
+                tray = _make_tray_icon(app)
+                provider_menu = list(tray.menu)[2].submenu
+                claude_menu = list(provider_menu)[3].submenu
+                opus_item = next(item for item in claude_menu if item.text == "claude: opus")
+                opus_item(None)
+        self.assertEqual(app.selected, ("claude-code", "opus"))
 
     def test_installer_connects_codex_detection_shim_and_dispatch(self):
         root = Path(__file__).resolve().parents[1]

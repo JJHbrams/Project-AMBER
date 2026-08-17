@@ -38,10 +38,11 @@ def _hash_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _is_allowed(path: Path) -> bool:
+def _is_allowed(root: Path, path: Path) -> bool:
+    relative_parts = path.relative_to(root).parts
     return not any(
         part in EXCLUDED_PARTS or part.endswith((".pyc", ".pyo"))
-        for part in path.parts
+        for part in relative_parts
     )
 
 
@@ -51,13 +52,24 @@ def input_files(root: Path) -> list[Path]:
         directory = root / name
         if directory.is_dir():
             files.update(path for path in directory.rglob("*") if path.is_file())
-    for name in ("mcp_server.py", "engram_overlay_entry.py", "engram-overlay.spec", "requirements.txt", "environment.yml"):
+    for name in (
+        "mcp_server.py",
+        "engram_overlay_entry.py",
+        "engram-overlay.spec",
+        "installer/pyi_rth_engram_tk.py",
+        "requirements.txt",
+        "environment.yml",
+    ):
         path = root / name
         if path.is_file():
             files.add(path)
-    config_dir = root / "config"
-    if config_dir.is_dir():
-        files.update(path for path in config_dir.rglob("*") if path.is_file())
+    # Only files embedded by engram-overlay.spec belong to this artifact.
+    # Local user overrides and installer/client configuration must not force a
+    # 1+ GiB frozen rebuild.
+    for name in ("config/overlay.yaml", "config/config.yaml"):
+        path = root / name
+        if path.is_file():
+            files.add(path)
     for name in ("resource/icon.png", "resource/overlay.png", "resource/embedding-model/manifest.json"):
         path = root / name
         if path.is_file():
@@ -65,7 +77,7 @@ def input_files(root: Path) -> list[Path]:
     character_dir = root / "resource/character"
     if character_dir.is_dir():
         files.update(path for path in character_dir.rglob("*") if path.is_file())
-    return sorted(path for path in files if _is_allowed(path))
+    return sorted(path for path in files if _is_allowed(root, path))
 
 
 def input_hashes(root: Path) -> dict[str, str]:
@@ -77,7 +89,24 @@ def input_hashes(root: Path) -> dict[str, str]:
 
 def environment_metadata() -> dict[str, Any]:
     packages: dict[str, str] = {}
-    for distribution in ("pyinstaller", "mcp", "sentence-transformers"):
+    for distribution in (
+        "pyinstaller",
+        "pyinstaller-hooks-contrib",
+        "mcp",
+        "sentence-transformers",
+        "torch",
+        "transformers",
+        "streamlit",
+        "pandas",
+        "pyarrow",
+        "scipy",
+        "scikit-learn",
+        "numpy",
+        "pillow",
+        "kuzu",
+        "tkinterweb",
+        "discord.py",
+    ):
         try:
             packages[distribution] = importlib.metadata.version(distribution)
         except importlib.metadata.PackageNotFoundError:
@@ -108,11 +137,14 @@ def make_manifest(
     mode: str,
 ) -> dict[str, Any]:
     model_manifest = _read_json(model_manifest_path)
+    inputs = input_hashes(root)
+    if not inputs:
+        raise ValueError("overlay build manifest cannot be written without inputs")
     return {
         "schema_version": 1,
         "mode": mode,
         "environment": environment_metadata(),
-        "inputs": input_hashes(root),
+        "inputs": inputs,
         "embedding_model": {
             "manifest_sha256": _hash_file(model_manifest_path),
             "manifest": model_manifest,
@@ -167,10 +199,13 @@ def validate_build(
         return False, f"build manifest unreadable: {exc}"
     if manifest.get("schema_version") != 1:
         return False, "unsupported build manifest schema"
+    manifest_inputs = manifest.get("inputs")
+    if not isinstance(manifest_inputs, dict) or not manifest_inputs:
+        return False, "overlay build manifest has no inputs"
     current_environment = environment_metadata()
     if manifest.get("environment") != current_environment:
         return False, "Python or package environment changed"
-    if manifest.get("inputs") != input_hashes(root):
+    if manifest_inputs != input_hashes(root):
         return False, "overlay build inputs changed"
     model_section = manifest.get("embedding_model")
     if not isinstance(model_section, dict):

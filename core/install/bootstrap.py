@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 from datetime import date
@@ -46,6 +47,17 @@ TEMPLATE_TARGETS = (
 )
 
 INSTALL_MANAGED_SOURCE = "install-managed"
+MANUAL_ROOT_RELATIVE = Path("guides") / "engram-manual"
+MANUAL_MANIFEST_RELATIVE = Path("manual") / "manifest.json"
+MANUAL_STATE_NAME = ".install-manifest.json"
+LEGACY_MANUAL_PATHS = {
+    "index.md",
+    "tutorial.md",
+    "overlay-settings.md",
+    "skills.md",
+    "mcp-tools.md",
+    "troubleshooting.md",
+}
 OBSOLETE_INSTALL_DIRECTIVE_KEYS = {
     "wiki-governance-trigger",
     "wiki-management",
@@ -65,6 +77,87 @@ def _replace_placeholder(value, replacement: str):
     if isinstance(value, dict):
         return {key: _replace_placeholder(item, replacement) for key, item in value.items()}
     return value
+
+
+def _safe_manual_relative_path(value: str) -> Path:
+    path = Path(value)
+    if not value or path.is_absolute() or ".." in path.parts or path.name != value.split("/")[-1]:
+        raise ValueError(f"unsafe manual manifest path: {value!r}")
+    if any(part in {"", "."} for part in path.parts):
+        raise ValueError(f"unsafe manual manifest path: {value!r}")
+    return path
+
+
+def _load_manual_manifest(templates_dir: Path) -> tuple[dict, set[Path]]:
+    manifest_path = templates_dir / MANUAL_MANIFEST_RELATIVE
+    if not manifest_path.is_file():
+        raise FileNotFoundError(f"manual manifest missing: {manifest_path}")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if not isinstance(manifest, dict) or not isinstance(manifest.get("files"), list):
+        raise ValueError("manual manifest must contain a files list")
+    files = {_safe_manual_relative_path(str(item)) for item in manifest["files"]}
+    if not files:
+        raise ValueError("manual manifest files must not be empty")
+    for relative in files:
+        source = templates_dir / "manual" / relative
+        if not source.is_file():
+            raise FileNotFoundError(f"manual page missing: {source}")
+    return manifest, files
+
+
+def _read_previous_manual_paths(state_path: Path) -> set[Path] | None:
+    if not state_path.is_file():
+        return None
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    files = state.get("managed_files") if isinstance(state, dict) else None
+    if not isinstance(files, list):
+        raise ValueError("installed manual state must contain a managed_files list")
+    return {_safe_manual_relative_path(str(item)) for item in files}
+
+
+def _install_managed_manual(docs_dir: Path, templates_dir: Path) -> dict[str, int]:
+    manifest, current_paths = _load_manual_manifest(templates_dir)
+    manual_root = docs_dir / MANUAL_ROOT_RELATIVE
+    manual_root.mkdir(parents=True, exist_ok=True)
+    state_path = manual_root / MANUAL_STATE_NAME
+    previous_paths = _read_previous_manual_paths(state_path)
+    legacy_paths = manifest.get("legacy_managed_paths", sorted(LEGACY_MANUAL_PATHS))
+    if not isinstance(legacy_paths, list):
+        raise ValueError("manual manifest legacy_managed_paths must be a list")
+    removable_paths = previous_paths if previous_paths is not None else {
+        _safe_manual_relative_path(str(path)) for path in legacy_paths
+    }
+
+    removed = 0
+    for relative in removable_paths - current_paths:
+        target = manual_root / relative
+        if target.is_file():
+            target.unlink()
+            removed += 1
+
+    created = 0
+    updated = 0
+    hashes: dict[str, str] = {}
+    for relative in sorted(current_paths):
+        source = templates_dir / "manual" / relative
+        target = manual_root / relative
+        content = source.read_text(encoding="utf-8").replace("__DATE__", date.today().isoformat())
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if target.exists():
+            updated += 1
+        else:
+            created += 1
+        target.write_text(content, encoding="utf-8")
+        hashes[relative.as_posix()] = hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+    state = {
+        "schema_version": 1,
+        "manual_version": manifest.get("manual_version", "unknown"),
+        "managed_files": sorted(path.as_posix() for path in current_paths),
+        "content_hashes": hashes,
+    }
+    state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return {"manual_files_created": created, "manual_files_updated": updated, "manual_files_removed": removed}
 
 
 def _seed_directives(db_dir: Path, directives: list[dict]) -> tuple[int, int, int]:
@@ -167,6 +260,8 @@ def bootstrap_install(db_dir: Path, templates_dir: Path) -> dict[str, int]:
         target.write_text(content, encoding="utf-8")
         created += 1
 
+    manual_result = _install_managed_manual(docs_dir, templates_dir)
+
     directives_path = templates_dir / "directives.json"
     if not directives_path.is_file():
         raise FileNotFoundError(f"directives template missing: {directives_path}")
@@ -176,6 +271,7 @@ def bootstrap_install(db_dir: Path, templates_dir: Path) -> dict[str, int]:
 
     return {
         "wiki_files_created": created,
+        **manual_result,
         "directives_seeded": seeded,
         "directives_updated": updated,
         "directives_removed": removed,

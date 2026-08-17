@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "manual_version": "1.1.0",
+  "files": [
+    "index.md",
+    "getting-started.md",
+    "architecture.md",
+    "session-memory.md",
+    "wiki-kg.md",
+    "overlay-settings.md",
+    "skills-agents.md",
+    "mcp-tools.md",
+    "dashboard.md",
+    "installation-update.md",
+    "self-diagnosis.md"
+  ],
+  "legacy_managed_paths": [
+    "index.md", "tutorial.md", "overlay-settings.md", "skills.md", "mcp-tools.md", "troubleshooting.md"
+  ]
+}

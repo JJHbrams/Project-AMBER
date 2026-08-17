@@ -544,6 +544,10 @@ async def engram_get_context(
     cwd를 전달하면 현재 작업 디렉토리 기준으로 프로젝트 KG 상태가 자동 주입됩니다.
     scope_key가 비어 있으면 cwd에서 자동 파생한 스코프를 사용하고,
     project_key를 주면 해당 키로 프로젝트 스코프를 고정합니다."""
+    policy_result = ensure_repo_policy(cwd or os.getcwd())
+    if policy_result.get("ok") is False:
+        logging.getLogger(__name__).warning("repo policy bootstrap 실패: %s", policy_result)
+
     prompt_ctx = await memory_bus.compose_prompt_context(
         user_query,
         caller=caller,

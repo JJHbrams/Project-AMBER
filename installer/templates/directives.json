@@ -1,5 +1,17 @@
 [
   {
+    "key": "self-diagnosis-manual-first",
+    "scope": "all",
+    "priority": 16,
+    "trigger_type": "always",
+    "enforcement_level": "advisory",
+    "trigger_data": {
+      "actions_any": ["diagnose", "debug", "troubleshoot"],
+      "query_keywords_any": ["diagnose", "debug", "troubleshoot", "not working", "self diagnosis", "진단", "디버그", "문제 해결"]
+    },
+    "content": "이 시스템 자체를 진단할 때는 먼저 관련 매뉴얼과 자가진단 Wiki 페이지를 검색·조회한다. 관찰된 동작을 문서의 기대 동작과 비교하고, 복구 전에는 읽기 전용 근거를 수집하며, 변경 후에는 원래 실행 환경을 실제로 검증한다. When diagnosing this system itself, retrieve the relevant manual and self-diagnosis Wiki pages first, collect read-only evidence, and validate the original runtime after repair."
+  },
+  {
     "key": "persona-voice",
     "scope": "all",
     "priority": 20,

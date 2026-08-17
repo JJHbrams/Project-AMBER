@@ -1,10 +1,12 @@
 import json
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 from core.install.model_manifest import create_manifest, validate_manifest
 from core.install.overlay_manifest import (
+    input_hashes,
     make_manifest,
     validate_build,
 )
@@ -37,12 +39,52 @@ class OverlayBuildArchitectureTests(unittest.TestCase):
         self.assertIn("installer\\build-overlay.ps1", dev)
         self.assertIn("build-overlay.ps1", module)
         self.assertIn("build-overlay.ps1", release)
+        self.assertIn('Join-Path $PSScriptRoot "dist\\\\engram-overlay"', dev)
+        self.assertIn('Deploy = (Join-Path $ProjectRoot "dist\\\\engram-overlay")', module)
+        self.assertIn("-Deploy $DistDir -ValidateOnly", release)
+        self.assertIn("-Deploy $DistDir -NoStart", release)
         self.assertNotIn("PyInstaller --noconfirm", release)
+        self.assertIn('$overlayMode = if ($FreshBuild) { "rebuild" } else { "auto" }', release)
+        self.assertIn('Mode = if ($FreshBuild) { "rebuild" } else { "auto" }', dev)
+
+    def test_release_builder_caches_setup_and_has_explicit_release_profile(self):
+        release = (ROOT / "installer" / "build-installer.ps1").read_text(
+            encoding="utf-8-sig"
+        )
+        iss = (ROOT / "installer" / "engram-overlay.iss").read_text(
+            encoding="utf-8-sig"
+        )
+        cache = (ROOT / "installer" / "build-cache.ps1").read_text(
+            encoding="utf-8-sig"
+        )
+
+        self.assertIn("Test-EngramInstallerCache", release)
+        self.assertIn("Write-EngramInstallerCache", release)
+        self.assertLess(
+            release.index("Test-EngramInstallerCache"),
+            release.index('Invoke-FrozenRole "embedding-check"'),
+        )
+        self.assertIn("Release smoke already passed during fresh frozen build", release)
+        self.assertIn("ISCC short path", release)
+        self.assertIn('if ($Release) { "release-lzma2-solid" }', release)
+        self.assertIn('#define BuildCompression "zip"', iss)
+        self.assertIn('#define BuildOutputSuffix "-dev"', iss)
+        self.assertIn('if ($Release) { "" } else { "-dev" }', release)
+        self.assertIn("build-manifest.json", cache)
+        self.assertIn("output_sha256", cache)
+
+    def test_auto_reuse_allows_explicit_default_dist_target(self):
+        build = (ROOT / "installer" / "build-overlay.ps1").read_text(
+            encoding="utf-8-sig"
+        )
+
+        self.assertIn("$deploysToDefault", build)
+        self.assertIn('$Mode -eq "auto" -and $reuseValid -and $deploysToDefault', build)
 
     def test_build_manifest_reuse_and_input_invalidation(self):
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            (root / "overlay").mkdir()
+            root = Path(temporary) / "build" / "overlay-worktree"
+            (root / "overlay").mkdir(parents=True)
             (root / "overlay" / "main.py").write_text("value = 1", encoding="utf-8")
             model_dir = root / "resource" / "embedding-model"
             model_dir.mkdir(parents=True)
@@ -53,7 +95,6 @@ class OverlayBuildArchitectureTests(unittest.TestCase):
                 json.dumps(create_manifest(
                     model_dir,
                     model_id="test/model",
-                    sentence_transformers_version="1.0",
                     resolved_revision="local-test",
                 )),
                 encoding="utf-8",
@@ -71,10 +112,80 @@ class OverlayBuildArchitectureTests(unittest.TestCase):
             valid, reason = validate_build(root, artifact, model_manifest)
             self.assertTrue(valid, reason)
 
+            build_manifest["inputs"] = {}
+            (artifact / "build-manifest.json").write_text(
+                json.dumps(build_manifest), encoding="utf-8"
+            )
+            valid, reason = validate_build(root, artifact, model_manifest)
+            self.assertFalse(valid)
+            self.assertIn("no inputs", reason)
+
+            build_manifest = make_manifest(root, model_manifest, "rebuild")
+            (artifact / "build-manifest.json").write_text(
+                json.dumps(build_manifest), encoding="utf-8"
+            )
             (root / "overlay" / "main.py").write_text("value = 2", encoding="utf-8")
             valid, reason = validate_build(root, artifact, model_manifest)
             self.assertFalse(valid)
             self.assertIn("inputs", reason)
+
+    def test_build_manifest_rejects_empty_inputs(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            model_dir = root / "resource" / "embedding-model"
+            model_dir.mkdir(parents=True)
+            (model_dir / "manifest.json").write_text("{}", encoding="utf-8")
+
+            self.assertIn("resource/embedding-model/manifest.json", input_hashes(root))
+            with patch("core.install.overlay_manifest.input_hashes", return_value={}):
+                with self.assertRaisesRegex(ValueError, "without inputs"):
+                    make_manifest(root, model_dir / "manifest.json", "rebuild")
+
+    def test_user_config_does_not_invalidate_frozen_bundle(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "overlay").mkdir()
+            (root / "overlay" / "main.py").write_text("value = 1", encoding="utf-8")
+            config = root / "config"
+            config.mkdir()
+            (config / "overlay.yaml").write_text("enabled: true", encoding="utf-8")
+            (config / "overlay.user.yaml").write_text("x: 1", encoding="utf-8")
+            model_dir = root / "resource" / "embedding-model"
+            model_dir.mkdir(parents=True)
+            (model_dir / "config.json").write_text("{}", encoding="utf-8")
+            (model_dir / "model.safetensors").write_bytes(b"weights")
+            model_manifest = model_dir / "manifest.json"
+            model_manifest.write_text(
+                json.dumps(create_manifest(
+                    model_dir,
+                    model_id="test/model",
+                    resolved_revision="local-test",
+                )),
+                encoding="utf-8",
+            )
+            artifact = root / "artifact"
+            artifact.mkdir()
+            (artifact / "engram-overlay.exe").write_bytes(b"exe")
+            (artifact / "engram-dashboard.exe").write_bytes(b"exe")
+            (artifact / "build-manifest.json").write_text(
+                json.dumps(make_manifest(root, model_manifest, "rebuild")),
+                encoding="utf-8",
+            )
+
+            (config / "overlay.user.yaml").write_text("x: 2", encoding="utf-8")
+            valid, reason = validate_build(root, artifact, model_manifest)
+            self.assertTrue(valid, reason)
+
+            (config / "overlay.yaml").write_text("enabled: false", encoding="utf-8")
+            valid, reason = validate_build(root, artifact, model_manifest)
+            self.assertFalse(valid)
+            self.assertIn("inputs", reason)
+
+    def test_installer_uses_userprofile_environment_expansion(self):
+        installer = (ROOT / "installer" / "engram-overlay.iss").read_text(encoding="utf-8-sig")
+
+        self.assertIn("{%USERPROFILE}\\.engram\\user.config.yaml", installer)
+        self.assertNotIn("{userprofile}", installer)
 
     def test_model_manifest_rejects_tampering(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -85,7 +196,6 @@ class OverlayBuildArchitectureTests(unittest.TestCase):
             manifest = create_manifest(
                 model_dir,
                 model_id="test/model",
-                sentence_transformers_version="1.0",
                 resolved_revision="local-test",
             )
             (model_dir / "manifest.json").write_text(
@@ -99,6 +209,13 @@ class OverlayBuildArchitectureTests(unittest.TestCase):
             valid, reason = validate_manifest(model_dir, "test/model")
             self.assertFalse(valid)
             self.assertIn("hash mismatch", reason)
+
+    def test_build_uses_canonical_manifest_without_refreshing_it(self):
+        build = (ROOT / "installer" / "build-overlay.ps1").read_text(encoding="utf-8-sig")
+
+        self.assertIn('"--ensure"', build)
+        self.assertIn('"--allow-download"', build)
+        self.assertNotIn("--refresh-manifest", build)
 
     def test_mcp_check_requires_fastmcp_import(self):
         requirements = (ROOT / "requirements.txt").read_text(encoding="utf-8")
@@ -125,13 +242,21 @@ class OverlayBuildArchitectureTests(unittest.TestCase):
         self.assertIn("streamlit_bootstrap.load_config_options(options)", entry)
         self.assertIn("dashboard_exe = EXE(", spec)
 
-    def test_publish_stops_dashboard_sidecar_without_using_it_as_restart_path(self):
+    def test_publish_uses_explicit_target_and_restores_all_prior_overlays_on_failure(self):
         build = (ROOT / "installer" / "build-overlay.ps1").read_text(encoding="utf-8-sig")
+        stopper = (ROOT / "installer" / "stop-engram-processes.ps1").read_text(encoding="utf-8-sig")
 
-        self.assertIn('Get-Process -Name "engram-dashboard"', build)
-        self.assertIn('$dashboardProcesses | Stop-Process -Force -ErrorAction SilentlyContinue', build)
-        self.assertIn('try { $runningPath = $processes[0].Path } catch {}', build)
-        self.assertNotIn('$runningPath = $dashboardProcesses', build)
+        self.assertIn('Join-Path $PSScriptRoot "stop-engram-processes.ps1"', build)
+        self.assertIn("Stop-EngramArtifactProcesses -ArtifactDir $deployTarget", build)
+        self.assertIn('Get-Process -Name $processName', stopper)
+        self.assertIn('"engram-overlay.exe", "engram-dashboard.exe"', stopper)
+        self.assertIn("$managedExecutables.ContainsKey($processPath)", stopper)
+        self.assertIn("Start-Process -FilePath (Join-Path $deployTarget \"engram-overlay.exe\")", build)
+        self.assertIn("foreach ($previousOverlayPath in $previousOverlayPaths)", build)
+        self.assertIn("Move-Item -LiteralPath $SourceDir -Destination $stage", build)
+        self.assertNotIn('Copy-Item -Path (Join-Path $SourceDir "*")', build)
+        self.assertIn("Start-Process -FilePath $previousOverlayPath", build)
+        self.assertNotIn("Get-CimInstance Win32_Process", build)
 
     def test_dashboard_setting_is_exposed_in_global_settings(self):
         defaults = (ROOT / "config" / "overlay.yaml").read_text(encoding="utf-8")

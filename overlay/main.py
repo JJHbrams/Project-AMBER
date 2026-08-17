@@ -26,6 +26,7 @@ from .config import (
     get_bubble_session_id,
     get_chat_mode,
     get_cli_provider,
+    get_cli_model,
     get_flip_horizontal,
     get_ollama_model,
     get_permission_level,
@@ -34,9 +35,11 @@ from .config import (
     resolve_path,
     set_bubble_session_id,
     set_cli_provider,
+    set_cli_model,
     set_ollama_model,
 )
 from .settings_window import open_settings
+from .cli_capabilities import models as provider_models
 from .remote_tunnel import TunnelManager
 from .stm_server import STMServer
 from .bubble.bubble_manager import BubbleManager
@@ -187,17 +190,34 @@ def _make_tray_icon(app: "OverlayApp"):
     icon_path = _resolve_icon_path()
     img = Image.open(icon_path).convert("RGBA").resize((64, 64))
 
+    def _select_provider_action(provider: str, model: str | None):
+        """Bind model outside pystray's (icon, item) action arguments."""
+        def action(_icon, _item=None):
+            app._set_provider_model(provider, model)
+        return action
+
     def _build_claude_items():
         """Claude Code 서브메뉴 — 직접 vs Ollama 라우팅 선택."""
         items: list = [
             pystray.MenuItem(
                 "claude (직접)",
-                lambda: app._set_provider_model("claude-code", ""),
+                _select_provider_action("claude-code", ""),
                 checked=lambda _: app.get_cli_provider() == "claude-code",
                 radio=True,
             ),
-            pystray.Menu.SEPARATOR,
         ]
+        cfg = load_cfg()
+        cli = cfg.get("cli", {}) if isinstance(cfg.get("cli"), dict) else {}
+        for alias in provider_models("claude-code", cli, _get_ollama_model_list_snapshot()):
+            items.append(
+                pystray.MenuItem(
+                    f"claude: {alias}",
+                    _select_provider_action("claude-code", alias),
+                    checked=lambda _, mod=alias: app.get_cli_provider() == "claude-code" and app.get_cli_model("claude-code") == mod,
+                    radio=True,
+                )
+            )
+        items.append(pystray.Menu.SEPARATOR)
         with _ollama_cache_lock:
             ready = _ollama_cache_ready
             models = list(_ollama_model_cache)
@@ -209,7 +229,7 @@ def _make_tray_icon(app: "OverlayApp"):
                 items.append(
                     pystray.MenuItem(
                         f"ollama: {model}",
-                        lambda _, mod=model: app._set_provider_model("claude-code-ollama", mod),
+                        _select_provider_action("claude-code-ollama", model),
                         checked=lambda _, mod=model: app.get_cli_provider() == "claude-code-ollama" and app._ollama_model == mod,
                         radio=True,
                     )
@@ -234,7 +254,7 @@ def _make_tray_icon(app: "OverlayApp"):
             items += [
                 pystray.MenuItem(
                     m,
-                    lambda _, mod=m: app._set_provider_model("ollama", mod),
+                    _select_provider_action("ollama", m),
                     checked=lambda _, mod=m: app.get_cli_provider() == "ollama" and app._ollama_model == mod,
                     radio=True,
                 )
@@ -242,6 +262,13 @@ def _make_tray_icon(app: "OverlayApp"):
             ]
         items += [pystray.Menu.SEPARATOR, pystray.MenuItem("새로고침", lambda: _reload_ollama_models())]
         return items
+
+    def _build_provider_items(provider: str, title: str):
+        cfg = load_cfg(); cli = cfg.get("cli", {}) if isinstance(cfg.get("cli"), dict) else {}
+        choices = provider_models(provider, cli, _get_ollama_model_list_snapshot())
+        if not choices:
+            return [pystray.MenuItem(title, _select_provider_action(provider, None), checked=lambda _: app.get_cli_provider() == provider, radio=True)]
+        return [pystray.MenuItem(m, _select_provider_action(provider, m), checked=lambda _, mod=m: app.get_cli_provider() == provider and app.get_cli_model(provider) == mod, radio=True) for m in choices]
 
     menu = pystray.Menu(
         pystray.MenuItem("채팅 열기/닫기", lambda: app.toggle_chat()),
@@ -251,17 +278,17 @@ def _make_tray_icon(app: "OverlayApp"):
             pystray.Menu(
                 pystray.MenuItem(
                     "Copilot CLI",
-                    lambda: app._set_provider_model("copilot", None),
+                    pystray.Menu(lambda: _build_provider_items("copilot", "Copilot CLI")),
                     checked=lambda _: app.get_cli_provider() == "copilot",
                 ),
                 pystray.MenuItem(
                     "Gemini CLI",
-                    lambda: app._set_provider_model("gemini", None),
+                    pystray.Menu(lambda: _build_provider_items("gemini", "Gemini CLI")),
                     checked=lambda _: app.get_cli_provider() == "gemini",
                 ),
                 pystray.MenuItem(
                     "Codex CLI",
-                    lambda: app._set_provider_model("codex", None),
+                    pystray.Menu(lambda: _build_provider_items("codex", "Codex CLI")),
                     checked=lambda _: app.get_cli_provider() == "codex",
                 ),
                 pystray.MenuItem(
@@ -1093,7 +1120,8 @@ class OverlayApp:
         if self._bubble_session is not None:
             self._bubble_session.stop()
             self._bubble_session = None
-        self._set_provider_model(new_provider, get_ollama_model(cfg))
+        # Config reload must preserve legacy claude-code + ollama_model routing.
+        self._set_provider_model(new_provider, None if new_provider == "claude-code" else get_cli_model(new_provider, cfg))
 
         # 말풍선 색상 테마 등 — 재시작 없이 바로 반영(안 그러면 다음 프로세스 재시작까지 안 보임).
         bubble_cfg = get_bubble_cfg(cfg)
@@ -1117,6 +1145,9 @@ class OverlayApp:
     def get_cli_provider(self) -> str:
         return self._cli_provider
 
+    def get_cli_model(self, provider: str) -> str:
+        return get_cli_model(provider)
+
     def set_cli_provider(self, provider: str):
         """character overlay 우클릭 등 외부 콜백 호환용."""
         self._set_provider_model(provider, None)
@@ -1127,7 +1158,13 @@ class OverlayApp:
         """
         normalized = set_cli_provider(provider, sync_user=True)
         if model is not None:
-            self._ollama_model = set_ollama_model(model, sync_user=True)
+            set_cli_model(normalized, model, sync_user=True)
+            # Empty model is the explicit "claude (direct)" menu choice.  Clear
+            # the historic fallback too; otherwise it would silently route local.
+            if normalized == "claude-code" and model == "":
+                self._ollama_model = set_ollama_model("", sync_user=True)
+            if normalized in {"ollama", "claude-code-ollama"}:
+                self._ollama_model = set_ollama_model(model, sync_user=True)
         self._cli_provider = normalized
         self.chat.set_provider(normalized)
         try:

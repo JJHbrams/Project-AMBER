@@ -18,6 +18,28 @@ from core.storage.db import get_connection, initialize_db
 
 
 class DirectivePolicyTests(unittest.TestCase):
+    def test_packaged_self_diagnosis_directive_matches_diagnostic_queries_only(self):
+        templates = Path(__file__).resolve().parents[1] / "installer" / "templates"
+        directives = json.loads((templates / "directives.json").read_text(encoding="utf-8"))
+        diagnostic = next(item for item in directives if item["key"] == "self-diagnosis-manual-first")
+
+        matched = evaluate_directive_policy(
+            [diagnostic],
+            caller="all",
+            user_query="대시보드가 작동하지 않아 문제 해결이 필요해",
+        )
+        unrelated = evaluate_directive_policy(
+            [diagnostic],
+            caller="all",
+            user_query="일반적인 사용법을 알려줘",
+        )
+
+        self.assertEqual(
+            [item["key"] for item in matched["matched_directives"]],
+            ["self-diagnosis-manual-first"],
+        )
+        self.assertEqual(unrelated["matched_directives"], [])
+
     def test_chore_intent_does_not_treat_false_string_as_true(self):
         self.assertFalse(normalize_chore_intent({"is_chore": "false"})["is_chore"])
         self.assertTrue(normalize_chore_intent({"is_chore": "true"})["is_chore"])

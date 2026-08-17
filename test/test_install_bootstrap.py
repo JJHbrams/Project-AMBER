@@ -1,4 +1,5 @@
 import os
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -18,13 +19,31 @@ class InstallBootstrapTest(unittest.TestCase):
             existing = db_dir / "docs" / "guides" / "wiki-guide.md"
             existing.parent.mkdir(parents=True)
             existing.write_text("keep me", encoding="utf-8")
+            user_note = db_dir / "docs" / "notes" / "my-note.md"
+            user_note.parent.mkdir(parents=True, exist_ok=True)
+            user_note.write_text("my existing wiki", encoding="utf-8")
 
-            with patch.dict(os.environ, {"ENGRAM_DB_DIR": str(db_dir)}):
+            with patch.dict(
+                os.environ,
+                {
+                    "ENGRAM_DB_DIR": str(db_dir),
+                    "ENGRAM_SMOKE_DB_DIR": str(db_dir),
+                },
+            ):
                 first = bootstrap_install(db_dir, templates)
                 second = bootstrap_install(db_dir, templates)
 
             self.assertEqual(existing.read_text(encoding="utf-8"), "keep me")
-            self.assertTrue((db_dir / "docs" / "moc" / "000-HOME.md").is_file())
+            self.assertEqual(user_note.read_text(encoding="utf-8"), "my existing wiki")
+            for relative in (
+                "docs/moc/000-HOME.md",
+                "docs/guides/wiki-guide.md",
+                "docs/_templates/concept.md",
+                "docs/_templates/project.md",
+                "docs/protocols/wiki-management-guide.md",
+                "docs/protocols/git-branch-guide.md",
+            ):
+                self.assertTrue((db_dir / relative).is_file(), relative)
             wiki_management = (
                 db_dir / "docs" / "protocols" / "wiki-management-guide.md"
             ).read_text(encoding="utf-8")
@@ -89,12 +108,94 @@ class InstallBootstrapTest(unittest.TestCase):
                 "new-independent-task",
                 json.loads(rows_by_key["dirty-worktree-guard"]["trigger_data"])["action_tags_any"],
             )
+            self.assertIn("self-diagnosis-manual-first", rows_by_key)
+
+    def test_manual_pages_are_managed_without_overwriting_other_wiki_or_user_files(self):
+        source_templates = Path(__file__).resolve().parents[1] / "installer" / "templates"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            templates = root / "templates"
+            shutil.copytree(source_templates, templates)
+            db_dir = root / "db"
+            user_guide = db_dir / "docs" / "guides" / "wiki-guide.md"
+            user_guide.parent.mkdir(parents=True)
+            user_guide.write_text("keep this user guide", encoding="utf-8")
+            with patch.dict(os.environ, {"ENGRAM_DB_DIR": str(db_dir), "ENGRAM_SMOKE_DB_DIR": str(db_dir)}):
+                first = bootstrap_install(db_dir, templates)
+                manual_page = db_dir / "docs" / "guides" / "engram-manual" / "index.md"
+                manual_page.write_text("old managed content", encoding="utf-8")
+                second = bootstrap_install(db_dir, templates)
+
+            self.assertGreater(first["manual_files_created"], 0)
+            self.assertGreater(second["manual_files_updated"], 0)
+            self.assertNotEqual(manual_page.read_text(encoding="utf-8"), "old managed content")
+            self.assertEqual(user_guide.read_text(encoding="utf-8"), "keep this user guide")
+            state = json.loads((manual_page.parent / ".install-manifest.json").read_text(encoding="utf-8"))
+            self.assertIn("index.md", state["managed_files"])
+            self.assertIn("index.md", state["content_hashes"])
+
+    def test_manual_manifest_adds_removes_and_preserves_unlisted_files(self):
+        source_templates = Path(__file__).resolve().parents[1] / "installer" / "templates"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            templates = root / "templates"
+            shutil.copytree(source_templates, templates)
+            db_dir = root / "db"
+            manifest_path = templates / "manual" / "manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["files"].extend(["new-page.md", "stale-page.md"])
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            (templates / "manual" / "new-page.md").write_text("new managed", encoding="utf-8")
+            (templates / "manual" / "stale-page.md").write_text("stale managed", encoding="utf-8")
+            with patch.dict(os.environ, {"ENGRAM_DB_DIR": str(db_dir), "ENGRAM_SMOKE_DB_DIR": str(db_dir)}):
+                bootstrap_install(db_dir, templates)
+                manual_root = db_dir / "docs" / "guides" / "engram-manual"
+                (manual_root / "user-page.md").write_text("preserve me", encoding="utf-8")
+                manifest["files"].remove("stale-page.md")
+                manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+                result = bootstrap_install(db_dir, templates)
+
+            self.assertTrue((manual_root / "new-page.md").is_file())
+            self.assertFalse((manual_root / "stale-page.md").exists())
+            self.assertEqual(result["manual_files_removed"], 1)
+            self.assertEqual((manual_root / "user-page.md").read_text(encoding="utf-8"), "preserve me")
+
+    def test_legacy_manual_migration_and_unsafe_manifest_rejection(self):
+        source_templates = Path(__file__).resolve().parents[1] / "installer" / "templates"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            templates = root / "templates"
+            shutil.copytree(source_templates, templates)
+            db_dir = root / "db"
+            manual_root = db_dir / "docs" / "guides" / "engram-manual"
+            manual_root.mkdir(parents=True)
+            (manual_root / "tutorial.md").write_text("legacy", encoding="utf-8")
+            (manual_root / "custom.md").write_text("user", encoding="utf-8")
+            with patch.dict(os.environ, {"ENGRAM_DB_DIR": str(db_dir), "ENGRAM_SMOKE_DB_DIR": str(db_dir)}):
+                result = bootstrap_install(db_dir, templates)
+
+            self.assertEqual(result["manual_files_removed"], 1)
+            self.assertFalse((manual_root / "tutorial.md").exists())
+            self.assertEqual((manual_root / "custom.md").read_text(encoding="utf-8"), "user")
+            manifest_path = templates / "manual" / "manifest.json"
+            bad_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            bad_manifest["files"] = ["../escape.md"]
+            manifest_path.write_text(json.dumps(bad_manifest), encoding="utf-8")
+            with patch.dict(os.environ, {"ENGRAM_DB_DIR": str(db_dir), "ENGRAM_SMOKE_DB_DIR": str(db_dir)}):
+                with self.assertRaisesRegex(ValueError, "unsafe manual manifest path"):
+                    bootstrap_install(db_dir, templates)
 
     def test_migrates_unmodified_install_directives_and_preserves_user_edits(self):
         templates = Path(__file__).resolve().parents[1] / "installer" / "templates"
         with tempfile.TemporaryDirectory() as tmp:
             db_dir = Path(tmp)
-            with patch.dict(os.environ, {"ENGRAM_DB_DIR": str(db_dir)}):
+            with patch.dict(
+                os.environ,
+                {
+                    "ENGRAM_DB_DIR": str(db_dir),
+                    "ENGRAM_SMOKE_DB_DIR": str(db_dir),
+                },
+            ):
                 bootstrap_install(db_dir, templates)
                 conn = get_connection(db_dir)
                 try:
@@ -133,7 +234,13 @@ class InstallBootstrapTest(unittest.TestCase):
         templates = Path(__file__).resolve().parents[1] / "installer" / "templates"
         with tempfile.TemporaryDirectory() as tmp:
             db_dir = Path(tmp)
-            with patch.dict(os.environ, {"ENGRAM_DB_DIR": str(db_dir)}):
+            with patch.dict(
+                os.environ,
+                {
+                    "ENGRAM_DB_DIR": str(db_dir),
+                    "ENGRAM_SMOKE_DB_DIR": str(db_dir),
+                },
+            ):
                 bootstrap_install(db_dir, templates)
                 with patch(
                     "core.context.directives.get_connection",

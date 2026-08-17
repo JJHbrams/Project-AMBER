@@ -4,6 +4,35 @@ All notable changes to this project are documented in this file.
 
 ## Unreleased
 
+## [1.5.2] — 2026-08-17
+
+### Added
+
+- 동일한 Wiki vault 원문을 Streamlit 대시보드와 Obsidian에서 볼 수 있는 11페이지
+  한국어 매뉴얼을 추가했다. 페이지 검색·위키 링크 이동·목차를 제공하고, 사용 시나리오,
+  Mermaid 흐름도와 텍스트 대체 설명, 증상별 자가진단을 담는다.
+- installer가 매뉴얼을 version-managed 파일로 설치·갱신한다. 일반 Wiki 템플릿과
+  사용자가 작성한 문서는 보존하면서, 매뉴얼의 관리 대상 파일만 새 버전으로 교체한다.
+
+### Fixed
+
+- 오프라인 임베딩 모델 manifest를 로컬 캐시·패키지 버전에 의존하지 않는 고정된
+  revision과 정렬된 파일 hash 목록으로 만들고, frozen build가 번들 자산과 일치하는
+  manifest만 사용하도록 강화했다.
+- Windows PowerShell에서 PyInstaller의 정상 stderr 진행 출력이 build 실패로 처리되지
+  않도록 native build 출력 수집을 교정했다.
+- 일반 `engram_get_context` 직접 호출 경로도 repo policy bootstrap을 수행해,
+  managed Git advisory hook과 repository 정책이 빠지지 않게 했다.
+
+## [1.5.1] — 2026-08-17
+
+### Fixed
+
+- dev rebuild·전체 설치·installer 빌드가 동일한 명시적 overlay 배포 대상을 사용하도록
+  정리하고, installer의 사용자 설정 경로 확장을 수정했다.
+- 설정 GUI의 혼동스러운 `자동 체크포인트` 표기를 `Obsidian Daily Note 디렉터리`로
+  바꿔 외부 daily note 기록 경로임을 명확히 했다.
+
 ## [1.5.0] — 2026-08-17
 
 ### Added

@@ -26,6 +26,6 @@ kuzu>=0.6.0                     # KuzuDB — KG semantic graph (kg_semantic_sear
 # numpy>=1.24
 
 # 개발 도구 (대시보드 — scripts/dev/engram_dashboard.py)
-streamlit>=1.30.0
+streamlit>=1.59.0
 pandas>=2.0.0
 pyvis>=0.3.2                    # KG 그래프 시각화

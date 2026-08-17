@@ -71,6 +71,52 @@ class MCPDirectiveToolTests(unittest.TestCase):
 
 
 class MCPContextBootstrapTests(unittest.IsolatedAsyncioTestCase):
+    @patch.object(server, "get_persona_status", return_value={"initialized": True})
+    @patch.object(server, "get_identity", return_value={"name": ""})
+    @patch.object(server.memory_bus, "compose_prompt_context", new_callable=AsyncMock, return_value="context")
+    @patch.object(server, "ensure_repo_policy", return_value={"ok": True, "changed": True})
+    async def test_plain_context_ensures_repo_policy_and_propagates_cwd(
+        self,
+        ensure_policy,
+        compose_prompt_context,
+        _get_identity,
+        _get_persona_status,
+    ):
+        result = await server.engram_get_context(
+            user_query="inspect context",
+            caller="claude-code",
+            scope_key="scope-a",
+            project_key="project-a",
+            cwd="C:/repo",
+        )
+
+        ensure_policy.assert_called_once_with("C:/repo")
+        compose_prompt_context.assert_awaited_once_with(
+            "inspect context",
+            caller="claude-code",
+            scope_key="scope-a",
+            project_key="project-a",
+            cwd="C:/repo",
+            is_session_init=True,
+        )
+        self.assertIn("context", result)
+
+    @patch.object(server, "get_persona_status", return_value={"initialized": True})
+    @patch.object(server, "get_identity", return_value={"name": ""})
+    @patch.object(server.memory_bus, "compose_prompt_context", new_callable=AsyncMock, return_value="context")
+    @patch.object(server, "ensure_repo_policy", return_value={"ok": False, "reason": "hook unavailable"})
+    async def test_plain_context_logs_repo_policy_bootstrap_failure(
+        self,
+        _ensure_policy,
+        _compose_prompt_context,
+        _get_identity,
+        _get_persona_status,
+    ):
+        with self.assertLogs("mcp_server", level="WARNING") as captured:
+            await server.engram_get_context(user_query="inspect context", cwd="C:/repo")
+
+        self.assertIn("repo policy bootstrap 실패", "\n".join(captured.output))
+
     @patch.object(server, "engram_get_context", new_callable=AsyncMock, return_value="context")
     @patch.object(server, "_stm_post", return_value={"session_id": 42})
     @patch.object(server, "_context_session_fingerprint", return_value="repo-policy-test")
