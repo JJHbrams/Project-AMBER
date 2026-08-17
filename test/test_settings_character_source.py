@@ -64,6 +64,11 @@ class CharacterSourceSettingsTests(unittest.TestCase):
             self.assertTrue(validate_character_source("sequence", root, grid)[0])
             self.assertFalse(validate_character_source("static", root, grid)[0])
 
+    def test_legacy_bundled_logical_paths_validate_after_resource_reorganization(self):
+        grid = ("", "1", "1", "8", "8", "#00FF00")
+        self.assertTrue(validate_character_source("static", "resource/character/arona.png", grid)[0])
+        self.assertTrue(validate_character_source("sequence", "resource/character/smoke_chroma", grid)[0])
+
     def test_eyedropper_helpers_use_snapshot_coordinates_and_canonical_hex(self):
         snapshot = Image.new("RGB", (3, 2), "#000000")
         snapshot.putpixel((1, 1), (16, 255, 3))

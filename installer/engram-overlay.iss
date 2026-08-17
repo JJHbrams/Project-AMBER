@@ -9,7 +9,7 @@
 ; ============================================================
 
 #define AppName "Engram Overlay"
-#define AppVersion "1.5.2"
+#define AppVersion "1.5.3"
 #define AppPublisher "DRTECH"
 #define AppExeName "engram-overlay.exe"
 #ifndef BuildCompression

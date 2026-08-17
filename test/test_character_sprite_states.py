@@ -12,7 +12,10 @@ from overlay.character import (
     bottom_anchored_geometry, classify_sprite_event, select_sprite_frame,
     target_height_for_work_area,
 )
-from overlay.character_assets import ReactionPackResolution, _inline_state_template, inline_reaction_pack, resolve_reaction_pack
+from overlay.character_assets import (
+    ReactionPackResolution, _inline_state_template, inline_reaction_pack,
+    resolve_bundled_character_source, resolve_bundled_reaction_sheet, resolve_reaction_pack,
+)
 
 
 STATES = {
@@ -61,6 +64,69 @@ class SpriteManifestTests(unittest.TestCase):
         })
         self.assertEqual(profile.reaction_pack.crop_y_offset_px, 12)
 
+    def test_sprite_grid_mode_ignores_stale_static_or_sequence_name(self):
+        for stale_name in ("C:/missing/custom.png", "C:/missing/frames"):
+            profile = _CharacterProfile({
+                "overlay": {"character": {
+                    "set": "engram", "name": stale_name, "source_mode": "sprite_grid",
+                    "reactions": {"enabled": True, "pack": "engram"},
+                }}
+            })
+            self.assertTrue(profile.sprite_enabled)
+            self.assertEqual(profile.reaction_pack.source, "bundled")
+
+    def test_static_and_sequence_modes_do_not_cross_resolve_source_types(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            image = root / "image.png"
+            Image.new("RGBA", (8, 8)).save(image)
+            frames = root / "frames"
+            frames.mkdir()
+            Image.new("RGBA", (8, 8)).save(frames / "frames_0.png")
+            static = _CharacterProfile({"overlay": {"character": {"source_mode": "static", "name": str(frames)}}})
+            sequence = _CharacterProfile({"overlay": {"character": {"source_mode": "sequence", "name": str(image)}}})
+        self.assertFalse(static.has_numbered_frames)
+        self.assertFalse(sequence.has_numbered_frames)
+
+    def test_legacy_logical_sequence_is_inferred_without_source_mode(self):
+        profile = _CharacterProfile({"overlay": {"character": {"name": "smoke_chroma"}}})
+        self.assertEqual(profile.source_mode, "sequence")
+        self.assertTrue(profile.has_numbered_frames)
+        self.assertTrue(profile.legacy_body_motion)
+
+    def test_legacy_bundled_paths_map_only_to_canonical_asset_types(self):
+        self.assertEqual(
+            resolve_bundled_character_source("resource/character/arona.png", "static"),
+            Path("resource/character/static/arona.png").resolve(),
+        )
+        self.assertEqual(
+            resolve_bundled_character_source("resource/character/smoke_chroma", "sequence"),
+            Path("resource/character/sequences/smoke_chroma").resolve(),
+        )
+        self.assertEqual(
+            resolve_bundled_character_source(Path("resource/character/arona.png").resolve(), "static"),
+            Path("resource/character/static/arona.png").resolve(),
+        )
+        self.assertIsNone(resolve_bundled_character_source("C:/missing/arona.png", "static"))
+
+    def test_profiles_remap_current_checkout_legacy_absolute_paths(self):
+        old_static = Path("resource/character/arona.png").resolve()
+        old_sequence = Path("resource/character/smoke_chroma").resolve()
+        static = _CharacterProfile({"overlay": {"character": {"source_mode": "static", "name": str(old_static)}}})
+        sequence = _CharacterProfile({"overlay": {"character": {"source_mode": "sequence", "name": str(old_sequence)}}})
+        self.assertEqual(static.default_frame, Path("resource/character/static/arona.png").resolve())
+        self.assertTrue(sequence.has_numbered_frames)
+
+    def test_removed_engram_grid_path_maps_only_within_bundled_layout(self):
+        canonical = Path("resource/character/reactions/engram/states.png").resolve()
+        self.assertEqual(
+            resolve_bundled_reaction_sheet("resource/character/engram_set/engram_states.png"), canonical,
+        )
+        self.assertEqual(
+            resolve_bundled_reaction_sheet(Path("resource/character/engram_set/engram_states.png").resolve()), canonical,
+        )
+        self.assertIsNone(resolve_bundled_reaction_sheet("C:/missing/engram_set/engram_states.png"))
+
     def test_click_vfx_is_limited_to_bundled_engram_identity(self):
         engram = _CharacterProfile({
             "overlay": {"character": {"set": "engram", "name": "engram", "source_mode": "static", "effects": {"enabled": True}}}
@@ -101,14 +167,41 @@ class SpriteManifestTests(unittest.TestCase):
         self.assertFalse(sequence.click_vfx_enabled)
         self.assertFalse(inline_grid.click_vfx_enabled)
 
-    def test_click_vfx_allows_bundled_engram_png_by_absolute_path(self):
-        bundled = Path("resource/character/engram.png").resolve()
+    def test_click_vfx_allows_bundled_engram_set_image_by_absolute_path(self):
+        bundled = Path("resource/character/sets/engram/character.png").resolve()
         profile = _CharacterProfile({
             "overlay": {"character": {
                 "set": "", "name": str(bundled), "source_mode": "static", "effects": {"enabled": True},
             }}
         })
         self.assertTrue(profile.click_vfx_enabled)
+
+    def test_static_vfx_keeps_body_geometry_fixed_by_default(self):
+        overlay = CharacterOverlay.__new__(CharacterOverlay)
+        overlay._profile = SimpleNamespace(
+            legacy_body_motion=False, effects_idle_interval_ms=2400,
+            effects_idle_thickness_px=2, effects_click_thickness_px=3,
+        )
+        overlay._effect_images = {"twinkle": object(), "sparkle_burst": object()}
+        overlay._render_current_image = Mock()
+
+        overlay._render_idle_effect(1200)
+        idle = overlay._render_current_image.call_args.kwargs
+        self.assertEqual((idle["scale_x"], idle["scale_y"], idle["offset_y"]), (1.0, 1.0, 0))
+
+        overlay._render_current_image.reset_mock()
+        overlay._render_click_effect(0.5)
+        click = overlay._render_current_image.call_args.kwargs
+        self.assertEqual((click["scale_x"], click["scale_y"], click["offset_x"], click["offset_y"]), (1.0, 1.0, 0, 0))
+
+    def test_legacy_body_motion_opt_in_restores_transform(self):
+        overlay = CharacterOverlay.__new__(CharacterOverlay)
+        overlay._profile = SimpleNamespace(legacy_body_motion=True, effects_click_thickness_px=3)
+        overlay._effect_images = {"sparkle_burst": object()}
+        overlay._render_current_image = Mock()
+        overlay._render_click_effect(0.5)
+        rendered = overlay._render_current_image.call_args.kwargs
+        self.assertNotEqual((rendered["scale_x"], rendered["scale_y"], rendered["offset_y"]), (1.0, 1.0, 0))
 
     def test_inline_uses_builtin_contract_when_grid_can_hold_it(self):
         states = _inline_state_template(24)

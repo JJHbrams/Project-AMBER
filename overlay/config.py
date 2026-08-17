@@ -9,6 +9,8 @@ from pathlib import Path
 
 import yaml
 
+from core.install.user_config import preserve_legacy_character_source_mode
+
 _DEFAULT_REL = "config/overlay.yaml"
 
 
@@ -109,9 +111,9 @@ _USER_TEMPLATE = """\
 # 변경하고 싶은 값만 작성하면 됨 — 저장 후 다음 클릭에 바로 적용
 # 캐릭터 리소스 탐색 순서:
 # 1) ~/.engram/character/{name}/ 디렉토리 → sequence 설정에 따라 애니메이션
-# 2) resource/character/{name}/ 디렉토리 → sequence 설정에 따라 애니메이션
+# 2) resource/character/sequences/{name}/ 디렉토리 → sequence 설정에 따라 애니메이션
 # 3) ~/.engram/character/{name}.png → 정적 이미지
-# 4) resource/character/{name}.png → 정적 이미지
+# 4) resource/character/static/{name}.png 또는 sets/{name}/character.png → 정적 이미지
 # 5) ~/.engram/overlay.png → 정적 fallback
 # 6) resource/overlay.png → 최종 fallback
 
@@ -133,6 +135,7 @@ _USER_TEMPLATE = """\
 #       idle_check_interval_sec: 1.0
 #     effects:
 #       enabled: true
+#       legacy_body_motion: false  # static에서 true일 때만 레거시 늘림/상하 이동
 #       idle_asset: "resource/character/sets/engram/effects/idle.png"
 #       click_asset: "resource/character/sets/engram/effects/click.png"
 #       chroma_key: "#010101"
@@ -526,6 +529,7 @@ def load_cfg(*, strict: bool = False) -> dict:
 
     user = _safe_load_yaml(_USER_CONFIG_PATH, strict=strict)
     if user:
+        preserve_legacy_character_source_mode(user)
         cfg = _deep_merge(cfg, user)
 
     state = _safe_load_yaml(_STATE_PATH)

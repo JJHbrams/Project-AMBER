@@ -13,6 +13,8 @@ USER_CHARACTER_SETS_DIR = Path.home() / ".engram" / "character" / "sets"
 _BUNDLED_SETS_REL = "resource/character/sets"
 USER_REACTION_PACKS_DIR = Path.home() / ".engram" / "character" / "reactions"
 _BUNDLED_REACTIONS_REL = "resource/character/reactions"
+_BUNDLED_STATIC_REL = "resource/character/static"
+_BUNDLED_SEQUENCES_REL = "resource/character/sequences"
 
 
 @dataclass(frozen=True)
@@ -182,6 +184,90 @@ def resolve_character_set(set_id: object) -> CharacterSetResolution:
     return CharacterSetResolution()
 
 
+def resolve_bundled_character_source(value: object, source_mode: str) -> Path | None:
+    """Resolve canonical and legacy *bundled* character references.
+
+    Absolute paths are deliberately not remapped: a missing user-selected absolute
+    path must stay missing instead of unexpectedly selecting a bundled asset.  The
+    compatibility aliases below are limited to safe logical ids and historical
+    ``resource/character`` relative paths shipped by Engram.
+    """
+    raw = str(value or "").strip()
+    candidate = Path(raw).expanduser()
+    if not raw:
+        return None
+
+    if candidate.is_absolute():
+        # Settings historically persisted an absolute path to the checkout's
+        # old flat bundled layout.  Remap only that exact current bundled root;
+        # never redirect an arbitrary missing user path that happens to share a
+        # filename.
+        bundled_root = resolve_editable_overlay_path("resource/character")
+        try:
+            parent_matches = candidate.parent.resolve() == bundled_root.resolve()
+        except OSError:
+            parent_matches = False
+        if not parent_matches:
+            return None
+        normalized = candidate.name
+    else:
+        normalized = raw.replace("\\", "/").removeprefix("./")
+
+    direct = resolve_editable_overlay_path(normalized)
+    if normalized.startswith("resource/character/"):
+        if source_mode == "static" and direct.is_file() and direct.suffix.lower() == ".png":
+            return direct
+        if source_mode == "sequence" and direct.is_dir():
+            return direct
+
+    logical = normalized
+    prefix = "resource/character/"
+    if logical.startswith(prefix):
+        logical = logical[len(prefix):]
+    if source_mode == "static" and logical.endswith(".png") and "/" not in logical:
+        logical = logical[:-4]
+    if source_mode == "sequence" and "/" in logical:
+        return None
+    safe_id = _safe_set_id(logical)
+    if safe_id is None:
+        return None
+
+    if source_mode == "static":
+        static_image = resolve_editable_overlay_path(f"{_BUNDLED_STATIC_REL}/{safe_id}.png")
+        if static_image.is_file():
+            return static_image
+        bundled_set = resolve_character_set(safe_id)
+        if bundled_set.source == "bundled":
+            return bundled_set.base_image
+    elif source_mode == "sequence":
+        sequence = resolve_editable_overlay_path(f"{_BUNDLED_SEQUENCES_REL}/{safe_id}")
+        if sequence.is_dir():
+            return sequence
+    return None
+
+
+def resolve_bundled_reaction_sheet(value: object) -> Path | None:
+    """Map the one removed bundled Engram grid path to its canonical pack sheet."""
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    candidate = Path(raw).expanduser()
+    legacy_relative = "resource/character/engram_set/engram_states.png"
+    if candidate.is_absolute():
+        bundled_root = resolve_editable_overlay_path("resource/character")
+        legacy_root = bundled_root / "engram_set"
+        try:
+            matches = candidate.parent.resolve() == legacy_root.resolve() and candidate.name.lower() == "engram_states.png"
+        except OSError:
+            matches = False
+        if not matches:
+            return None
+    elif raw.replace("\\", "/").removeprefix("./") != legacy_relative:
+        return None
+    pack = resolve_reaction_pack("engram")
+    return pack.sprite_sheet if pack.source == "bundled" else None
+
+
 def _valid_chroma_key(value: object) -> str | None:
     text = str(value or "").strip()
     if len(text) != 7 or not text.startswith("#"):
@@ -284,7 +370,7 @@ def resolve_reaction_pack(pack_id: object) -> ReactionPackResolution:
 
 def inline_reaction_pack(sprite_sheet: object, grid: object, chroma_key: object, crop_y_offset_px: object = 0) -> ReactionPackResolution:
     """Validate an explicitly selected local sprite grid (the settings UI path)."""
-    path = Path(str(sprite_sheet or "")).expanduser()
+    path = resolve_bundled_reaction_sheet(sprite_sheet) or Path(str(sprite_sheet or "")).expanduser()
     if not path.is_absolute() or not path.is_file() or path.suffix.lower() != ".png" or not isinstance(grid, dict):
         return ReactionPackResolution()
     columns, rows = _positive_int(grid.get("columns")), _positive_int(grid.get("rows"))

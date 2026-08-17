@@ -13,6 +13,35 @@ def _installer_path(value: str) -> str:
     return value.strip().replace("\\", "/")
 
 
+def preserve_legacy_character_source_mode(data: dict) -> bool:
+    """Infer the pre-source_mode character choice from an explicit user path.
+
+    Older overlay.user.yaml files stored only ``overlay.character.name``.  Once
+    the project default became ``sprite_grid``, a normal deep merge made that
+    new default override the user's existing custom image or frame directory.
+    Add an override only for an explicit non-default legacy selection; a user
+    who never customized the character continues to receive the new default.
+    """
+    overlay = data.get("overlay")
+    if not isinstance(overlay, dict):
+        return False
+    character = overlay.get("character")
+    if not isinstance(character, dict) or "source_mode" in character:
+        return False
+
+    raw_name = str(character.get("name") or "").strip()
+    if not raw_name or raw_name.casefold() == "engram":
+        return False
+
+    candidate = Path(raw_name).expanduser()
+    normalized = raw_name.replace("\\", "/").rstrip("/")
+    is_sequence = candidate.is_dir() or (
+        "/" in normalized and Path(normalized).suffix.casefold() != ".png"
+    )
+    character["source_mode"] = "sequence" if is_sequence else "static"
+    return True
+
+
 def update_installer_paths(
     config_path: Path,
     *,
@@ -59,6 +88,7 @@ def update_overlay_installer_config(config_path: Path, *, provider: str, mcp_por
         raise ValueError("overlay user config 'cli' value must be a mapping")
     if data.get("mcp") is not None and not isinstance(data.get("mcp"), dict):
         raise ValueError("overlay user config 'mcp' value must be a mapping")
+    preserve_legacy_character_source_mode(data)
     cli = data.get("cli") if isinstance(data.get("cli"), dict) else {}
     cli["provider"] = provider
     if ollama_model:

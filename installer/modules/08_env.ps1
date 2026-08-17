@@ -2,6 +2,8 @@
 # 08_env.ps1 — PATH 등록, 영구 환경변수, persona.user.yaml 템플릿, overlay.png 동기화
 #
 
+. (Join-Path $PSScriptRoot "character_source.ps1")
+
 # 8. PATH
 Write-Step "PATH..."
 $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
@@ -78,7 +80,7 @@ if (-not (Test-Path $UserPersonaYaml)) {
     Write-Ok "Created template: $UserPersonaYaml"
 } else { Write-Ok "Already exists: $UserPersonaYaml" }
 
-# 8c. overlay.png 동기화 (character.name → resource/overlay.png)
+# 8c. overlay.png 동기화 (authoritative character.source_mode → resource/overlay.png)
 #     우선순위: ~/.engram/overlay.user.yaml > config/overlay.yaml
 Write-Step "Syncing overlay.png from character config..."
 $OverlayPngPath = Join-Path $ProjectRoot "resource\overlay.png"
@@ -88,40 +90,51 @@ $ProjectOverlayYaml = Join-Path $ProjectRoot "config\overlay.yaml"
 $syncedChar = $null
 try {
     $resolveCharNameScript = @"
-import yaml, sys
+import json, yaml
 
-def get_char_name(path):
+def load(path):
     try:
-        cfg = yaml.safe_load(open(path, encoding='utf-8')) or {}
-        return (cfg.get('overlay') or {}).get('character', {}).get('name', '')
+        return yaml.safe_load(open(path, encoding='utf-8')) or {}
     except Exception:
-        return ''
+        return {}
+
+def merge(base, override):
+    result = dict(base)
+    for key, value in override.items():
+        result[key] = merge(result.get(key, {}), value) if isinstance(value, dict) and isinstance(result.get(key), dict) else value
+    return result
 
 user_yaml   = r'$($UserOverlayYaml -replace '\\', '/')'
 project_yaml = r'$($ProjectOverlayYaml -replace '\\', '/')'
 
-name = get_char_name(user_yaml) or get_char_name(project_yaml)
-print(name.strip())
+cfg = merge(load(project_yaml), load(user_yaml))
+character = (cfg.get('overlay') or {}).get('character') or {}
+print(json.dumps({'mode': str(character.get('source_mode') or 'static').strip(), 'name': str(character.get('name') or '').strip(), 'set': str(character.get('set') or '').strip()}))
 "@
-    $charName = & $PythonExe -c $resolveCharNameScript 2>$null
-    $charName = ($charName | Select-Object -Last 1).Trim()
-    if ($charName) {
-        $candidates = @(
-            (Join-Path $CharacterDir "$($charName)_00.png"),
-            (Join-Path $CharacterDir "$($charName)_0.png"),
-            (Join-Path $CharacterDir "$($charName).png")
-        )
-        foreach ($src in $candidates) {
-            if (Test-Path $src) {
-                Copy-Item $src $OverlayPngPath -Force
-                $syncedChar = $src
-                break
+    $charConfig = ((& $PythonExe -c $resolveCharNameScript 2>$null) | Select-Object -Last 1) | ConvertFrom-Json
+    $charName, $sourceMode, $setId = [string]$charConfig.name, [string]$charConfig.mode, [string]$charConfig.set
+    $candidates = @()
+    if ($sourceMode -eq 'sprite_grid' -and $setId -match '^[A-Za-z0-9_-]+$') {
+        $candidates += Join-Path $CharacterDir "sets\$setId\character.png"
+    } elseif ($sourceMode -eq 'static' -and $charName) {
+        $candidates += Resolve-InstallerStaticCharacterCandidates -ProjectRoot $ProjectRoot -CharacterName $charName
+    } elseif ($sourceMode -eq 'sequence' -and $charName) {
+        $sequenceDirs = @(Resolve-InstallerSequenceCharacterDirectories -ProjectRoot $ProjectRoot -CharacterName $charName)
+        foreach ($directory in $sequenceDirs) {
+            if (Test-Path $directory -PathType Container) {
+                $candidates += Get-ChildItem -LiteralPath $directory -File -Filter '*.png' | Sort-Object Name | Select-Object -ExpandProperty FullName
             }
+        }
+    }
+    foreach ($src in $candidates) {
+        if (Test-Path $src -PathType Leaf) {
+            Copy-Item -LiteralPath $src -Destination $OverlayPngPath -Force
+            $syncedChar = $src
+            break
         }
     }
 } catch { }
 if ($syncedChar) {
     $srcLabel = if (Test-Path $UserOverlayYaml) { "user" } else { "project" }
     Write-Ok "overlay.png ← $(Split-Path $syncedChar -Leaf)  (from $srcLabel yaml)"
-} elseif ($charName) { Write-Warn "Character '$charName' not found in $CharacterDir — overlay.png unchanged" }
-else { Write-Warn "No character name resolved — overlay.png unchanged" }
+} else { Write-Warn "No '$sourceMode' character source resolved — overlay.png unchanged" }

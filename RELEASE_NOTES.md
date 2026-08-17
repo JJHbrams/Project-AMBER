@@ -1,5 +1,37 @@
 # Release Notes
 
+## 2026-08-18 - v1.5.3: Reliable Character Source Selection
+
+> Patch release. New or untouched installations use the Engram sprite grid by default. Existing
+> users who selected a custom image or animation directory keep that last choice during upgrade.
+
+### Highlights
+
+- **Character source mode is now authoritative.** Switching to sprite grid no longer leaves a
+  stale single-image or animation path in control of the rendered character.
+- **Legacy custom character choices survive upgrades.** Pre-1.5 user configuration that contains
+  a custom PNG or frame directory but no `source_mode` is migrated to `static` or `sequence`.
+  An explicit modern `source_mode` is never overwritten.
+- **Single images stay geometrically stable by default.** Idle and click VFX remain available,
+  while the old squash/stretch and vertical motion can be restored with the legacy-motion option.
+- **Bundled character assets now have one canonical layout:** `static`, `sequences`, `sets`, and
+  `reactions`. Narrow compatibility aliases keep historical bundled paths working safely.
+
+### Validation
+
+- Full Python suite: 377 tests passed.
+- Isolated Windows Tk runtime: stale static/sequence paths switched correctly to sprite grid;
+  custom static geometry and VFX, legacy motion opt-in, and sequence animation all passed.
+- Fresh frozen build: embedding check, overlay smoke check, dashboard render, and HTTP health passed.
+- Installer: `EngramOverlay_1.5.3_x64-setup.exe` (419,464,551 bytes).
+- SHA-256: `1A1A9F5158AD5B8C026002EA24348286AC88A19DB14FEB625AD968A800414B57`.
+
+### Upgrade Notes
+
+- Keep the existing `overlay.user.yaml` to preserve the last custom character image or directory.
+- Users who never customized the legacy `engram` character receive the new sprite-grid default.
+- The installer does not replace explicit `static`, `sequence`, or `sprite_grid` selections.
+
 ## 2026-08-17 - v1.5.2: Built-in Manual and Faster Reproducible Installer Builds
 
 > Patch release. Install with the attached setup executable. Existing DB, Wiki, workspace, and
