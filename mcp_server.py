@@ -3247,6 +3247,10 @@ async def _http_health(request) -> "Response":
     return JSONResponse(
         {
             "status": "ok",
+            "pid": os.getpid(),
+            "runtime": os.environ.get("ENGRAM_RUNTIME_MODE", "standalone"),
+            "parent_pid": int(os.environ.get("ENGRAM_RUNTIME_PARENT_PID", "0") or 0),
+            "source_root": os.environ.get("ENGRAM_RUNTIME_SOURCE_ROOT", ""),
             "sync": {
                 "state": sync["state"],
                 "run_id": sync["run_id"],

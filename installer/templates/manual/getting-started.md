@@ -6,7 +6,7 @@ tags: [manual, tutorial, workflow]
 summary: 설정이나 자동화를 바꾸기 전에 기본 상호작용 흐름과 검증 습관을 익힌다.
 aliases: [튜토리얼, 시작 가이드, 첫 사용]
 links: [manual-index, architecture, dashboard, overlay-settings, self-diagnosis]
-manual_version: 1.1.0
+manual_version: 1.2.0
 category: guide
 ---
 

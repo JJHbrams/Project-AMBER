@@ -6,7 +6,7 @@ tags: [manual, wiki, knowledge-graph]
 summary: Markdown 원문을 페이지·링크·frontmatter로 관리하고 검색 가능한 그래프로 동기화한다.
 aliases: [위키, 지식 그래프, KG]
 links: [manual-index, architecture, session-memory, self-diagnosis]
-manual_version: 1.1.0
+manual_version: 1.2.0
 category: guide
 ---
 

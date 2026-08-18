@@ -4,6 +4,7 @@ import ctypes
 import json
 import logging
 import os
+import queue
 import socket
 import shutil
 import subprocess
@@ -20,6 +21,7 @@ import pystray
 from PIL import Image
 
 from .character import CharacterOverlay
+from .event_api import OverlayEventPublisher
 from .chat_window import ChatTerminal
 from .config import (
     get_bubble_cfg,
@@ -359,6 +361,7 @@ class OverlayApp:
         except Exception as e:
             log.warning("[overlay] app icon load failed: %s", e)
         self.root.withdraw()
+        self._renderer_inbound: queue.Queue[dict] = queue.Queue()
 
         self.chat = ChatTerminal(provider=self._cli_provider)
         self.character = CharacterOverlay(
@@ -374,7 +377,18 @@ class OverlayApp:
             on_settings=self.open_settings,
             on_restart=self.restart,
             on_history=self.show_bubble_history,
+            on_pointer_event=self._on_bundled_pointer_event,
         )
+        self._overlay_events = OverlayEventPublisher(
+            cfg,
+            on_failure=lambda: self._renderer_inbound.put({"type": "_renderer.failure"}),
+            on_message=self._renderer_inbound.put,
+        )
+        if self._overlay_events.start() and self._overlay_events.mode == "replace":
+            self.character.hide_for_external_renderer()
+            rect = self.character.get_phys_rect()
+            self._overlay_events.publish("overlay.set_position", "idle", {"x": rect[0], "y": rect[1]})
+        self.root.after(50, self._drain_external_renderer_messages)
 
         # 말풍선 모드 UI(렌더러/입력창/히스토리) — 가벼워서 미리 만들어둔다.
         # 실제 Claude 세션(BubbleSessionManager)은 캐릭터를 처음 클릭할 때 지연 기동한다.
@@ -895,6 +909,9 @@ class OverlayApp:
 
             env = os.environ.copy()
             env["ENGRAM_DB_DIR"] = get_db_root_dir()
+            env["ENGRAM_RUNTIME_MODE"] = "frozen" if getattr(sys, "frozen", False) else "source"
+            env["ENGRAM_RUNTIME_PARENT_PID"] = str(os.getpid())
+            env["ENGRAM_RUNTIME_SOURCE_ROOT"] = "" if getattr(sys, "frozen", False) else str(PROJECT_ROOT.resolve())
             # overlay 역할 해제 — MCP 서버는 KuzuDB 직접 접근 가능
             env.pop("ENGRAM_RUNTIME_ROLE", None)
             log_path = Path.home() / ".engram" / "mcp-http.log"
@@ -932,12 +949,14 @@ class OverlayApp:
     def _deferred_startup(self) -> None:
         """MCP server 준비 완료 후 kg_watcher / dashboard를 순서대로 시작한다."""
         settings = self._get_mcp_health_settings()
-        self._wait_mcp_ready(timeout=float(settings["ready_timeout_secs"]), port=int(settings["port"]))
+        mcp_ready = self._wait_mcp_ready(
+            timeout=float(settings["ready_timeout_secs"]), port=int(settings["port"])
+        )
         self._kg_watcher_proc = self._start_kg_watcher()
         if self._is_dashboard_enabled():
             self._dashboard_proc = self._start_dashboard()
         # 원격 리스너가 떠 있어야 터널이 의미가 있으므로 MCP 준비 이후에 연다.
-        self._apply_tunnels()
+        self._apply_tunnels(listener_ready=mcp_ready)
         # 전역 SessionStart hook 을 현재 auto_inject 설정과 동기화한다(설치/제거 멱등).
         try:
             sync_sessionstart_hook(is_auto_inject_enabled())
@@ -952,12 +971,8 @@ class OverlayApp:
             if not result.get("ok"):
                 log.error("[overlay] %s 동기화 실패: %s", name, result.get("error", "unknown error"))
 
-    def _apply_tunnels(self) -> None:
-        """설정의 mcp.tunnels 목록만 복원한다. 연결은 하지 않는다.
-
-        재빌드로 오버레이가 재시작돼도 대상 목록이 남아 있는 것이 목적이고,
-        연결 수립은 사용자가 설정 탭에서 [연결]을 눌러 로그인하며 한다.
-        """
+    def _apply_tunnels(self, listener_ready: bool | None = None) -> None:
+        """설정의 터널 목록을 복원하고, 허용된 경우 키 인증으로 자동 연결한다."""
         try:
             cfg = load_cfg()
             mcp_cfg = cfg.get("mcp") or {}
@@ -970,8 +985,21 @@ class OverlayApp:
                 if isinstance(t, dict) and t.get("host")
             ]
             self._tunnels.register(hosts)
+            auto_reconnect = bool(mcp_cfg.get("tunnel_auto_reconnect", False))
+            if not auto_reconnect:
+                if hosts:
+                    log.info("[tunnel] 대상 %d개 복원(자동 재연결 꺼짐): %s", len(hosts), ", ".join(hosts))
+                return
+
+            remote_port = int(mcp_cfg.get("remote_port", 17386) or 17386)
+            if listener_ready is False or not self._is_mcp_listener_ready(remote_port, timeout=1.0):
+                log.warning("[tunnel] 원격 리스너가 준비되지 않아 자동 연결 생략 (port=%d)", remote_port)
+                return
+
+            for host in hosts:
+                self._tunnels.start_automatic(host)
             if hosts:
-                log.info("[tunnel] 대상 %d개 복원(연결 안 함): %s", len(hosts), ", ".join(hosts))
+                log.info("[tunnel] 대상 %d개 자동 연결 요청: %s", len(hosts), ", ".join(hosts))
         except Exception:
             log.exception("[tunnel] 목록 복원 실패")
 
@@ -1074,7 +1102,8 @@ class OverlayApp:
         if getattr(sys, "frozen", False):
             cmd = [sys.executable]
         else:
-            cmd = [sys.executable, "-m", "overlay.main"]
+            entrypoint = (PROJECT_ROOT / "engram_overlay_entry.py").resolve()
+            cmd = [sys.executable, str(entrypoint)]
         cwd = str(PROJECT_ROOT)
 
         # root.after() 는 root.destroy() 시 취소되므로 threading.Timer 사용
@@ -1241,6 +1270,8 @@ class OverlayApp:
         # 상단 기본)에 별도로 뜬다 — 내 입력이 응답으로 출력되는 것처럼 보이던 문제 해결.
         self._bubble_last_activity = time.monotonic()
         self.character.notify_input()
+        self._overlay_events.publish("conversation.input_submitted", "input")
+        self._overlay_events.publish("generation.started", "generating")
         self._bubble_turn_active = True  # 턴 시작 — 응답이 끝날(turn_end/error/result) 때까지 발화 억제
         # 자율발화에 대한 답장일 때만 engaged 로 친다. 예전엔 모든 입력에서 무조건
         # notify_engaged 를 불렀는데, 그러면 자율발화와 무관한 평소 대화가 백오프를
@@ -1263,11 +1294,88 @@ class OverlayApp:
         kind = ev.get("kind") if isinstance(ev, dict) else None
         if kind in ("turn_end", "error", "result"):
             self._bubble_turn_active = False
+        self._initiative.feed_event(ev)
+        self._overlay_events.publish_bubble(ev)
         self._bubble_manager.handle_event(ev)
         try:
             self.character.handle_bubble_event(ev)
         except Exception:
             log.debug("[overlay] character state event skipped", exc_info=True)
+
+    def _restore_bundled_renderer(self) -> None:
+        """Replacement failure must always return control to the bundled window."""
+        try:
+            self.character.restore_bundled_renderer()
+        except Exception:
+            log.debug("[overlay-api] bundled renderer restore skipped", exc_info=True)
+
+    def _on_bundled_pointer_event(self, action: str, payload: dict) -> None:
+        """Expose host-owned pointer semantics to observer renderers."""
+        mapping = {
+            "pointer_enter": ("pointer.entered", "hover"),
+            "pointer_leave": ("pointer.left", "idle"),
+            "left_click": ("pointer.left_clicked", "click"),
+            "right_click": ("pointer.right_clicked", "click"),
+            "drag_move": ("overlay.position_changed", "idle"),
+            "drag_end": ("overlay.position_changed", "idle"),
+        }
+        event = mapping.get(action)
+        if event is not None:
+            self._overlay_events.publish(event[0], event[1], payload)
+
+    def _drain_external_renderer_messages(self) -> None:
+        """Run renderer callbacks on Tk's event loop, never on the stdout thread."""
+        try:
+            while True:
+                message = self._renderer_inbound.get_nowait()
+                if message.get("type") == "_renderer.failure":
+                    self._restore_bundled_renderer()
+                else:
+                    self._handle_external_renderer_message(message)
+        except queue.Empty:
+            pass
+        if not self._quitting:
+            self.root.after(50, self._drain_external_renderer_messages)
+
+    def _handle_external_renderer_message(self, message: dict) -> None:
+        """Tk-thread handler for the small, public renderer-to-host input contract."""
+        if message.get("schema_version") not in (None, 1):
+            return
+        payload = message.get("payload")
+        payload = payload if isinstance(payload, dict) else {}
+        kind = message.get("type")
+        try:
+            if kind == "overlay.geometry_changed":
+                rect = self.character.apply_external_geometry(
+                    payload["x"], payload["y"], payload["width"], payload["height"]
+                )
+                self._overlay_events.publish(
+                    "overlay.set_position", "idle", {"x": rect[0], "y": rect[1]}
+                )
+            elif kind == "pointer.action":
+                action = payload.get("action")
+                if action == "left_click":
+                    self._overlay_events.publish("pointer.left_clicked", "click")
+                    self.character.external_activate()
+                elif action == "right_click":
+                    self._overlay_events.publish("pointer.right_clicked", "click")
+                    self.character.external_context_menu(int(payload["screen_x"]), int(payload["screen_y"]))
+                elif action == "pointer_enter":
+                    self._overlay_events.publish("pointer.entered", "hover")
+                elif action == "pointer_leave":
+                    self._overlay_events.publish("pointer.left", "idle")
+                elif action in {"drag_move", "drag_end"}:
+                    rect = self.character.get_phys_rect()
+                    rect = self.character.apply_external_geometry(
+                        int(payload["screen_x"]), int(payload["screen_y"]), rect[2], rect[3]
+                    )
+                    self._overlay_events.publish(
+                        "overlay.set_position", "idle", {"x": rect[0], "y": rect[1]}
+                    )
+            elif kind == "overlay.heartbeat":
+                return
+        except (KeyError, TypeError, ValueError):
+            log.warning("[overlay-api] invalid external renderer input: %s", kind)
 
     def _bubble_screen_clear(self) -> bool:
         """지금 능동 발화를 띄워도 되는가 — bubble 모드 · 입력창 닫힘 · 턴 진행 안 함 ·
@@ -1488,6 +1596,7 @@ class OverlayApp:
         if self._quitting:
             return
         self._quitting = True
+        self._overlay_events.stop()
         try:
             self.character.cancel_config_watch()
         except Exception:

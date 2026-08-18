@@ -4,6 +4,36 @@ All notable changes to this project are documented in this file.
 
 ## Unreleased
 
+## [1.5.4] — 2026-08-18
+
+### Added
+
+- 커스텀 오버레이가 Engram의 공개 상태 이벤트를 로컬 JSONL child-process API로
+  받아 자체 애니메이션·창을 렌더링할 수 있게 했다. 기본 `observer`와 handshake 이후
+  번들 캐릭터를 대체하는 `replace` 모드, 위치·좌/우클릭·드래그 입력, 실패 시 번들
+  복구를 지원하며 대화·thinking·도구 원문은 전달하지 않는다.
+- 설치 관리형 매뉴얼에 커스텀 오버레이가 Engram으로 보내야 하는 메시지와 Engram에서
+  받는 메시지를 방향별 계약표·복사 가능한 JSON·최소 Python 예제로 정리했다.
+
+### Changed
+
+- 설정 GUI 오버레이 탭에 작은 커스텀 오버레이 도움말을 추가하고, CLI 공급자 탭에
+  잘못 노출되던 페르소나 안내·열기 버튼을 제거했다. 페르소나 상태 배너는 이제
+  페르소나 탭에서만 표시된다.
+- `dev-rebuild.ps1`을 PyInstaller frozen 재빌드 대신 현재 checkout의 canonical source
+  entrypoint를 직접 검증·재시작하는 빠른 개발 루프로 변경했다. 배포용 installer는
+  source/frozen 공통 runtime contract와 기존 embedding·role·dashboard smoke를 모두
+  통과해야 하며, 오래된 `-SkipBuild` bundle도 같은 frozen contract로 다시 확인한다.
+- 이전 설치 overlay가 종료된 뒤 frozen MCP·kg-watcher·dashboard child가 남은 경우,
+  dev source restart marker와 기존 overlay 종료 확인을 거친 entrypoint가 기본 설치 경로와
+  exact role/command를 다시 검증한 PID만 정리한다. 실패 cleanup도 25초 graceful 종료를
+  기다린 뒤 시작 시 기록한 동일 checkout child identity만 정리한다.
+
+### Fixed
+
+- 능동 발화를 처음 켰거나 프로세스를 재시작한 직후에는 시스템 uptime과 무관하게
+  유휴 조건만 충족하면 첫 발화를 허용하고, 실제 첫 발화 이후부터 최소 간격을 적용한다.
+
 ## [1.5.3] — 2026-08-18
 
 ### Fixed

@@ -66,6 +66,14 @@ overlay:
   # - bubble: 캐릭터 옆 말풍선 대화창 (기본)
   chat_mode: "bubble"
 
+  # 선택 사항: 커스텀 오버레이에 공개 메타데이터 이벤트만 JSONL stdin으로 보낸다.
+  # observer는 번들 캐릭터를 유지하고, replace는 handshake 성공 후 번들을 숨긴다.
+  # command는 셸 문자열이 아닌 명시적 문자열 배열이며, 비어 있으면 번들 렌더러만 사용한다.
+  # 외부 프로세스는 시작 시 stdout에 overlay.hello JSONL 한 줄을 보내야 한다.
+  external_renderer:
+    mode: "observer" # observer | replace. replace는 handshake 후 번들 캐릭터를 숨긴다.
+    command: []
+
   # 단축키
   hotkey: "alt+f12"
 
@@ -162,8 +170,9 @@ bubble:
     phrasing_timeout_sec: 25
     nudge_dwell_ms: 25000 # 능동 발화 풍선이 자동 페이드되기까지(ms)
     ignore_backoff_max: 4 # 연속 무시 시 발화 간격 배수 상한
-    # 소스별 on/off + 쿨다운(초). 우선순위: unfinished → curiosity → git → persona.
+    # 소스별 on/off + 쿨다운(초). 우선순위: memory → unfinished → curiosity → git → persona.
     sources:
+      memory: { enabled: true, cooldown_sec: 3600 } # 기억 도구 이벤트 뒤의 한 번성 대화 신호
       unfinished: { enabled: true, cooldown_sec: 7200 } # 직전 세션의 미완 작업(open_intents)
       curiosity: { enabled: true, cooldown_sec: 3600 } # 미해결 호기심
       git: { enabled: true, cooldown_sec: 5400 } # 작업 디렉토리 미커밋/미push

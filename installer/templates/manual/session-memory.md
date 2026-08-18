@@ -6,7 +6,7 @@ tags: [manual, memory, session]
 summary: 현재 대화, 작업 메모리, 장기 메모리, 영속 Wiki 노트의 역할과 수명 차이.
 aliases: [세션 메모리, 기억, 컨텍스트]
 links: [manual-index, architecture, wiki-kg, self-diagnosis]
-manual_version: 1.1.0
+manual_version: 1.2.0
 category: guide
 ---
 

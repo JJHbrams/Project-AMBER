@@ -6,7 +6,7 @@ tags: [manual, install, update]
 summary: 사용자 작성 Wiki는 보존하면서 installer가 관리하는 매뉴얼 갱신을 설명한다.
 aliases: [설치, 업데이트]
 links: [index, dashboard, self-diagnosis]
-manual_version: 1.1.0
+manual_version: 1.2.0
 category: guide
 ---
 

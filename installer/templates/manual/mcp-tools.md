@@ -6,7 +6,7 @@ tags: [manual, mcp, tools]
 summary: 변경 전에 점검부터 시작하는 방식으로 로컬 도구 인터페이스를 사용한다.
 aliases: [MCP, 도구]
 links: [index, wiki-kg, self-diagnosis]
-manual_version: 1.1.0
+manual_version: 1.2.0
 category: reference
 ---
 

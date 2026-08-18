@@ -6,7 +6,7 @@ tags: [manual, diagnosis, troubleshooting]
 summary: 시스템의 관찰된 이상 징후를 문서·근거·좁은 복구·실행 검증으로 다루는 절차.
 aliases: [자가진단, 문제 해결, 진단]
 links: [manual-index, architecture, getting-started, wiki-kg, session-memory]
-manual_version: 1.1.0
+manual_version: 1.2.0
 category: guide
 ---
 

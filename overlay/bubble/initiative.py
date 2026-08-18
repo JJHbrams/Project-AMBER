@@ -33,6 +33,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Callable, Optional, Protocol
 
+from overlay.reaction_badge import is_memory_tool_name, public_event
+
 logger = logging.getLogger(__name__)
 
 _DEFAULTS = {
@@ -48,6 +50,7 @@ _DEFAULTS = {
     "ignore_backoff_max": 4,   # 연속 무시 시 간격 배수 상한(min_gap_sec * (1+streak))
     # 소스별 on/off + 쿨다운(초) — 같은 소스가 이 시간 안에 다시 뽑히지 않는다.
     "sources": {
+        "memory":     {"enabled": True, "cooldown_sec": 3600},
         "unfinished": {"enabled": True, "cooldown_sec": 7200},
         "curiosity":  {"enabled": True, "cooldown_sec": 3600},
         "git":        {"enabled": True, "cooldown_sec": 5400},
@@ -56,7 +59,7 @@ _DEFAULTS = {
 }
 
 # 소스 우선순위 — 유휴 tick 마다 이 순서로 훑어 첫 후보를 발화한다(신호가 강한 순).
-_SOURCE_ORDER = ("unfinished", "curiosity", "git", "persona")
+_SOURCE_ORDER = ("memory", "unfinished", "curiosity", "git", "persona")
 
 
 # 결과 판정에 쓰이는 세 가지 값 — 무엇을 "참여"로 볼지가 곧 학습 신호의 정의다.
@@ -104,6 +107,41 @@ class SourceProvider(Protocol):
 
 
 # ── 소스 구현 ─────────────────────────────────────────────────────────────
+
+class MemoryEventSource:
+    """Queue one coalesced initiative candidate from public memory-tool activity.
+
+    Tool inputs and outputs can contain private memory contents, so this source
+    deliberately reads only the public event kind and tool name.
+    """
+
+    key = "memory"
+
+    def __init__(self):
+        self._pending: Optional[Nudge] = None
+
+    def feed_event(self, event: object) -> None:
+        safe = public_event(event)
+        if str(safe.get("kind") or "").lower() != "tool_use":
+            return
+        if not is_memory_tool_name(safe.get("tool_name")):
+            return
+        self._pending = Nudge(
+            self.key,
+            fallback_text="기억을 살펴보다가 문득 떠오른 게 있어. 잠깐 얘기해볼래?",
+            context="최근 기억을 살펴본 뒤 사용자에게 부담 없이 대화를 건네는 상황.",
+            topic="기억 탐색",
+        )
+
+    def poll(self) -> Optional[Nudge]:
+        pending, self._pending = self._pending, None
+        return pending
+
+    def restore(self, nudge: Nudge) -> None:
+        # A newer event may arrive while phrasing is in flight. If so, the
+        # one-slot queue already coalesces both signals and should win.
+        if self._pending is None:
+            self._pending = nudge
 
 class GitStatusSource:
     """작업 디렉토리의 미커밋/미푸시 상태를 훑어 발화 거리를 만든다.
@@ -293,6 +331,7 @@ def make_persona_phraser(timeout_sec: float = 25.0) -> Callable[[str, str], Opti
 def default_sources(get_workdir: Callable[[], str], scope_key: str = "overlay") -> list[SourceProvider]:
     """우선순위 순서(_SOURCE_ORDER)와 맞춰 기본 소스 묶음을 만든다."""
     return [
+        MemoryEventSource(),
         UnfinishedWorkSource(scope_key),
         CuriositySource(),
         GitStatusSource(get_workdir),
@@ -345,6 +384,8 @@ class InitiativeEngine:
         self._on_outcome = on_outcome
         self._sources = {s.key: s for s in (sources or [])}
         self._source_state: dict[str, _SourceState] = {}
+        # 0.0은 "발화 이력 없음" sentinel이다. _gap_status가 시스템 uptime과
+        # 혼동하지 않고 첫 발화의 min_gap을 면제한다.
         self._last_spoke = 0.0
         # 결과 가중치가 0.5 단위라 float — 간격 배수 계산에서만 쓰이므로 정수일 필요 없다.
         self._ignore_streak = 0.0
@@ -360,7 +401,7 @@ class InitiativeEngine:
         self._last_nudge: Optional[Nudge] = None
         self._last_nudge_text = ""
         # 폐기 시 되돌릴 값 — _speak 이 간격/쿨다운을 선지불하기 때문에 필요하다.
-        self._rollback: Optional[tuple[float, str, float]] = None
+        self._rollback: Optional[tuple[float, str, float, Nudge]] = None
         self._after_id = None
         self._phrasing_inflight = False
         self._stopped = False
@@ -390,6 +431,22 @@ class InitiativeEngine:
         # 켜짐/꺼짐이 바뀌면 다음 tick 이 알아서 반영하므로 루프 자체는 계속 돈다.
         if not was_enabled and self._cfg.get("enabled"):
             self._last_spoke = 0.0  # 방금 켰으면 첫 발화까지 idle_min_sec 만 기다림
+
+    def feed_event(self, event: object) -> None:
+        """Feed a public bubble event to enabled event-driven sources."""
+        if not self._cfg.get("enabled"):
+            return
+        src_cfg = self._cfg.get("sources", {})
+        for key, source in self._sources.items():
+            conf = src_cfg.get(key) or {}
+            if not conf.get("enabled", True):
+                continue
+            feed = getattr(source, "feed_event", None)
+            if callable(feed):
+                try:
+                    feed(event)
+                except Exception:
+                    logger.debug("[initiative] 이벤트 소스 %s 입력 실패", key, exc_info=True)
 
     def notify_engaged(self) -> None:
         """사용자가 능동 발화를 받아 실제로 답장까지 했다 — 백오프를 리셋한다."""
@@ -534,6 +591,8 @@ class InitiativeEngine:
         need = float(self._cfg.get("min_gap_sec", 1800))
         streak = min(self._ignore_streak, int(self._cfg.get("ignore_backoff_max", 4)))
         need *= (1 + streak)
+        if self._last_spoke == 0.0:
+            return float("inf"), need
         return (time.monotonic() - self._last_spoke), need
 
     def _seconds_since_activity_ok_gap(self) -> bool:
@@ -582,7 +641,7 @@ class InitiativeEngine:
         # 무시로 집계되고 (2) 실제 결과를 관측할 필요 자체가 없어져서 학습 신호가
         # 생기지 않는다. 이제는 결과가 확정될 때(_resolve) 한 번만 움직인다.
         st = self._source_state.setdefault(nudge.source_key, _SourceState())
-        self._rollback = (self._last_spoke, nudge.source_key, st.last_fired)
+        self._rollback = (self._last_spoke, nudge.source_key, st.last_fired, nudge)
         now = time.monotonic()
         self._last_spoke = now
         st.last_fired = now
@@ -627,12 +686,19 @@ class InitiativeEngine:
         다시 안 나왔다. 보이지 않은 발화는 없던 일로 되돌리는 게 맞다."""
         if self._rollback is None:
             return
-        last_spoke, source_key, last_fired = self._rollback
+        last_spoke, source_key, last_fired, nudge = self._rollback
         self._rollback = None
         self._last_spoke = last_spoke
         st = self._source_state.get(source_key)
         if st is not None:
             st.last_fired = last_fired
+        source = self._sources.get(source_key)
+        restore = getattr(source, "restore", None)
+        if callable(restore):
+            try:
+                restore(nudge)
+            except Exception:
+                logger.debug("[initiative] 소스 %s 후보 복원 실패", source_key, exc_info=True)
         self._log_state("discard", f"폐기 — 프레이징 완료 시점에 화면이 바빠짐 (source={source_key}, 간격·쿨다운 환불)")
 
     def _render(self, nudge: Nudge, text: str) -> None:

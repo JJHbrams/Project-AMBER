@@ -17,6 +17,7 @@ from overlay.bubble.initiative import (
     LATE_ENGAGED,
     GitStatusSource,
     InitiativeEngine,
+    MemoryEventSource,
     Nudge,
     _clip,
 )
@@ -89,6 +90,15 @@ class ClipTests(unittest.TestCase):
 
 
 class SelectionTests(unittest.TestCase):
+    def test_memory_event_has_highest_priority(self):
+        n_memory = Nudge("memory", "memory")
+        n_unf = Nudge("unfinished", "unf")
+        engine = make_engine(sources=[
+            StubSource("unfinished", n_unf),
+            StubSource("memory", n_memory),
+        ])
+        self.assertIs(engine._select_nudge(), n_memory)
+
     def test_priority_order_unfinished_before_git(self):
         n_unf = Nudge("unfinished", "unf")
         n_git = Nudge("git", "git")
@@ -121,6 +131,66 @@ class SelectionTests(unittest.TestCase):
 
     def test_returns_none_when_all_sources_dry(self):
         engine = make_engine(sources=[StubSource("git", None)])
+        self.assertIsNone(engine._select_nudge())
+
+
+class MemoryEventSourceTests(unittest.TestCase):
+    def test_non_memory_events_are_ignored(self):
+        source = MemoryEventSource()
+        source.feed_event({"kind": "thought", "tool_name": "mcp__engram__kg_search"})
+        source.feed_event({"kind": "tool_use", "tool_name": "web_search"})
+        source.feed_event({"kind": "tool_result", "tool_name": "mcp__engram__kg_search"})
+        self.assertIsNone(source.poll())
+
+    def test_memory_events_coalesce_and_candidate_is_consumed_once(self):
+        source = MemoryEventSource()
+        source.feed_event({
+            "kind": "tool_use",
+            "tool_name": "mcp__engram__kg_search",
+            "tool_input": {"secret": "ignored"},
+        })
+        source.feed_event({"kind": "tool_use", "tool_name": "memory_lookup", "tool_output": "ignored"})
+        candidate = source.poll()
+        self.assertIsNotNone(candidate)
+        self.assertEqual(candidate.source_key, "memory")
+        self.assertIsNone(source.poll())
+
+    def test_disabled_source_does_not_queue_events(self):
+        source = MemoryEventSource()
+        engine = make_engine(
+            cfg={"sources": {"memory": {"enabled": False}}},
+            sources=[source],
+        )
+        engine.feed_event({"kind": "tool_use", "tool_name": "mcp__engram__kg_search"})
+        self.assertIsNone(source.poll())
+
+    def test_master_disabled_does_not_leave_stale_candidate_after_enable(self):
+        source = MemoryEventSource()
+        engine = make_engine(cfg={"enabled": False}, sources=[source])
+        engine.feed_event({"kind": "tool_use", "tool_name": "mcp__engram__kg_search"})
+        engine.update_cfg({
+            "enabled": True,
+            "idle_min_sec": 0,
+            "min_gap_sec": 0,
+            "quiet_start_hour": 0,
+            "quiet_end_hour": 0,
+            "phrasing": False,
+        })
+        self.assertIsNone(source.poll())
+        self.assertIsNone(engine._select_nudge())
+
+    def test_source_cooldown_blocks_next_queued_candidate(self):
+        source = MemoryEventSource()
+        engine = make_engine(
+            cfg={"sources": {"memory": {"enabled": True, "cooldown_sec": 9999}}},
+            sources=[source],
+        )
+        event = {"kind": "tool_use", "tool_name": "mcp__engram__kg_search"}
+        engine.feed_event(event)
+        first = engine._select_nudge()
+        self.assertIsNotNone(first)
+        engine._speak(first)
+        engine.feed_event(event)
         self.assertIsNone(engine._select_nudge())
 
 
@@ -381,6 +451,30 @@ class DiscardTests(unittest.TestCase):
         self.assertEqual(engine.active_nudge_text(), "프레이징된 한마디")
         self.assertNotEqual(engine._last_spoke, 0.0)      # 간격은 소비된 채 유지
         self.assertFalse(engine._should_speak())
+
+    def test_discard_restores_consumed_memory_candidate(self):
+        clear = {"v": True}
+        source = MemoryEventSource()
+        engine = make_engine(
+            cfg={"phrasing": True, "min_gap_sec": 1000,
+                 "sources": {"memory": {"enabled": True, "cooldown_sec": 1000}}},
+            sources=[source],
+            screen_clear=lambda: clear["v"],
+            phrase=lambda ctx, fb: "프레이징된 기억 발화",
+        )
+        engine.feed_event({"kind": "tool_use", "tool_name": "mcp__engram__kg_search"})
+        candidate = engine._select_nudge()
+        self.assertIsNotNone(candidate)
+        engine._speak(candidate)
+        deadline = time.monotonic() + 3.0
+        while not engine._root_obj.scheduled and time.monotonic() < deadline:
+            time.sleep(0.005)
+        self.assertTrue(engine._root_obj.scheduled)
+        clear["v"] = False
+        engine._root_obj.scheduled[-1][1]()
+        self.assertEqual(engine._last_spoke, 0.0)
+        self.assertEqual(engine._source_state["memory"].last_fired, 0.0)
+        self.assertIs(source.poll(), candidate)
 
 
 class GitSourceTests(unittest.TestCase):

@@ -306,6 +306,34 @@ class TunnelManager:
             self._set_state(t, STATE_CONNECTING)
         self._ensure_thread()
 
+    def start_automatic(self, host: str) -> None:
+        """키 인증만 사용하는 무인 연결을 한 번 요청한다.
+
+        이미 연결 중/연결됨/인증 실패이거나 기존 재연결 백오프가 살아 있으면
+        상태를 건드리지 않는다. 자동 경로는 ``user_requested`` 를 세우지 않으므로
+        키 인증 실패 뒤 비밀번호 콘솔로 전환되지 않는다.
+        """
+        host = (host or "").strip()
+        if not host:
+            return
+        now = time.monotonic()
+        with self._lock:
+            t = self._tunnels.get(host)
+            if t is None:
+                t = _Tunnel(host=host)
+                t.status = TunnelStatus(host=host, state=STATE_DOWN, since=now)
+                self._tunnels[host] = t
+            if t.status.state in (STATE_CONNECTING, STATE_UP, STATE_AUTH_FAILED):
+                return
+            if t.next_attempt_at > now:
+                return
+            t.status.last_error = ""
+            t.user_requested = False
+            t.console_tried = False
+            t.unsupervised = False
+            self._set_state(t, STATE_CONNECTING)
+        self._ensure_thread()
+
     def hide_console(self, host: str) -> bool:
         """콘솔 로그인 창을 숨긴다. 사용자가 로그인을 마쳤다고 알려주는 경로다."""
         with self._lock:

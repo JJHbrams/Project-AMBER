@@ -1,5 +1,45 @@
 # Release Notes
 
+## 2026-08-18 - v1.5.4: Custom Overlay Event API
+
+> Patch release. Engram can now publish its overlay events to a separately implemented custom
+> overlay process while keeping the bundled overlay as the safe default and fallback.
+
+### Highlights
+
+- **Custom overlays receive a versioned local JSONL event stream.** The API exposes metadata-only
+  Engram events without forwarding prompt or response content.
+- **Observer and replace modes are supported.** Replace mode hides the bundled character only
+  after a successful handshake and restores it automatically if the custom process fails.
+- **Window interaction remains integrated.** Custom overlays can report geometry, pointer actions,
+  and heartbeat messages while Engram retains drag, left-click, and context-menu behavior.
+- **The manual starts with the integration contract.** The required child-to-Engram messages,
+  exact event envelope, event mapping, and a copy-paste Python example are visible up front.
+- **Settings now uses contextual help.** A compact `?` beside "커스텀 오버레이 적용 방법"
+  opens the API manual, and the unrelated Persona shortcut was removed from the CLI provider tab.
+
+### Fixed
+
+- The first initiative nudge no longer waits for the minimum-gap timer when no previous nudge has
+  been recorded.
+- The Persona shortcut banner is now shown only on the Persona tab.
+
+### Validation
+
+- Full Python suite: 425 tests passed on both the feature branch and integrated Engram `dev`.
+- AMBER release source: 425 tests passed.
+- Fresh frozen build: source and frozen runtime contracts, embedding validation, role smoke tests,
+  dashboard smoke, and installer packaging passed.
+- Installer: `EngramOverlay_1.5.4_x64-setup.exe` (419,492,195 bytes).
+- SHA-256: `2EBAD580DFCB0ABF9210C0232E6C78C580CFA0097E3C8C9F60E2A0A38C51DE01`.
+
+### Upgrade Notes
+
+- Existing installations continue using the bundled overlay unless a custom renderer command is
+  explicitly configured.
+- Use the Settings overlay-tab help link for the complete v1 protocol and integration example.
+- A failed or incompatible custom renderer falls back to the bundled overlay automatically.
+
 ## 2026-08-18 - v1.5.3: Reliable Character Source Selection
 
 > Patch release. New or untouched installations use the Engram sprite grid by default. Existing

@@ -27,6 +27,7 @@ EXPECTED_FILES = {
     "dashboard.md",
     "installation-update.md",
     "self-diagnosis.md",
+    "overlay-event-api.md",
 }
 DIAGNOSIS_PAGES = EXPECTED_FILES
 REQUIRED_FRONTMATTER = {
@@ -56,7 +57,7 @@ def _frontmatter(path: Path) -> tuple[dict, str]:
 def test_manifest_exactly_describes_the_manual_corpus():
     manifest = json.loads((ROOT / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["schema_version"] == 1
-    assert manifest["manual_version"] == "1.1.0"
+    assert manifest["manual_version"] == "1.2.0"
     assert set(manifest["files"]) == EXPECTED_FILES
     assert len(manifest["files"]) == len(EXPECTED_FILES)
     assert {path.name for path in ROOT.glob("*.md")} == EXPECTED_FILES

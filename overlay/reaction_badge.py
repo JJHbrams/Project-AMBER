@@ -23,6 +23,12 @@ PUBLIC_EVENT_FIELDS = ("kind", "text", "tool_name", "tool_output", "is_error")
 _SHOW_KINDS = {"thought", "tool_use", "tool_result", "turn_end", "result", "error"}
 
 
+def is_memory_tool_name(tool_name: object) -> bool:
+    """Return whether a public tool name represents Engram memory activity."""
+    tool = str(tool_name or "").lower()
+    return any(token in tool for token in ("mcp__engram__", "engram/", "memory", "kg_"))
+
+
 @dataclass(frozen=True)
 class Reaction:
     state: str

@@ -6,7 +6,7 @@ tags: [manual, dashboard]
 summary: 브라우저에서 실행 상태, 설정 화면, 같은 Wiki 매뉴얼 페이지를 탐색한다.
 aliases: [웹 대시보드]
 links: [index, overlay-settings, self-diagnosis]
-manual_version: 1.1.0
+manual_version: 1.2.0
 category: guide
 ---
 

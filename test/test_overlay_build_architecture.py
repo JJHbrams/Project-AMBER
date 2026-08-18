@@ -27,7 +27,7 @@ class OverlayBuildArchitectureTests(unittest.TestCase):
         self.assertIn('os.environ["TCL_LIBRARY"]', hook)
         self.assertIn('os.environ["TK_LIBRARY"]', hook)
 
-    def test_public_builders_delegate_to_shared_engine(self):
+    def test_dev_runtime_is_source_only_and_installer_owns_frozen_engine(self):
         dev = (ROOT / "dev-rebuild.ps1").read_text(encoding="utf-8-sig")
         module = (ROOT / "installer" / "modules" / "09_overlay.ps1").read_text(
             encoding="utf-8-sig"
@@ -36,16 +36,32 @@ class OverlayBuildArchitectureTests(unittest.TestCase):
             encoding="utf-8-sig"
         )
 
-        self.assertIn("installer\\build-overlay.ps1", dev)
+        self.assertNotIn("installer\\build-overlay.ps1", dev)
+        self.assertNotIn('"-m", "PyInstaller"', dev)
+        self.assertNotIn("dist\\engram-overlay", dev)
+        self.assertIn('Join-Path $Root "engram_overlay_entry.py"', dev)
+        self.assertIn("--role runtime-contract", dev)
+        self.assertIn("Start-Process -FilePath $python", dev)
+        self.assertIn('[int]$stm.pid -ne $overlay.Id', dev)
+        self.assertIn('$mcp.runtime -ne "source"', dev)
+        self.assertIn('$PSBoundParameters.ContainsKey("FreshBuild")', dev)
         self.assertIn("build-overlay.ps1", module)
         self.assertIn("build-overlay.ps1", release)
-        self.assertIn('Join-Path $PSScriptRoot "dist\\\\engram-overlay"', dev)
         self.assertIn('Deploy = (Join-Path $ProjectRoot "dist\\\\engram-overlay")', module)
         self.assertIn("-Deploy $DistDir -ValidateOnly", release)
         self.assertIn("-Deploy $DistDir -NoStart", release)
         self.assertNotIn("PyInstaller --noconfirm", release)
         self.assertIn('$overlayMode = if ($FreshBuild) { "rebuild" } else { "auto" }', release)
-        self.assertIn('Mode = if ($FreshBuild) { "rebuild" } else { "auto" }', dev)
+
+        build = (ROOT / "installer" / "build-overlay.ps1").read_text(
+            encoding="utf-8-sig"
+        )
+        self.assertIn("Invoke-SourceRuntimeContract", build)
+        self.assertIn('"runtime-contract"', build)
+        self.assertLess(
+            build.index("Invoke-SourceRuntimeContract $python"),
+            build.index("Validating offline embedding model"),
+        )
 
     def test_release_builder_caches_setup_and_has_explicit_release_profile(self):
         release = (ROOT / "installer" / "build-installer.ps1").read_text(
@@ -241,6 +257,29 @@ class OverlayBuildArchitectureTests(unittest.TestCase):
         self.assertIn("dashboard title missing", entry)
         self.assertIn("streamlit_bootstrap.load_config_options(options)", entry)
         self.assertIn("dashboard_exe = EXE(", spec)
+
+    def test_source_restart_uses_canonical_entrypoint_and_mcp_provenance(self):
+        overlay_main = (ROOT / "overlay" / "main.py").read_text(encoding="utf-8")
+        entry = (ROOT / "engram_overlay_entry.py").read_text(encoding="utf-8")
+        mcp = (ROOT / "mcp_server.py").read_text(encoding="utf-8")
+
+        self.assertIn('PROJECT_ROOT / "engram_overlay_entry.py"', overlay_main)
+        self.assertNotIn('cmd = [sys.executable, "-m", "overlay.main"]', overlay_main)
+        self.assertIn('"ENGRAM_RUNTIME_PARENT_PID"', overlay_main)
+        self.assertIn('"ENGRAM_RUNTIME_SOURCE_ROOT"', overlay_main)
+        self.assertIn('"parent_pid": int(os.environ.get("ENGRAM_RUNTIME_PARENT_PID"', mcp)
+        self.assertIn('if role == "runtime-contract":', entry)
+        dev = (ROOT / "dev-rebuild.ps1").read_text(encoding="utf-8-sig")
+        process_identity = (ROOT / "core" / "install" / "process_identity.py").read_text(encoding="utf-8")
+        self.assertIn("ENGRAM_DEV_SOURCE_RESTART", dev)
+        self.assertIn("WaitForExit(25000)", dev)
+        self.assertIn("snapshot --parent-pid", dev)
+        self.assertIn("cleanup-snapshot", dev)
+        self.assertIn("_cleanup_dev_restart_orphans", entry)
+        self.assertIn("cleanup_dev_restart_orphans", entry)
+        self.assertIn('"mcp-server", "kg-watcher"', process_identity)
+        self.assertIn('"engram-dashboard.exe"', process_identity)
+        self.assertNotIn("patterns = [\"mcp_server.py\"", entry)
 
     def test_publish_uses_explicit_target_and_restores_all_prior_overlays_on_failure(self):
         build = (ROOT / "installer" / "build-overlay.ps1").read_text(encoding="utf-8-sig")

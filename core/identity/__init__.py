@@ -3,6 +3,7 @@
 from .service import (
     decay_themes,
     get_identity,
+    get_persona_db_baseline,
     get_persona,
     get_persona_status,
     get_themes,
