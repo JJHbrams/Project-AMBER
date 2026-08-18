@@ -267,6 +267,29 @@ def get_persona() -> Dict:
     return result
 
 
+def get_persona_db_baseline() -> Dict[str, Any]:
+    """Return the unmerged persona document stored in the identity DB.
+
+    This deliberately does not apply user/project YAML or defaults: callers that
+    offer an irreversible DB overwrite must show the value that will actually be
+    replaced, rather than an effective (and potentially pinned) value.
+    """
+    conn = get_connection()
+    try:
+        row = conn.execute("SELECT persona FROM identity WHERE id=1").fetchone()
+    finally:
+        conn.close()
+    if not row or not row["persona"]:
+        return {}
+    try:
+        parsed = json.loads(row["persona"])
+    except (json.JSONDecodeError, TypeError) as exc:
+        raise ValueError("identity DB persona is not valid JSON") from exc
+    if not isinstance(parsed, dict):
+        raise ValueError("identity DB persona must be a JSON object")
+    return parsed
+
+
 def update_persona(observations: dict) -> Dict:
     """관찰값을 현재 persona에 블렌딩하여 저장. 변경 후 persona 반환.
     - user.yaml에 값이 있는 필드(pinned)는 EMA 블렌딩 대상에서 제외

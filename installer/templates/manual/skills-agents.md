@@ -6,7 +6,7 @@ tags: [manual, skills, agents]
 summary: 재사용 가능한 절차와 범위가 정해진 agent 역할을 이해한다.
 aliases: [스킬, 에이전트]
 links: [index, mcp-tools, self-diagnosis]
-manual_version: 1.1.0
+manual_version: 1.2.0
 category: guide
 ---
 

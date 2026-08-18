@@ -24,7 +24,7 @@ from overlay.character_assets import (
     resolve_legacy_asset,
     resolve_reaction_pack,
 )
-from overlay.reaction_badge import crop_sprite, key_chroma, public_event
+from overlay.reaction_badge import crop_sprite, is_memory_tool_name, key_chroma, public_event
 from overlay.config import (
     _USER_CONFIG_PATH, resolve_editable_overlay_path, load_cfg,
     get_overlay_state, set_flip_horizontal, update_overlay_state,
@@ -201,7 +201,7 @@ def classify_sprite_event(event: object) -> str | None:
         return "thought"
     if kind == "tool_use":
         tool = str(safe.get("tool_name") or "").lower()
-        if any(token in tool for token in ("mcp__engram__", "engram/", "memory", "kg_")):
+        if is_memory_tool_name(tool):
             return "memory"
         if any(token in tool for token in ("search", "find", "open", "web", "browser", "fetch", "read", "glob", "list", "grep", "rg", "explore")):
             return "search"
@@ -551,6 +551,7 @@ class CharacterOverlay:
         on_settings: Callable[[], None] | None = None,
         on_restart: Callable[[], None] | None = None,
         on_history: Callable[[], None] | None = None,
+        on_pointer_event: Callable[[str, dict], None] | None = None,
     ):
         self.root = root
         self.on_activate = on_activate
@@ -564,6 +565,7 @@ class CharacterOverlay:
         self.on_settings = on_settings
         self.on_restart = on_restart
         self.on_history = on_history
+        self.on_pointer_event = on_pointer_event
 
         self.root.overrideredirect(True)
         self.root.attributes("-topmost", True)
@@ -934,6 +936,38 @@ class CharacterOverlay:
             state["overlay_window"] = {"x": int(x), "y": int(y), "work_area": list(work)}
         update_overlay_state(update)
 
+    def hide_for_external_renderer(self) -> None:
+        """Hide only the bundled window after a replacement renderer handshake."""
+        self._external_rect = self.get_phys_rect()
+        self.root.withdraw()
+
+    def restore_bundled_renderer(self) -> None:
+        self._external_rect = None
+        self.root.deiconify()
+        self.root.attributes("-topmost", True)
+
+    def apply_external_geometry(self, x: int, y: int, width: int, height: int) -> tuple[int, int, int, int]:
+        """Keep Engram-owned anchor/state in sync while the bundled image is hidden."""
+        width, height = max(1, int(width)), max(1, int(height))
+        x, y = clamp_overlay_position(int(x), int(y), width, height)
+        self._external_rect = (x, y, width, height)
+        work = bubble_geometry.get_monitor_work_rect(x + width // 2, y + height // 2)
+
+        def update(state: dict) -> None:
+            state["overlay_window"] = {"x": x, "y": y, "work_area": list(work)}
+
+        update_overlay_state(update)
+        return self._external_rect
+
+    def external_activate(self) -> None:
+        self._invoke_activate()
+
+    def external_context_menu(self, x: int, y: int) -> None:
+        class _Event:
+            x_root = x
+            y_root = y
+        self._show_context_menu(_Event())
+
     def _bind_events(self):
         self._press_x = 0
         self._press_y = 0
@@ -948,6 +982,7 @@ class CharacterOverlay:
         self.root.bind("<Button-3>", self._on_context_menu_event)
 
     def _on_context_menu_event(self, event):
+        self._emit_pointer_event("right_click", {"screen_x": event.x_root, "screen_y": event.y_root})
         self._show_context_menu(event)
         # label/root 이중 바인딩 이벤트 전파를 막아 메뉴 중복 post를 방지한다.
         return "break"
@@ -1256,6 +1291,7 @@ class CharacterOverlay:
         self._moved = False
 
     def _set_hovered(self, value: bool) -> None:
+        self._emit_pointer_event("pointer_enter" if value else "pointer_leave", {})
         if self._profile.sprite_enabled and self._sprite_model.set_hovered(value, time.monotonic() * 1000):
             self._schedule_animation_in(0)
 
@@ -1269,6 +1305,15 @@ class CharacterOverlay:
         self._press_x = event.x_root
         self._press_y = event.y_root
         self.root.geometry(f"+{x}+{y}")
+        self._emit_pointer_event("drag_move", {"screen_x": x, "screen_y": y})
+
+    def _emit_pointer_event(self, action: str, payload: dict) -> None:
+        if self.on_pointer_event is None:
+            return
+        try:
+            self.on_pointer_event(action, payload)
+        except Exception:
+            log.debug("[overlay] pointer event callback skipped", exc_info=True)
 
     def _keep_topmost(self):
         """주기적으로 창을 맨 위로 올려 작업표시줄 등에 가리지 않게 유지."""
@@ -1475,12 +1520,19 @@ class CharacterOverlay:
         if self._moved:
             self._reload_image_for_current_monitor()
             self._save_position()
+            self._emit_pointer_event(
+                "drag_end", {"screen_x": self.root.winfo_x(), "screen_y": self.root.winfo_y()}
+            )
         else:
             self._start_click_action()
+            self._emit_pointer_event("left_click", {"screen_x": event.x_root, "screen_y": event.y_root})
             self._invoke_activate()
 
     def get_phys_rect(self):
         """tkinter 논리 좌표 반환 — wt --pos 와 동일한 좌표계."""
+        external_rect = getattr(self, "_external_rect", None)
+        if external_rect is not None:
+            return external_rect
         return (
             self.root.winfo_x(),
             self.root.winfo_y(),

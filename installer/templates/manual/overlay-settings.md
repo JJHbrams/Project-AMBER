@@ -6,7 +6,7 @@ tags: [manual, settings, overlay]
 summary: 상호작용 오버레이, 환경설정, 정체성 표현을 안전하게 사용자화한다.
 aliases: [오버레이 설정, 설정]
 links: [index, dashboard, self-diagnosis]
-manual_version: 1.1.0
+manual_version: 1.2.0
 category: guide
 ---
 

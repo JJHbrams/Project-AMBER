@@ -6,7 +6,7 @@ tags: [manual, index, reference]
 summary: 사용, 설정, 운영, 자가진단을 페이지 단위로 연결하는 시스템 참조 문서.
 aliases: [매뉴얼, 사용 설명서, 도움말, index]
 links: [getting-started, architecture, session-memory, wiki-kg, self-diagnosis]
-manual_version: 1.1.0
+manual_version: 1.2.0
 category: index
 ---
 

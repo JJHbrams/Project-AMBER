@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "manual_version": "1.1.0",
+  "manual_version": "1.2.0",
   "files": [
     "index.md",
     "getting-started.md",
@@ -12,7 +12,8 @@
     "mcp-tools.md",
     "dashboard.md",
     "installation-update.md",
-    "self-diagnosis.md"
+    "self-diagnosis.md",
+    "overlay-event-api.md"
   ],
   "legacy_managed_paths": [
     "index.md", "tutorial.md", "overlay-settings.md", "skills.md", "mcp-tools.md", "troubleshooting.md"

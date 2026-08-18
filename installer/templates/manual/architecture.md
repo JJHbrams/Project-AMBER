@@ -6,7 +6,7 @@ tags: [manual, architecture, data-boundary]
 summary: 상호작용 화면, 정책·서비스, 저장소, Wiki vault가 협력하는 개념적 지도.
 aliases: [구조, 시스템 구조, 구성 요소]
 links: [manual-index, getting-started, session-memory, wiki-kg, self-diagnosis]
-manual_version: 1.1.0
+manual_version: 1.2.0
 category: concept
 ---
 

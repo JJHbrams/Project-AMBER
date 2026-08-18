@@ -120,6 +120,10 @@ _USER_TEMPLATE = """\
 # overlay:
 #   char_height_ratio: 0.125
 #   chat_mode: "bubble"  # bubble(기본) | tui
+#   # 외부 렌더러는 JSONL stdin/stdout child process로만 연결한다. 대화 원문은 전달되지 않는다.
+#   external_renderer:
+#     mode: "observer"  # observer | replace
+#     command: ["C:/path/to/vendor-overlay.exe", "--engram-jsonl"]
 #   character:
 #     source_mode: "sprite_grid"  # static | sequence | sprite_grid
 #     set: "engram"  # ~/.engram/character/sets/<id>/ 우선, 없으면 bundled set

@@ -146,6 +146,10 @@ def _dispatch_backend_role() -> bool:
             from core.install.user_config import main as user_config_main
             user_config_main(rest)
             return True
+        if role == "runtime-contract":
+            from core.install.runtime_contract import main as runtime_contract_main
+
+            raise SystemExit(runtime_contract_main(rest))
         if role == "smoke-check":
             from mcp.server.fastmcp import FastMCP
 
@@ -237,7 +241,7 @@ def _get_stm_port() -> int:
     return 17384
 
 
-def _shutdown_existing_overlay() -> None:
+def _shutdown_existing_overlay() -> bool:
     """기존 overlay 인스턴스에 graceful shutdown을 요청하고 종료를 기다린다."""
 
     port = _get_stm_port()
@@ -252,10 +256,10 @@ def _shutdown_existing_overlay() -> None:
             old_pid = info.get("pid")
             if info.get("role") != "overlay-stm":
                 _raw_log(f"[entry] /health 응답이 overlay-stm 이 아님 (role={info.get('role')}) — 외부 STM 브로커로 판단, 바로 시작")
-                return
+                return True
     except Exception:
         _raw_log("[entry] 기존 overlay 없음 — 바로 시작")
-        return
+        return True
 
     _raw_log(f"[entry] 기존 overlay 발견 (PID={old_pid}) — graceful shutdown 요청")
 
@@ -279,7 +283,7 @@ def _shutdown_existing_overlay() -> None:
             urllib.request.urlopen(f"{base}/health", timeout=1)
         except Exception:
             _raw_log("[entry] 기존 overlay 종료 확인됨")
-            return
+            return True
 
     # 4) 타임아웃 — PID로 강제 종료 (최후 수단)
     if old_pid:
@@ -287,54 +291,30 @@ def _shutdown_existing_overlay() -> None:
         try:
 
             PROCESS_TERMINATE = 0x0001
-            handle = ctypes.windll.kernel32.OpenProcess(PROCESS_TERMINATE, False, old_pid)
+            SYNCHRONIZE = 0x00100000
+            handle = ctypes.windll.kernel32.OpenProcess(PROCESS_TERMINATE | SYNCHRONIZE, False, old_pid)
             if handle:
-                ctypes.windll.kernel32.TerminateProcess(handle, 0)
+                terminated = bool(ctypes.windll.kernel32.TerminateProcess(handle, 0))
+                wait_result = ctypes.windll.kernel32.WaitForSingleObject(handle, 5000) if terminated else 0xFFFFFFFF
                 ctypes.windll.kernel32.CloseHandle(handle)
-                _raw_log(f"[entry] PID {old_pid} 강제 종료 완료")
+                if wait_result == 0:
+                    _raw_log(f"[entry] PID {old_pid} 강제 종료 확인 완료")
+                    return True
         except Exception as e:
             _raw_log(f"[entry] 강제 종료 실패: {e}")
+    return False
 
 
-def _kill_orphan_engram_children() -> None:
-    """이전 overlay 크래시 등으로 고아가 된 engram 자식 프로세스(python.exe)를 정리한다.
+def _cleanup_dev_restart_orphans() -> None:
+    if os.environ.get("ENGRAM_DEV_SOURCE_RESTART") != "1":
+        return
+    try:
+        from core.install.process_identity import cleanup_dev_restart_orphans
 
-    mcp_server.py / engram_dashboard.py / kg_watcher.py 를 실행 중인
-    python.exe 프로세스를 WMI 명령줄 검색으로 찾아 종료한다.
-    """
-    import subprocess as _sp
-
-    patterns = ["mcp_server.py", "engram_dashboard.py", "kg_watcher.py"]
-    for pattern in patterns:
-        try:
-            result = _sp.run(
-                [
-                    "powershell",
-                    "-Command",
-                    f"Get-CimInstance Win32_Process -Filter \"Name='python.exe'\""
-                    f" | Where-Object {{ $_.CommandLine -like '*{pattern}*' }}"
-                    f" | Select-Object -ExpandProperty ProcessId",
-                ],
-                capture_output=True,
-                text=True,
-                timeout=5,
-                creationflags=getattr(_sp, "CREATE_NO_WINDOW", 0),
-            )
-            for pid_str in result.stdout.strip().splitlines():
-                pid_str = pid_str.strip()
-                if pid_str.isdigit():
-                    pid = int(pid_str)
-                    try:
-                        PROCESS_TERMINATE = 0x0001
-                        handle = ctypes.windll.kernel32.OpenProcess(PROCESS_TERMINATE, False, pid)
-                        if handle:
-                            ctypes.windll.kernel32.TerminateProcess(handle, 0)
-                            ctypes.windll.kernel32.CloseHandle(handle)
-                            _raw_log(f"[entry] 고아 프로세스 종료: {pattern} PID={pid}")
-                    except Exception as e:
-                        _raw_log(f"[entry] 고아 종료 실패 PID={pid}: {e}")
-        except Exception as e:
-            _raw_log(f"[entry] 고아 탐색 실패 ({pattern}): {e}")
+        stopped = cleanup_dev_restart_orphans(_Path(__file__).resolve().parent)
+        _raw_log(f"[entry] dev restart orphan cleanup stopped={stopped}")
+    except Exception as exc:
+        _raw_log(f"[entry] dev restart orphan cleanup failed: {exc}")
 
 
 try:
@@ -351,9 +331,12 @@ try:
     _raw_log("[entry] logging 설정 완료")
 
     _raw_log("[entry] 기존 overlay 종료 처리 시작")
-    _shutdown_existing_overlay()
-    _raw_log("[entry] 고아 자식 프로세스 정리")
-    _kill_orphan_engram_children()
+    old_overlay_stopped = _shutdown_existing_overlay()
+    if old_overlay_stopped:
+        _raw_log("[entry] dev source restart의 allowlisted 고아 자식 정리")
+        _cleanup_dev_restart_orphans()
+    else:
+        _raw_log("[entry] 기존 overlay 종료 미확인 — child cleanup 생략")
     _raw_log("[entry] overlay.main 임포트 완료, main() 호출")
     main()
 

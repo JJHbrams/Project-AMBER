@@ -263,6 +263,27 @@ function Get-LastOutput([object[]]$Output) {
     return $lines[$lines.Count - 1]
 }
 
+function Invoke-SourceRuntimeContract([string]$Python) {
+    $entry = Join-Path $Root "engram_overlay_entry.py"
+    $result = Invoke-OverlayPython $Python @($entry, "--role", "runtime-contract")
+    if ($result.ExitCode -ne 0) {
+        Write-OverlayWarn "Source runtime contract failed: $(Get-LastOutput $result.Output)"
+        return 1
+    }
+    try {
+        $payload = (Get-LastOutput $result.Output) | ConvertFrom-Json
+        $expectedRoot = [IO.Path]::GetFullPath($Root).TrimEnd('\')
+        $actualRoot = [IO.Path]::GetFullPath([string]$payload.source_root).TrimEnd('\')
+        if ($payload.runtime -ne "source" -or $actualRoot -ne $expectedRoot) {
+            throw "runtime=$($payload.runtime), source_root=$($payload.source_root)"
+        }
+    } catch {
+        Write-OverlayWarn "Source runtime contract returned invalid provenance: $($_.Exception.Message)"
+        return 1
+    }
+    return 0
+}
+
 if ($Mode -eq "skip") {
     Write-OverlayWarn "Overlay build skipped"
     exit 0
@@ -279,6 +300,12 @@ try {
     if (-not (Test-Path $Spec)) {
         throw "Overlay spec not found: $Spec"
     }
+
+    Write-OverlayStep "Running source runtime contract"
+    if ((Invoke-SourceRuntimeContract $python) -ne 0) {
+        throw "Source runtime contract failed before frozen build"
+    }
+    Write-OverlayOk "Source runtime contract passed"
 
     # Callers own the publish destination.  A running process is never used to
     # choose it, because multiple installed/development copies can coexist.
@@ -298,6 +325,11 @@ try {
         )
         $last = Get-LastOutput $validation.Output
         if ($validation.ExitCode -eq 0) {
+            $frozenContract = Invoke-OverlayRole (Join-Path $deployTarget "engram-overlay.exe") "runtime-contract"
+            if ($frozenContract -ne 0) {
+                Write-OverlayWarn "Existing artifact failed frozen runtime contract"
+                exit 1
+            }
             Write-OverlayOk "Validated overlay artifact: $deployTarget"
             exit 0
         }
@@ -337,6 +369,10 @@ try {
             ([IO.Path]::GetFullPath($DefaultDist)).TrimEnd('\')
     }
     if ($Mode -eq "auto" -and $reuseValid -and $deploysToDefault) {
+        $frozenContract = Invoke-OverlayRole (Join-Path $DefaultDist "engram-overlay.exe") "runtime-contract"
+        if ($frozenContract -ne 0) {
+            throw "Reusable artifact failed frozen runtime contract"
+        }
         Write-OverlayOk "Reusing validated overlay artifact: $DefaultDist"
         if (-not $NoStart) {
             $targetExe = Join-Path $DefaultDist "engram-overlay.exe"
@@ -394,19 +430,24 @@ try {
                 "--write"
             )
             if ($manifest.ExitCode -eq 0) {
-                Write-OverlayStep "Running frozen role smoke tests"
-                $embeddingExit = Invoke-OverlayRole (Join-Path $tempArtifact "engram-overlay.exe") "embedding-check"
-                $smokeExit = if ($embeddingExit -eq 0) {
+                Write-OverlayStep "Running frozen runtime contract and role smoke tests"
+                $runtimeExit = Invoke-OverlayRole (Join-Path $tempArtifact "engram-overlay.exe") "runtime-contract"
+                $embeddingExit = if ($runtimeExit -eq 0) {
+                    Invoke-OverlayRole (Join-Path $tempArtifact "engram-overlay.exe") "embedding-check"
+                } else {
+                    1
+                }
+                $smokeExit = if ($runtimeExit -eq 0 -and $embeddingExit -eq 0) {
                     Invoke-OverlayRole (Join-Path $tempArtifact "engram-overlay.exe") "smoke-check"
                 } else {
                     1
                 }
-                $dashboardExit = if ($embeddingExit -eq 0 -and $smokeExit -eq 0) {
+                $dashboardExit = if ($runtimeExit -eq 0 -and $embeddingExit -eq 0 -and $smokeExit -eq 0) {
                     Invoke-DashboardSmoke $tempArtifact
                 } else {
                     1
                 }
-                if ($embeddingExit -eq 0 -and $smokeExit -eq 0 -and $dashboardExit -eq 0) {
+                if ($runtimeExit -eq 0 -and $embeddingExit -eq 0 -and $smokeExit -eq 0 -and $dashboardExit -eq 0) {
                     Publish-OverlayArtifact $tempArtifact $deployTarget
                     Write-OverlayOk "Built and published: $deployTarget"
                     if (-not $NoStart) {
@@ -416,7 +457,7 @@ try {
                     $exitCode = 0
                     break
                 }
-                Write-OverlayWarn "Role smoke tests failed (embedding=$embeddingExit, smoke=$smokeExit, dashboard=$dashboardExit)"
+                Write-OverlayWarn "Role smoke tests failed (runtime=$runtimeExit, embedding=$embeddingExit, smoke=$smokeExit, dashboard=$dashboardExit)"
                 throw "Frozen role smoke tests failed; existing artifact was preserved"
             } else {
                 throw "Build manifest generation failed: $(Get-LastOutput $manifest.Output)"

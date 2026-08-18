@@ -39,8 +39,10 @@
 
 ### 2.1 Frozen Overlay Build and Release Validation
 
-- 개발 재빌드, source installer의 overlay 단계, release `build-installer.ps1`는
-  `installer/build-overlay.ps1`을 공유한다.
+- `dev-rebuild.ps1`은 frozen build를 수행하지 않고 현재 checkout의
+  `engram_overlay_entry.py`를 선택한 Conda/Python으로 직접 검증·재시작한다.
+- source installer의 overlay 단계와 release `build-installer.ps1`만
+  `installer/build-overlay.ps1` frozen build engine을 공유한다.
 - `auto`, `rebuild`, `clean`, `skip` 모드를 지원한다. 빌드는 매번 고유한 임시
   dist에서 수행하고, 성공적인 manifest 생성과 `embedding-check` 및
   overlay/dashboard smoke 이후에만 `dist` 또는 별도 deploy 대상에 교체한다.
@@ -53,6 +55,9 @@
 - `engram-overlay.exe --role smoke-check`는 listener를 열지 않고 MCP의 실제
   `mcp.server.fastmcp.FastMCP` import와 mcp-server, kg-watcher, overlay import 및
   임베딩 로드를 확인한다.
+- `--role runtime-contract`는 모델을 로드하거나 listener/UI를 열지 않고 source와
+  frozen 양쪽에서 같은 canonical modules, effective config, 필수 resource를 확인한다.
+  frozen engine은 source 계약과 frozen 계약을 모두 통과해야 bundle을 재사용·배포한다.
 - `engram-dashboard.exe --smoke-check`는 Streamlit AppTest로 `Overview` 렌더를
   확인한다. 이어 임시 포트에서 실제 sidecar를 시작해 `/_stcore/health`가 `ok`인지
   확인하고 정확한 PID만 종료한다. release packaging은 ISCC 전에 렌더 검사를 재실행한다.
@@ -321,7 +326,10 @@ exe 를 교체하면 overlay·MCP·kg-watcher 가 한 번에 갱신된다.
 
 ### 10.2 판단 — dev-rebuild vs 전체 install
 
-**Python 소스만 바뀌었으면 `dev-rebuild.ps1` 로 충분하다.**
+**Python 소스 변경을 개발 환경에서 확인할 때는 `dev-rebuild.ps1` 로 충분하다.**
+이 명령은 PyInstaller·모델 패키징·`dist/` 교체를 하지 않는다. source contract를
+통과한 뒤 `python engram_overlay_entry.py`를 직접 시작하고, 새 overlay STM PID와
+source MCP provenance, kg-watcher, 활성화된 dashboard readiness를 확인한다.
 
 전체 `INSTALL.ps1` 이 필요한 경우:
 
@@ -335,16 +343,17 @@ DB 스키마는 대개 예외다 — `core/storage/db.py` 가 연결 시 `CREATE
 마이그레이션을 수행한다(`activity_log` 도 이 경로로 생성됨). 별도 마이그레이션 스크립트가
 필요한 변경일 때만 모듈 06 이 필요하다.
 
-### 10.3 두 경로의 빌드 안전성 차이
+### 10.3 세 실행 경로의 책임
 
-| | `dev-rebuild.ps1` | `INSTALL.ps1` (모듈 09) |
+| 경로 | 책임 | frozen build |
 | --- | --- | --- |
-| 엔진 | `installer/build-overlay.ps1` | `installer/build-overlay.ps1` |
-| 빌드 대상 | 고유 임시 distpath → 성공 시 교체 | 고유 임시 distpath → 성공 시 교체 |
-| 실패 시 | 기존 dist 보존, PyInstaller 증분 실패만 clean 으로 1회 자동 재시도 | 기존 dist 보존, PyInstaller 증분 실패만 clean 으로 1회 자동 재시도 |
-| 범위 | 빌드 + 재기동 | 10개 모듈 전체 |
+| `dev-rebuild.ps1` | 현재 checkout의 source 기능 검증·재기동 | 없음 |
+| `INSTALL.ps1` (fade-out) | 기존 source installer 호환, 환경·shim·client 구성 | 모듈 09에서 필요 시 수행 |
+| `installer/build-installer.ps1` | 검증된 frozen bundle과 배포용 setup.exe 생성 | 소유 |
 
-평상시엔 `dev-rebuild.ps1`, 빌드가 꼬이면 `.\INSTALL.ps1 -OverlayBuildMode clean` 으로 정리한다.
+개발 반복은 `dev-rebuild.ps1`, 배포 전 frozen 검증과 installer 생성은
+`installer/build-installer.ps1`을 사용한다. 이전의 `dev-rebuild -Deploy/-FreshBuild`는
+더 이상 frozen build로 연결되지 않고 사용법 오류로 종료한다.
 
 ### 10.4 `-OverlayBuildMode` 의미
 
@@ -361,9 +370,20 @@ Python 및 package 버전과 source/config/resource SHA-256을 검증해 빌드 
 
 ### 10.5 절차상 주의
 
-- shared engine은 **실행 중인 overlay 를 전부 종료**한 뒤 첫 인스턴스의 경로를
-  deploy 대상으로 기억한다. 새 번들은 고유 임시 디렉터리에서 완성·검증한 뒤
-  deploy 디렉터리와 원자적으로 교체하며 실패 시 기존 번들을 복원한다.
+- frozen shared engine은 caller가 지정한 deploy 대상만 교체한다. 새 번들은 고유 임시
+  디렉터리에서 완성·검증한 뒤 deploy 디렉터리와 원자적으로 교체하며 실패 시 기존
+  번들을 복원한다.
+- source 재시작은 STM health가 알려준 기존 overlay PID와 자신이 직접 시작한 child PID만
+  다룬다. crash recovery도 현재 checkout의 절대 script path가 command line에 있는
+  Python 프로세스로 한정하며 다른 checkout의 Python을 이름으로 일괄 종료하지 않는다.
+- `dev-rebuild.ps1`이 시작한 entrypoint에만 `ENGRAM_DEV_SOURCE_RESTART=1`을 전달한다.
+  entrypoint는 기존 overlay 종료를 확인한 뒤 기본 EngramOverlay 설치 경로의 frozen
+  `mcp-server`·`kg-watcher` 역할과 `engram-dashboard.exe`, 같은 checkout의 source child를
+  CIM PID·exe·command 재검증 후 정리한다. 일반 실행과 다른 경로의 프로세스에는 적용하지 않는다.
+- readiness 실패 시에는 먼저 source child identity를 기록하고 정상 종료를 25초 기다린다.
+  그래도 부모를 강제 종료해야 하면 snapshot과 현재 PID·exe·command가 완전히 같은
+  source child만 정리한다. 부모 종료로 Parent PID가 바뀐 것은 허용하지만 PID 재사용이나
+  command 변경은 거부한다.
 - overlay 종료는 STM 브로커·MCP·kg-watcher 동반 종료를 의미한다. 다른 CLI 세션이
   engram MCP 를 쓰는 중이면 그 세션의 MCP 호출이 실패한다.
 - 사용자 설정은 보존된다. 모듈 09 는 `overlay.user.yaml` 이 **없을 때만** 템플릿을 만든다.

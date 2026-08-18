@@ -64,7 +64,7 @@ session:
     def test_installer_version_is_1_5_3(self):
         iss = (ROOT / "installer" / "engram-overlay.iss").read_text(encoding="utf-8-sig")
 
-        self.assertIn('#define AppVersion "1.5.3"', iss)
+        self.assertIn('#define AppVersion "1.5.4"', iss)
         self.assertIn(
             'OutputBaseFilename=EngramOverlay_{#AppVersion}{#BuildOutputSuffix}_x64-setup',
             iss,

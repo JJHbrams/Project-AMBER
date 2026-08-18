@@ -10,7 +10,8 @@ description: 이미 설치된 engram 환경에 개발 변경을 적용한다. de
 
 ## 1. 먼저 판단
 
-**Python 소스(`overlay/`, `core/`, `discord_bot/`)만 바뀌었으면 `dev-rebuild.ps1` 로 끝난다.**
+**Python 소스(`overlay/`, `core/`, `discord_bot/`)를 개발 환경에서 확인할 때는
+`dev-rebuild.ps1` 로 끝난다.** 이 경로는 frozen exe를 만들지 않는다.
 
 frozen 빌드는 멀티콜 바이너리라 같은 exe 가 `--role` 로 MCP 서버·kg-watcher 까지 겸한다
 (`engram_overlay_entry.py::_dispatch_backend_role`). 모든 Python 소스가 exe 하나에
@@ -30,11 +31,11 @@ DB 스키마 추가는 보통 예외 — `core/storage/db.py` 가 연결 시
 ## 2. 실행
 
 ```powershell
-.\dev-rebuild.ps1              # 빌드 + 재기동
-.\dev-rebuild.ps1 -NoStart     # 재기동 없이 빌드만
+.\dev-rebuild.ps1              # source contract + source 재기동 + readiness
+.\dev-rebuild.ps1 -NoStart     # source contract만 확인
 ```
 
-전체 설치가 필요하거나 빌드가 꼬였을 때:
+기존 source installer 호환 경로가 필요할 때:
 
 ```powershell
 .\INSTALL.ps1                              # auto — mtime 비교로 필요할 때만 빌드
@@ -43,24 +44,29 @@ DB 스키마 추가는 보통 예외 — `core/storage/db.py` 가 연결 시
 
 `-OverlayBuildMode`: `auto`(기본, mtime 비교) | `rebuild`(항상 증분) | `clean`(항상 clean) | `skip`(빌드 생략)
 
+배포용 frozen bundle/installer는 다음 경로만 사용한다:
+
+```powershell
+.\installer\build-installer.ps1
+```
+
 ## 3. 실행 전 확인할 것
 
-- **실행 중인 overlay 가 전부 종료된다.** STM 브로커·MCP 서버·kg-watcher 가 함께 내려가므로,
+- **현재 STM 포트의 overlay 가 종료된다.** STM 브로커·MCP 서버·kg-watcher 가 함께 내려가므로,
   다른 CLI 세션이 engram MCP 를 쓰는 중이면 그 세션의 MCP 호출이 실패한다.
   사용자에게 먼저 알리고 진행할 것.
-- `dev-rebuild.ps1` 은 `dist/` 에 **직접** 빌드한다(`--clean` 없음). 실패하면 dist 가 손상된
-  채 남을 수 있다. 그럴 땐 `INSTALL.ps1 -OverlayBuildMode clean`.
-  (installer 는 임시 distpath 에 빌드 후 성공 시 교체하므로 이 위험이 없다.)
-- deploy 경로가 `dist/` 와 다르면 `robocopy /MIR` 로 미러링한다 — 해당 디렉토리에
-  수동으로 넣어둔 파일은 삭제된다.
+- `dev-rebuild.ps1`은 PyInstaller, embedding model packaging, `dist/` 변경을 수행하지 않는다.
+- `-Deploy`, `-FreshBuild`는 더 이상 지원하지 않으며 installer builder 사용 안내와 함께 실패한다.
 - 사용자 설정(`~/.engram/overlay.user.yaml`)은 두 경로 모두 보존한다(없을 때만 생성).
 
 ## 4. 반영됐는지 확인
 
-빌드 시각이 소스보다 나중인지:
+새 프로세스가 source entrypoint인지:
 
 ```powershell
-Get-Item dist\engram-overlay\engram-overlay.exe | Select-Object LastWriteTime
+Get-CimInstance Win32_Process |
+  Where-Object CommandLine -like '*engram_overlay_entry.py*' |
+  Select-Object ProcessId, CommandLine
 ```
 
 동작 확인은 로그가 가장 확실하다 — 새 코드의 로그 라인을 찾는다:

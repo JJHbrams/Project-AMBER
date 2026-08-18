@@ -44,7 +44,7 @@ from overlay.character_assets import (
     resolve_reaction_pack,
 )
 from overlay.cli_capabilities import effort_key, efforts as provider_efforts, model_key, models as provider_models, validate as validate_cli
-from core.identity import get_persona, set_persona_baseline
+from core.identity import get_persona_db_baseline, set_persona_baseline
 from core.config.runtime_config import normalize_policy_guidance_level
 from core.tutorial import complete_tutorial_step, has_user_persona_override, reset_tutorial_state
 
@@ -78,6 +78,13 @@ _POLICY_LEVEL_DISPLAY_TO_VALUE = {
     "경고만": "warn",
     "Agent 강제 · 사람 경고 (권장)": "enforce_agents",
 }
+OVERLAY_EVENT_API_MANUAL_URL = "http://localhost:8501/?page=manual&manual=overlay-event-api"
+
+
+def open_overlay_event_api_manual(opener: Callable[[str], object] | None = None) -> object:
+    """Open the installed manual page; injected opener keeps this UI action testable."""
+    opener = opener or webbrowser.open
+    return opener(OVERLAY_EVENT_API_MANUAL_URL)
 _POLICY_LEVEL_VALUE_TO_DISPLAY = {
     value: display for display, value in _POLICY_LEVEL_DISPLAY_TO_VALUE.items()
 }
@@ -622,6 +629,8 @@ class _SettingsWindow:
         self._persona_numeric_pin_vars: dict[str, tk.BooleanVar] = {}
         self._persona_numeric_label_vars: dict[str, tk.StringVar] = {}
         self._persona_numeric_overwrite_btns: dict[str, ttk.Button] = {}
+        self._persona_db_baselines: dict[str, float] = {}
+        self._persona_load_ok = False
         self._persona_banner_var = tk.StringVar(value="현재 기본 페르소나가 적용되어 있습니다. 커스텀 페르소나를 적용해 보세요.")
         self._autostart_var = tk.BooleanVar()
         self._auto_inject_var = tk.BooleanVar()
@@ -648,8 +657,8 @@ class _SettingsWindow:
     def _build_ui(self):
         PAD = {"padx": 8, "pady": 4}
 
-        tip_frame = tk.Frame(self.window, bd=1, relief="solid", bg="#f4f6e1")
-        tip_frame.pack(fill="x", padx=10, pady=(10, 0))
+        self._persona_tip_frame = tk.Frame(self.window, bd=1, relief="solid", bg="#f4f6e1")
+        tip_frame = self._persona_tip_frame
         tk.Label(
             tip_frame,
             textvariable=self._persona_banner_var,
@@ -659,7 +668,8 @@ class _SettingsWindow:
         ).pack(side="left", fill="x", expand=True, padx=8, pady=6)
         ttk.Button(tip_frame, text="페르소나 열기", command=self._open_persona_file).pack(side="right", padx=6, pady=4)
 
-        notebook = ttk.Notebook(self.window)
+        self._settings_notebook = ttk.Notebook(self.window)
+        notebook = self._settings_notebook
         notebook.pack(fill="both", expand=True, padx=10, pady=(8, 10))
 
         self._tab_overlay = ttk.Frame(notebook)
@@ -677,6 +687,7 @@ class _SettingsWindow:
         notebook.add(self._tab_bubble, text="말풍선")
         notebook.add(self._tab_remote, text="원격")
         notebook.add(self._tab_global, text="전역")
+        notebook.bind("<<NotebookTabChanged>>", self._sync_persona_tip_visibility)
 
         self._build_overlay_tab(PAD)
         self._build_cli_tab(PAD)
@@ -696,6 +707,16 @@ class _SettingsWindow:
         ttk.Button(btn_frame, text="취소", command=self._close).pack(side="right")
         # 원격 탭이 after() 로 상태를 폴링하므로 닫을 때 반드시 취소한다.
         self.window.protocol("WM_DELETE_WINDOW", self._close)
+        self._sync_persona_tip_visibility()
+
+    def _sync_persona_tip_visibility(self, _event=None) -> None:
+        """Keep the persona shortcut in its own tab, without changing its safety behavior."""
+        selected = self._settings_notebook.nametowidget(self._settings_notebook.select())
+        if selected is self._tab_persona:
+            if not self._persona_tip_frame.winfo_manager():
+                self._persona_tip_frame.pack(fill="x", padx=10, pady=(10, 0), before=self._settings_notebook)
+        elif self._persona_tip_frame.winfo_manager():
+            self._persona_tip_frame.pack_forget()
 
     def _close(self):
         self._cancel_grid_eyedropper()
@@ -713,9 +734,18 @@ class _SettingsWindow:
     def _build_overlay_tab(self, PAD: dict):
         f = self._tab_overlay
 
+        self._custom_overlay_help_label = ttk.Label(
+            f, text="커스텀 오버레이 적용 방법", foreground="gray"
+        )
+        self._custom_overlay_help_label.grid(row=0, column=0, columnspan=3, sticky="e", padx=(8, 2), pady=(5, 0))
+        self._custom_overlay_help_button = ttk.Button(
+            f, text="?", width=3, command=open_overlay_event_api_manual
+        )
+        self._custom_overlay_help_button.grid(row=0, column=3, sticky="w", padx=(0, 8), pady=(5, 0))
+
         # 캐릭터 소스 — 서로 배타적인 세 모드를 한 프레임에 모아 이후 설정 행과 겹치지 않게 둔다.
         source_box = ttk.LabelFrame(f, text="캐릭터 소스")
-        source_box.grid(row=0, column=0, columnspan=5, sticky="ew", padx=8, pady=(8, 4))
+        source_box.grid(row=1, column=0, columnspan=5, sticky="ew", padx=8, pady=(4, 4))
         # Keep the growing path column bounded so the browse controls never leave a
         # normal 850–950px settings window.  Grid fields below are intentionally
         # split across rows instead of determining this frame's requested width.
@@ -836,10 +866,10 @@ class _SettingsWindow:
             variable.trace_add("write", self._on_grid_value_changed)
 
         # 캐릭터 높이 비율
-        ttk.Label(f, text="캐릭터 높이 비율\n(0.05 ~ 0.5):").grid(row=1, column=0, sticky="w", **PAD)
+        ttk.Label(f, text="캐릭터 높이 비율\n(0.05 ~ 0.5):").grid(row=2, column=0, sticky="w", **PAD)
         self._char_height_var = tk.DoubleVar()
         height_frame = ttk.Frame(f)
-        height_frame.grid(row=1, column=1, columnspan=2, sticky="ew", **PAD)
+        height_frame.grid(row=2, column=1, columnspan=2, sticky="ew", **PAD)
         self._height_scale = ttk.Scale(
             height_frame,
             from_=0.05,
@@ -854,13 +884,13 @@ class _SettingsWindow:
         self._height_label.pack(side="left", padx=(4, 0))
 
         # 작업 디렉토리
-        ttk.Label(f, text="작업 디렉토리:").grid(row=2, column=0, sticky="w", **PAD)
+        ttk.Label(f, text="작업 디렉토리:").grid(row=3, column=0, sticky="w", **PAD)
         self._workdir_var = tk.StringVar()
-        ttk.Entry(f, textvariable=self._workdir_var, width=22).grid(row=2, column=1, sticky="ew", **PAD)
-        ttk.Button(f, text="찾기...", command=self._browse_workdir).grid(row=2, column=2, **PAD)
+        ttk.Entry(f, textvariable=self._workdir_var, width=22).grid(row=3, column=1, sticky="ew", **PAD)
+        ttk.Button(f, text="찾기...", command=self._browse_workdir).grid(row=3, column=2, **PAD)
 
         # 채팅 UI 모드
-        ttk.Label(f, text="채팅 UI 모드:").grid(row=3, column=0, sticky="w", **PAD)
+        ttk.Label(f, text="채팅 UI 모드:").grid(row=4, column=0, sticky="w", **PAD)
         self._chat_mode_var = tk.StringVar()
         ttk.Combobox(
             f,
@@ -868,15 +898,15 @@ class _SettingsWindow:
             values=_CHAT_MODE_OPTIONS,
             state="readonly",
             width=22,
-        ).grid(row=3, column=1, sticky="ew", **PAD)
+        ).grid(row=4, column=1, sticky="ew", **PAD)
         ttk.Label(
             f,
             text="말풍선 모드는 아직 미구현이라 선택해도 터미널로 동작합니다.",
             foreground="gray",
-        ).grid(row=4, column=0, columnspan=3, sticky="w", padx=8, pady=(0, 4))
+        ).grid(row=5, column=0, columnspan=3, sticky="w", padx=8, pady=(0, 4))
 
         # 말풍선 모드 권한 수준
-        ttk.Label(f, text="말풍선 권한 수준:").grid(row=5, column=0, sticky="w", **PAD)
+        ttk.Label(f, text="말풍선 권한 수준:").grid(row=6, column=0, sticky="w", **PAD)
         self._permission_level_var = tk.StringVar()
         ttk.Combobox(
             f,
@@ -884,16 +914,16 @@ class _SettingsWindow:
             values=_PERMISSION_LEVEL_OPTIONS,
             state="readonly",
             width=22,
-        ).grid(row=5, column=1, sticky="ew", **PAD)
+        ).grid(row=6, column=1, sticky="ew", **PAD)
         ttk.Label(
             f,
             text="말풍선 모드에서 도구 사용을 얼마나 자동으로 승인할지 (기본: 자동).",
             foreground="gray",
-        ).grid(row=6, column=0, columnspan=3, sticky="w", padx=8, pady=(0, 4))
+        ).grid(row=7, column=0, columnspan=3, sticky="w", padx=8, pady=(0, 4))
 
         # ── 능동 발화 (initiative) — 유휴 시 캐릭터가 스스로 말을 건다(말풍선 모드 전용) ──
         init_box = ttk.LabelFrame(f, text="능동 발화 — 유휴 시 스스로 말 걸기")
-        init_box.grid(row=7, column=0, columnspan=3, sticky="we", padx=8, pady=(10, 4))
+        init_box.grid(row=8, column=0, columnspan=3, sticky="we", padx=8, pady=(10, 4))
 
         ttk.Checkbutton(
             init_box, text="능동 발화 사용", variable=self._initiative_enabled_var,
@@ -967,24 +997,15 @@ class _SettingsWindow:
         self._gemini_cmd_var = tk.StringVar()
         ttk.Entry(f, textvariable=self._gemini_cmd_var, width=22).grid(row=4, column=1, sticky="ew", **PAD)
 
-        ttk.Label(f, text="공급자 모델:").grid(row=7, column=0, sticky="w", **PAD)
+        ttk.Label(f, text="공급자 모델:").grid(row=5, column=0, sticky="w", **PAD)
         self._provider_model_var = tk.StringVar()
         self._provider_model_combo = ttk.Combobox(f, textvariable=self._provider_model_var, width=19)
-        self._provider_model_combo.grid(row=7, column=1, sticky="ew", **PAD)
+        self._provider_model_combo.grid(row=5, column=1, sticky="ew", **PAD)
         self._provider_model_combo.bind("<<ComboboxSelected>>", lambda _event: self._update_provider_capability_controls())
-        ttk.Label(f, text="Reasoning effort:").grid(row=8, column=0, sticky="w", **PAD)
+        ttk.Label(f, text="Reasoning effort:").grid(row=6, column=0, sticky="w", **PAD)
         self._provider_effort_var = tk.StringVar()
         self._provider_effort_combo = ttk.Combobox(f, textvariable=self._provider_effort_var, width=19)
-        self._provider_effort_combo.grid(row=8, column=1, sticky="ew", **PAD)
-
-        ttk.Label(
-            f,
-            text="힌트: persona.user.yaml에 작성한 값은 자동 진화보다 우선 적용됩니다.",
-            foreground="gray",
-        ).grid(row=5, column=0, columnspan=2, sticky="w", padx=8, pady=(8, 2))
-        ttk.Button(f, text="페르소나 파일 열기", command=self._open_persona_file).grid(
-            row=6, column=0, columnspan=2, sticky="e", padx=8, pady=(0, 6)
-        )
+        self._provider_effort_combo.grid(row=6, column=1, sticky="ew", **PAD)
 
         f.columnconfigure(1, weight=1)
 
@@ -1141,6 +1162,7 @@ class _SettingsWindow:
                 command=lambda key=field: self._on_persona_overwrite(key),
             )
             btn.grid(row=row, column=4, sticky="w", padx=(0, 8), pady=4)
+            btn.state(["disabled"])
             self._persona_numeric_overwrite_btns[field] = btn
 
         ttk.Label(
@@ -1160,11 +1182,21 @@ class _SettingsWindow:
 
     def _on_persona_overwrite(self, field: str):
         """현재 슬라이더 값을 DB baseline에 명시적으로 반영하고 pin을 해제한다."""
+        if not self._persona_load_ok or field not in self._persona_db_baselines:
+            messagebox.showwarning("페르소나 로드 필요", "페르소나 DB 값을 안전하게 읽지 못했습니다. DB 반영은 차단됩니다.", parent=self.window)
+            return
         try:
             value = _coerce_persona_number(self._persona_numeric_vars[field].get(), _PERSONA_DEFAULTS[field])
         except Exception:
             return
 
+        old_value = self._persona_db_baselines[field]
+        if not messagebox.askyesno(
+            "DB baseline 덮어쓰기 확인",
+            f"{field} DB baseline을 변경합니다.\n\n현재 DB: {old_value:.2f}\n새 값: {value:.2f}\n\n계속하시겠습니까?",
+            parent=self.window,
+        ):
+            return
         try:
             set_persona_baseline({field: value})
         except Exception as exc:
@@ -1172,8 +1204,18 @@ class _SettingsWindow:
             return
 
         # DB 값이 user YAML의 pin에 가려지지 않도록 해당 필드의 pin을 즉시 해제·저장한다.
+        self._persona_db_baselines[field] = value
         self._persona_numeric_pin_vars[field].set(False)
-        self._save_persona_user_file()
+        try:
+            self._save_persona_user_file()
+        except Exception as exc:
+            messagebox.showwarning(
+                "DB 저장 완료, 페르소나 파일 저장 실패",
+                f"{field} DB baseline은 {value:.2f}로 저장되었습니다.\n"
+                f"pin 해제는 persona.user.yaml에 저장되지 않았습니다.\n{exc}",
+                parent=self.window,
+            )
+            return
 
         # 버튼 일시 피드백
         btn = self._persona_numeric_overwrite_btns.get(field)
@@ -1451,7 +1493,7 @@ class _SettingsWindow:
         nf.pack(fill="x", padx=8, pady=4)
         ttk.Label(
             nf,
-            text="목록은 오버레이를 재시작해도 유지된다. 연결은 [연결]을 눌러 그때 로그인한다.",
+            text="자동 재연결을 켜면 오버레이 시작 시 저장된 호스트를 키 인증으로 연결한다.",
             foreground="gray",
         ).pack(anchor="w", padx=8, pady=(4, 0))
 
@@ -1487,7 +1529,7 @@ class _SettingsWindow:
         self._tunnel_autoreconnect_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(
             bar,
-            text="끊기면 자동 재연결",
+            text="시작·끊김 시 자동 재연결",
             variable=self._tunnel_autoreconnect_var,
         ).pack(side="right")
 
@@ -2085,8 +2127,38 @@ class _SettingsWindow:
         self._load_persona_values()
 
     def _load_persona_values(self):
-        user_persona = _safe_load_yaml(_USER_PERSONA_PATH)
-        effective_persona = get_persona()
+        # Prepare and validate every source before changing a single widget.  A
+        # failed load must never leave construction-time defaults actionable.
+        try:
+            if _USER_PERSONA_PATH.exists():
+                loaded = yaml.safe_load(_USER_PERSONA_PATH.read_text(encoding="utf-8"))
+                if loaded is not None and not isinstance(loaded, dict):
+                    raise ValueError("persona.user.yaml must contain a mapping")
+                user_persona = loaded or {}
+            else:
+                user_persona = {}
+            db_baseline = get_persona_db_baseline()
+            numeric_db: dict[str, float] = {}
+            for field in _PERSONA_NUMERIC_FIELDS:
+                raw = db_baseline.get(field)
+                if isinstance(raw, bool) or not isinstance(raw, (int, float)) or not 0.0 <= float(raw) <= 1.0:
+                    raise ValueError(f"DB baseline {field} is missing or invalid")
+                numeric_db[field] = round(float(raw), 2)
+                user_raw = user_persona.get(field)
+                if user_raw is not None and (isinstance(user_raw, bool) or not isinstance(user_raw, (int, float)) or not 0.0 <= float(user_raw) <= 1.0):
+                    raise ValueError(f"persona.user.yaml {field} is invalid")
+            numeric_values = {
+                field: (_coerce_persona_number(user_persona[field], _PERSONA_DEFAULTS[field]), True)
+                if field in user_persona else (numeric_db[field], False)
+                for field in _PERSONA_NUMERIC_FIELDS
+            }
+        except Exception as exc:
+            self._persona_load_ok = False
+            self._persona_db_baselines = {}
+            for btn in self._persona_numeric_overwrite_btns.values():
+                btn.state(["disabled"])
+            self._persona_banner_var.set(f"페르소나 로드 실패: {exc} — DB 반영과 페르소나 파일 저장이 차단되었습니다.")
+            return
 
         def _txt_set(widget: tk.Text, value: str) -> None:
             widget.delete("1.0", "end")
@@ -2102,18 +2174,16 @@ class _SettingsWindow:
         _txt_set(self._persona_fewshot_txt, fewshot.strip() if isinstance(fewshot, str) else "")
 
         for field in _PERSONA_NUMERIC_FIELDS:
-            user_raw = user_persona.get(field)
-            if isinstance(user_raw, (int, float)):
-                value = _coerce_persona_number(user_raw, _PERSONA_DEFAULTS[field])
-                pinned = True
-            else:
-                value = _coerce_persona_number(effective_persona.get(field), _PERSONA_DEFAULTS[field])
-                pinned = False
+            value, pinned = numeric_values[field]
 
             self._persona_numeric_vars[field].set(value)
             self._persona_numeric_pin_vars[field].set(pinned)
             self._persona_numeric_label_vars[field].set(f"{value:.2f}")
 
+        self._persona_db_baselines = numeric_db
+        self._persona_load_ok = True
+        for btn in self._persona_numeric_overwrite_btns.values():
+            btn.state(["!disabled"])
         self._update_persona_banner(user_persona)
 
     def _update_persona_banner(self, user_persona: dict | None = None):
@@ -2398,6 +2468,10 @@ class _SettingsWindow:
         return "\n".join(lines).rstrip() + "\n"
 
     def _save_persona_user_file(self) -> int:
+        if not self._persona_load_ok:
+            # Other settings are intentionally still saved by _do_save().
+            self._persona_banner_var.set("페르소나 로드 실패 상태입니다. 페르소나 파일은 저장하지 않았습니다.")
+            return 0
         self._ensure_user_persona_file()
 
         persona_values: dict = {}
@@ -2463,13 +2537,19 @@ class _SettingsWindow:
                     complete_tutorial_step("persona_setup", source="settings_save")
             except Exception:
                 pass
-            self._update_persona_banner()
             if self._on_saved:
                 try:
                     self._on_saved()
                 except Exception:
                     pass
-            self._show_toast(f"저장되었습니다. 슬라이더 고정 {pinned_count}/4, 나머지는 adaptive로 유지됩니다.")
+            if self._persona_load_ok:
+                self._update_persona_banner()
+                self._show_toast(f"저장되었습니다. 슬라이더 고정 {pinned_count}/4, 나머지는 adaptive로 유지됩니다.")
+            else:
+                # _save_persona_user_file() deliberately skipped the rewrite.
+                # Keep its failure banner visible instead of replacing it with a
+                # normal persona success message.
+                self._show_toast("일반 설정은 저장되었습니다. 페르소나는 로드 실패 상태라 저장하지 않았습니다.")
             if self._policy_sync_warnings:
                 messagebox.showwarning(
                     "정책 가이드 일부 적용 실패",

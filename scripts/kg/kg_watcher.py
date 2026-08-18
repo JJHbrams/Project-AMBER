@@ -47,18 +47,30 @@ def _is_process_alive(pid: int) -> bool:
     if pid <= 0:
         return False
     # Windows: os.kill(pid, 0) 은 존재확인이 아니라 TerminateProcess 를 시도하며(위험),
-    # 죽은 PID 엔 SystemError(OSError 아님)를 던져 크래시한다. OpenProcess(SYNCHRONIZE)로
-    # 존재만 조회한다(main.py 워치독과 동일 패턴).
+    # 죽은 PID 엔 SystemError(OSError 아님)를 던져 크래시한다. 종료된 process object는
+    # OpenProcess가 잠시 성공할 수 있으므로 GetExitCodeProcess까지 확인해야 한다.
     if sys.platform == "win32":
         import ctypes
+        from ctypes import wintypes
 
         SYNCHRONIZE = 0x00100000
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        STILL_ACTIVE = 259
         kernel32 = ctypes.windll.kernel32
-        handle = kernel32.OpenProcess(SYNCHRONIZE, False, int(pid))
+        handle = kernel32.OpenProcess(
+            SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION,
+            False,
+            int(pid),
+        )
         if not handle:
             return False
-        kernel32.CloseHandle(handle)
-        return True
+        try:
+            exit_code = wintypes.DWORD()
+            if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+                return False
+            return int(exit_code.value) == STILL_ACTIVE
+        finally:
+            kernel32.CloseHandle(handle)
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
