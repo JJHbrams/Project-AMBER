@@ -40,6 +40,7 @@ from core.identity import (
     get_persona_status,
 )
 from core.memory import save_message, save_memory, search_memories, search_memory_hits, list_memories, upsert_working_memory
+from core.memory.store import set_session_journal_provenance, session_has_external_journal_eligibility
 from core.identity import add_curiosity, get_pending_curiosities, address_curiosity, dismiss_curiosity
 from core.tutorial import (
     get_tutorial_status,
@@ -68,7 +69,8 @@ from core.observability.activity import log_activity, get_recent_activities, ren
 from core.integrations.copilot_bridge import ask_copilot
 from core.integrations.git_policy_hook import ensure_repo_policy
 from core.memory.bus import memory_bus
-from core.context.project_scope import resolve_scope_key, cwd_is_foreign, get_global_scope_key
+from core.context.project_scope import resolve_scope_key, resolve_project_key, resolve_kg_node_id, cwd_is_foreign, get_global_scope_key
+from core.graph.semantic import checkpoint_open_session
 
 # DB 초기화
 initialize_db()
@@ -136,7 +138,7 @@ import uuid as _uuid
 _CONTEXT_ONCE_KEYS: "OrderedDict[str, tuple[int | None, float]]" = OrderedDict()
 _CONTEXT_ONCE_MAX = 500
 _CONTEXT_ONCE_TTL_SECONDS = 1800  # 30분: 같은 세션 내 재호출은 dedupe, idle 이후 새 세션은 재초기화
-_CONTEXT_ONCE_LOCK = threading.Lock()
+_CONTEXT_ONCE_LOCK = threading.RLock()
 _FINGERPRINT_TO_SESSION: "dict[str, int]" = {}  # fingerprint → session_id (MCP 연결 단위 자동 resolve용)
 _TUTORIAL_NOTICE_KEYS: "OrderedDict[str, None]" = OrderedDict()
 _TUTORIAL_NOTICE_MAX = 1000
@@ -297,7 +299,7 @@ def _stm_post(path: str, data: dict) -> dict | None:
             data=body,
             headers={"Content-Type": "application/json"},
         )
-        with urllib.request.urlopen(req, timeout=5) as resp:
+        with urllib.request.urlopen(req, timeout=70) as resp:
             return _json.loads(resp.read().decode("utf-8"))
     except Exception as e:
         import logging
@@ -404,7 +406,7 @@ def _find_latest_open_session_id(scope_key: str = "") -> str:
         return ""
 
 
-def _close_scoped_session(scope_key: str, summary: str, session_id: str = "") -> str:
+def _close_scoped_session(scope_key: str, summary: str, session_id: str = "", open_intents: str = "", progress: str = "", project_key: str = "", project_node_id: str | None = None, project_label: str = "") -> str:
     """scope에서 확인된 세션만 종료하고 실제 종료된 ID를 반환한다."""
     from core.memory import close_session as _close_session
 
@@ -414,14 +416,133 @@ def _close_scoped_session(scope_key: str, summary: str, session_id: str = "") ->
             "session_id": int(session_id) if session_id else None,
             "scope_key": scope_key,
             "summary": summary,
+            "open_intents": open_intents,
+            "progress": progress,
+            "journal_origin": "explicit",
+            "project_key": project_key,
+            "project_node_id": project_node_id or "",
+            "project_label": project_label,
         },
     )
     if result_stm:
-        return str(result_stm.get("closed_session_id", "") or "").strip()
+        closed = str(result_stm.get("closed_session_id", "") or "").strip()
+        if closed and _session_is_ended(int(closed), scope_key):
+            _invalidate_session_bindings(int(closed))
+            return closed
+        return ""
     if session_id:
-        _close_session(int(session_id), summary)
-        return str(session_id)
+        _close_session(int(session_id), summary, open_intents, progress, "explicit", project_key, project_node_id, project_label)
+        if _session_is_ended(int(session_id), scope_key):
+            _invalidate_session_bindings(int(session_id))
+            return str(session_id)
     return ""
+
+
+def _unique_open_session_id(scope_key: str) -> tuple[str, bool]:
+    """Return (id, ambiguous); unbound callers must not choose a newest peer."""
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            "SELECT id FROM sessions WHERE ended_at IS NULL AND scope_key=? ORDER BY started_at DESC, id DESC LIMIT 2",
+            (scope_key,),
+        ).fetchall()
+    finally:
+        conn.close()
+    if len(rows) > 1:
+        return "", True
+    return (str(rows[0]["id"]), False) if rows else ("", False)
+
+
+def _invalidate_session_bindings(session_id: int) -> None:
+    """Evict process-local bindings after the irreversible close transition."""
+    with _CONTEXT_ONCE_LOCK:
+        for key, value in list(_CONTEXT_ONCE_KEYS.items()):
+            if value[0] == session_id:
+                _CONTEXT_ONCE_KEYS.pop(key, None)
+        for fingerprint, bound in list(_FINGERPRINT_TO_SESSION.items()):
+            if bound == session_id:
+                _FINGERPRINT_TO_SESSION.pop(fingerprint, None)
+
+
+def _session_is_open(session_id: int, scope_key: str = "") -> bool:
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            "SELECT 1 FROM sessions WHERE id=? AND ended_at IS NULL" + (" AND scope_key=?" if scope_key else ""),
+            (session_id, scope_key) if scope_key else (session_id,),
+        ).fetchone()
+        return bool(row)
+    finally:
+        conn.close()
+
+
+def _bind_root_client_token(session_id: int, token: str) -> bool:
+    if not token:
+        return True
+    conn = get_connection()
+    try:
+        with conn:
+            session = conn.execute("SELECT root_client_token FROM sessions WHERE id=?", (session_id,)).fetchone()
+            if not session or (session["root_client_token"] and session["root_client_token"] != token):
+                return False
+            updated = conn.execute(
+                "UPDATE root_cli_owners SET session_id=? WHERE client_token=? AND status='running' AND ended_at IS NULL",
+                (session_id, token),
+            ).rowcount
+            if updated != 1:
+                return False
+            conn.execute("UPDATE sessions SET root_client_token=? WHERE id=?", (token, session_id))
+        return True
+    finally:
+        conn.close()
+
+
+def _root_client_token_active(token: str) -> bool:
+    if not token:
+        return True
+    conn = get_connection()
+    try:
+        row = conn.execute("SELECT 1 FROM root_cli_owners WHERE client_token=? AND status IN ('launching','running') AND ended_at IS NULL", (token,)).fetchone()
+        return bool(row)
+    finally:
+        conn.close()
+
+
+def _mark_trusted_root_bootstrap(session_id: int, caller: str, client_token: str = "") -> None:
+    """Persist ownership from bootstrap alone; summarize/close hints are untrusted."""
+    normalized = caller.strip().lower()
+    if client_token:
+        set_session_journal_provenance(session_id, "root_cli")
+    elif normalized in {"codex", "claude", "claude-code", "copilot", "copilot-cli"}:
+        set_session_journal_provenance(session_id, "root_bootstrap")
+
+
+def _session_is_ended(session_id: int, scope_key: str = "") -> bool:
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            "SELECT 1 FROM sessions WHERE id=? AND ended_at IS NOT NULL" + (" AND scope_key=?" if scope_key else ""),
+            (session_id, scope_key) if scope_key else (session_id,),
+        ).fetchone()
+        return bool(row)
+    finally:
+        conn.close()
+
+
+def _rebind_continuation(fingerprint: str, session_id: int, scope_key: str, cache_key: str = "") -> int:
+    """Replace a stale implicit client binding with an explicitly linked session."""
+    with _CONTEXT_ONCE_LOCK:
+        # A concurrent writer may have already rebound this fingerprint while
+        # this caller was checking the old ended session.
+        existing = int(_FINGERPRINT_TO_SESSION.get(fingerprint, 0) or 0) if fingerprint else 0
+        if existing and existing != session_id and _session_is_open(existing, scope_key):
+            return existing
+        session = memory_bus.start_session(scope_key=scope_key, continued_from_session_id=session_id)
+        if fingerprint:
+            _FINGERPRINT_TO_SESSION[fingerprint] = session.session_id
+        if cache_key:
+            _CONTEXT_ONCE_KEYS[cache_key] = (session.session_id, time.time())
+    return session.session_id
 
 
 def _tutorial_step_mismatch_response(expected_step: str, tutorial_snapshot: dict) -> dict:
@@ -701,6 +822,7 @@ async def engram_get_context_once(
     project_key: str = "",
     cwd: str = "",
     ctx: Context | None = None,
+    client_token: str = "",
 ) -> str:
     """세션 단위 컨텍스트 초기화를 1회만 수행합니다.
 
@@ -712,6 +834,8 @@ async def engram_get_context_once(
         logging.getLogger(__name__).warning("repo policy bootstrap 실패: %s", policy_result)
 
     session_fingerprint = _context_session_fingerprint(ctx)
+    if client_token and not _root_client_token_active(client_token):
+        return "[engram] invalid root client token."
     cache_key = _build_context_once_key(
         caller,
         scope_key,
@@ -719,6 +843,11 @@ async def engram_get_context_once(
         cwd,
         session_fingerprint=session_fingerprint,
     )
+    if client_token:
+        # A launcher token identifies one concrete root CLI lifetime.  It must
+        # not share the process-wide context-once cache entry with another
+        # root CLI that happens to use the same caller/scope/cwd tuple.
+        cache_key = f"{cache_key}|root:{client_token}"
 
     now = time.time()
     with _CONTEXT_ONCE_LOCK:
@@ -726,10 +855,24 @@ async def engram_get_context_once(
         if cached is not None:
             cached_sid, cached_ts = cached
             if now - cached_ts <= _CONTEXT_ONCE_TTL_SECONDS:
-                sid_hint = f" session_id={cached_sid}." if cached_sid is not None else ""
-                return f"[engram] context already initialized for this request session key.{sid_hint}"
+                if cached_sid is not None and _session_is_open(cached_sid):
+                    if client_token and not _bind_root_client_token(cached_sid, client_token):
+                        return "[engram] invalid root client token."
+                    _mark_trusted_root_bootstrap(cached_sid, caller, client_token)
+                    sid_hint = f" session_id={cached_sid}."
+                    return f"[engram] context already initialized for this request session key.{sid_hint}"
+                # Ended cached binding: never silently reuse it.  The new open
+                # continuation preserves lineage across a client restart/close.
+                if cached_sid is not None:
+                    _invalidate_session_bindings(cached_sid)
+                    effective_scope = scope_key or os.environ.get("ENGRAM_SCOPE_KEY") or ""
+                    session_id = _rebind_continuation(session_fingerprint, cached_sid, effective_scope, cache_key)
+                    if client_token and not _bind_root_client_token(session_id, client_token):
+                        return "[engram] invalid root client token."
+                    _mark_trusted_root_bootstrap(session_id, caller, client_token)
+                    return f"[engram] context reinitialized after closed session. session_id={session_id}."
             # TTL 만료 — 새 세션으로 간주하고 아래에서 재초기화
-            del _CONTEXT_ONCE_KEYS[cache_key]
+            _CONTEXT_ONCE_KEYS.pop(cache_key, None)
         _CONTEXT_ONCE_KEYS[cache_key] = (None, now)  # placeholder — session_id로 곧 업데이트
         if len(_CONTEXT_ONCE_KEYS) > _CONTEXT_ONCE_MAX:
             _CONTEXT_ONCE_KEYS.popitem(last=False)
@@ -750,6 +893,10 @@ async def engram_get_context_once(
             session_id = _sess.session_id
         with _CONTEXT_ONCE_LOCK:
             _CONTEXT_ONCE_KEYS[cache_key] = (session_id, now)
+        if session_id and client_token and not _bind_root_client_token(session_id, client_token):
+            return "[engram] invalid root client token."
+        if session_id:
+            _mark_trusted_root_bootstrap(session_id, caller, client_token)
         # fingerprint → session_id 저장 (save_message 자동 resolve용)
         if session_id is not None and session_fingerprint:
             _FINGERPRINT_TO_SESSION[session_fingerprint] = session_id
@@ -2228,6 +2375,58 @@ def _apply_autonomous_reflection(new_narrative: str, persona_observations: str) 
 
 
 @engramMCP.tool()
+async def engram_summarize_session(
+    summary: str,
+    open_intents: str = "",
+    progress: str = "",
+    scope_key: str = "",
+    cwd: str = "",
+    session_id: int = 0,
+    journal_origin: str = "root",
+    ctx: Context | None = None,
+) -> dict:
+    """열린 세션을 종료하지 않고 working memory, gated LTM, Wiki/Daily checkpoint로 정리합니다.
+
+    이 도구는 persona/narrative 반성을 적용하지 않습니다. ``정리해줘``에는 이
+    도구를 쓰고, 실제 종료에는 ``engram_close_session``을 사용하세요.
+    """
+    effective_cwd = cwd or os.getcwd()
+    resolved_scope = resolve_scope_key(scope_key or None, cwd=effective_cwd)
+    explicit = int(session_id or 0)
+    fingerprint = _context_session_fingerprint(ctx)
+    bound = int(_FINGERPRINT_TO_SESSION.get(fingerprint, 0) or 0) if fingerprint else 0
+    if explicit or bound:
+        target = explicit or bound
+    else:
+        unique, ambiguous = _unique_open_session_id(resolved_scope)
+        if ambiguous:
+            return {"status": "ambiguous_open_session", "scope_key": resolved_scope}
+        target = int(unique or 0)
+    if not target:
+        return {"status": "no_open_session"}
+    # Explicit IDs are never silently redirected to a newer continuation.
+    conn = get_connection()
+    try:
+        row = conn.execute("SELECT ended_at, scope_key FROM sessions WHERE id=?", (target,)).fetchone()
+    finally:
+        conn.close()
+    if not row or row["ended_at"] or row["scope_key"] != resolved_scope:
+        return {"status": "no_open_session" if not explicit else "ended_session"}
+    broker = _stm_post("/stm/session/summarize", {
+        "session_id": target, "scope_key": resolved_scope, "summary": summary,
+        "open_intents": open_intents, "progress": progress, "cwd": effective_cwd,
+        "journal_origin": journal_origin,
+    })
+    if broker is not None:
+        return broker
+    return checkpoint_open_session(
+        target, resolved_scope, summary, open_intents, progress=progress, cwd=effective_cwd,
+        external_daily_dir=(str(get_cfg_value("memory.auto_checkpoint.external_daily_dir", "") or "")
+                            if session_has_external_journal_eligibility(int(target)) else ""),
+    )
+
+
+@engramMCP.tool()
 async def engram_close_session(
     summary: str,
     open_intents: str = "",
@@ -2237,6 +2436,8 @@ async def engram_close_session(
     new_narrative: str = "",
     persona_observations: str = "",
     trigger_sync: bool = True,
+    session_id: int = 0,
+    ctx: Context | None = None,
 ) -> dict:
     """세션 종료 시 이번 세션의 진행 내용을 저장하고 자율 반성을 수행합니다.
     해당 프로젝트의 KG 노드를 자동 감지해 업데이트하고, 다음 세션의 engram_get_context에서 자동 주입됩니다.
@@ -2248,94 +2449,48 @@ async def engram_close_session(
     - cwd: 현재 작업 디렉토리 (프로젝트 자동 감지용, 비우면 os.getcwd() 사용)
     - new_narrative: 이번 세션 후 업데이트할 자기 서술 (있으면 자동 반성 적용)
     - persona_observations: JSON 문자열 — 페르소나 관찰값 (warmth/formality/humor/directness/traits 등)"""
-    import os
-    from core.context.project_scope import resolve_scope_key, resolve_project_key, resolve_kg_node_id
-
     effective_cwd = cwd or os.getcwd()
     resolved_scope = resolve_scope_key(scope_key or None, cwd=effective_cwd)
     project_key = resolve_project_key(cwd=effective_cwd)
+    project_label = os.path.basename(os.path.normpath(effective_cwd)) or ""
     kg_node_id = resolve_kg_node_id(project_key) if project_key else None
-    closed_session_id = _find_latest_open_session_id(resolved_scope)
+    fingerprint = _context_session_fingerprint(ctx)
+    explicit_id = int(session_id or 0)
+    bound_id = int(_FINGERPRINT_TO_SESSION.get(fingerprint, 0) or 0) if fingerprint else 0
+    if not trigger_sync and not (explicit_id or bound_id):
+        return {"status": "subagent_session_required", "scope_key": resolved_scope}
+    if explicit_id or bound_id:
+        closed_session_id = str(explicit_id or bound_id)
+    else:
+        unique, ambiguous = _unique_open_session_id(resolved_scope)
+        if ambiguous:
+            return {"status": "ambiguous_open_session", "scope_key": resolved_scope}
+        closed_session_id = unique
+    if not _session_is_open(int(closed_session_id or 0), resolved_scope):
+        if explicit_id or bound_id:
+            return {"status": "ended_session", "scope_key": resolved_scope}
+        closed_session_id = ""
+    if not closed_session_id:
+        return {"status": "no_open_session", "scope_key": resolved_scope}
 
-    # KG 노드 업데이트 시도
-    if kg_node_id:
-        kg = get_kg()
-        ok = kg.update_node_progress(kg_node_id, summary=summary, progress=progress, open_intents=open_intents)
-        if ok:
-            # 시맨틱 레이어 re-embed
-            sg = get_semantic_graph()
-            if sg.enabled:
-                node = kg.get_node(kg_node_id)
-                if node:
-                    await sg.upsert_node(
-                        node_id=node["id"],
-                        title=node["title"],
-                        node_type=node["type"],
-                        tags=node.get("tags", []),
-                        summary=node["summary"],
-                        force_reembed=True,
-                    )
-            # episodic memory에도 저장 — 마크다운 포맷 (source=close)
-            try:
-                from core.memory import save_memory
+    # A close always first uses the same non-terminal checkpoint coordinator.
+    # The checkpoint is idempotent, so a retry after a successful summary does
+    # not create a second Daily Note/LTM entry.
+    checkpoint = await engram_summarize_session(
+        summary=summary, open_intents=open_intents, progress=progress,
+        scope_key=resolved_scope, cwd=effective_cwd, session_id=int(closed_session_id), ctx=ctx,
+        journal_origin="internal" if not trigger_sync else "root",
+    )
+    if checkpoint.get("status") not in {"checkpointed", "no_new_messages"}:
+        return checkpoint
 
-                closed_session_id = _close_scoped_session(resolved_scope, summary, closed_session_id)
-                mem_lines = [summary]
-                if open_intents:
-                    mem_lines.append(f"\n다음 작업: {open_intents}")
-                save_memory(
-                    int(closed_session_id) if closed_session_id else None,
-                    "\n".join(mem_lines),
-                    source="close",
-                    project=project_key or "",
-                )
-            except Exception:
-                pass
-            # working_memory에도 기록 (다음 세션 short_term 지원)
-            try:
-                upsert_working_memory(resolved_scope, summary, open_intents=open_intents)
-            except Exception:
-                pass
-            # 자율 반성 — new_narrative/persona_observations 있으면 적용
-            try:
-                mark_session_continuity_saved(
-                    source="close_session",
-                    session_id=closed_session_id,
-                    scope_key=resolved_scope,
-                )
-            except Exception:
-                pass
-            reflection_applied = _apply_autonomous_reflection(new_narrative, persona_observations)
-            sync_schedule = None
-            if trigger_sync:
-                sync_schedule = _schedule_post_session_sync()
-            return {
-                "status": "ok",
-                "method": "kg_node",
-                "node_id": kg_node_id,
-                "summary": summary,
-                "reflection_applied": reflection_applied,
-                **({"sync_schedule": sync_schedule} if trigger_sync else {}),
-            }
-
-    # fallback: working_memory
-    upsert_working_memory(resolved_scope, summary, open_intents=open_intents)
-    # LTM에도 저장 (source=close)
-    try:
-        from core.memory import save_memory as _save_memory
-
-        closed_session_id = _close_scoped_session(resolved_scope, summary, closed_session_id)
-        mem_lines = [summary]
-        if open_intents:
-            mem_lines.append(f"\n다음 작업: {open_intents}")
-        _save_memory(
-            int(closed_session_id) if closed_session_id else None,
-            "\n".join(mem_lines),
-            source="close",
-            project=project_key or "",
-        )
-    except Exception:
-        pass
+    # Terminal-only hooks run only after the exact target is durably ended.
+    closed_session_id = _close_scoped_session(
+        resolved_scope, summary, closed_session_id, open_intents, progress,
+        project_key, kg_node_id, project_label,
+    )
+    if not closed_session_id:
+        return {"status": "close_failed", "scope_key": resolved_scope}
     try:
         mark_session_continuity_saved(
             source="close_session",
@@ -2350,11 +2505,10 @@ async def engram_close_session(
         sync_schedule = _schedule_post_session_sync()
     return {
         "status": "ok",
-        "method": "working_memory_fallback",
+        "method": "terminal_close",
         "scope_key": resolved_scope,
         "summary": summary,
         "reflection_applied": reflection_applied,
-        "note": f"KG 노드 미감지 (project_key={project_key}). working_memory에 저장됨.",
         **({"sync_schedule": sync_schedule} if trigger_sync else {}),
     }
 
@@ -2367,32 +2521,42 @@ def engram_save_message(
     session_id 없이 호출하면 현재 MCP 연결의 세션을 자동으로 찾아 저장합니다.
     request_id를 제공하면 중복 저장이 방지됩니다 (overlay 브로커 모드)."""
     resolved_id = session_id
+    resolved_from_fingerprint = False
     # 1순위: MCP 연결 fingerprint로 자동 resolve (가장 정확)
     if not resolved_id:
         fingerprint = _context_session_fingerprint(ctx)
         if fingerprint:
             resolved_id = _FINGERPRINT_TO_SESSION.get(fingerprint, 0)
+            resolved_from_fingerprint = bool(resolved_id)
     # 2순위: scope_key로 DB 조회 (fallback)
     if not resolved_id and scope_key:
         from core.memory import resolve_session_id_by_scope
 
         resolved_id = resolve_session_id_by_scope(scope_key) or 0
-    # 브로커 모드: overlay STM 서버에 위임
+    if not resolved_id:
+        return {"status": "error", "detail": "활성 세션을 찾을 수 없습니다. get_context_once를 먼저 호출하세요."}
+    # Explicit ended IDs are errors.  A stale *implicit* connection binding is
+    # safe to continue: create a linked open session and replace that binding.
+    conn = get_connection()
+    try:
+        row = conn.execute("SELECT scope_key, ended_at FROM sessions WHERE id=?", (resolved_id,)).fetchone()
+    finally:
+        conn.close()
+    if not row or row["ended_at"]:
+        if session_id:
+            return {"status": "error", "detail": "ended session_id"}
+        if resolved_from_fingerprint and fingerprint and row:
+            resolved_id = _rebind_continuation(fingerprint, int(resolved_id), str(row["scope_key"]))
+        else:
+            return {"status": "error", "detail": "활성 세션을 찾을 수 없습니다."}
+    # Broker and direct paths receive the exact validated/rebound ID.
     result = _stm_post(
         "/stm/message",
-        {
-            "session_id": resolved_id or None,
-            "scope_key": scope_key or None,
-            "role": role,
-            "content": content,
-            "request_id": request_id or None,
-        },
+        {"session_id": resolved_id, "scope_key": scope_key or None, "role": role,
+         "content": content, "request_id": request_id or None},
     )
     if result is not None:
         return {"status": result.get("status", "ok")}
-    # fallback: 직접 SQLite
-    if not resolved_id:
-        return {"status": "error", "detail": "활성 세션을 찾을 수 없습니다. get_context_once를 먼저 호출하세요."}
     if role == "user":
         memory_bus.record_user_message(resolved_id, content)
     elif role == "assistant":

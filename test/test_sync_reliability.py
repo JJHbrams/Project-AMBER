@@ -305,23 +305,30 @@ class SyncReliabilityTests(unittest.IsolatedAsyncioTestCase):
             patch("core.context.project_scope.resolve_scope_key", return_value="project:e2e"),
             patch("core.context.project_scope.resolve_project_key", return_value="ProjectE2E"),
             patch("core.context.project_scope.resolve_kg_node_id", return_value=None),
-            patch.object(server, "_find_latest_open_session_id", return_value=321),
-            patch.object(server, "upsert_working_memory"),
-            patch("core.memory.save_memory") as save_memory,
-            patch("core.memory.close_session") as close_session,
-            patch.object(server, "_stm_post", return_value=None),
+            patch.object(server, "_unique_open_session_id", return_value=("321", False)),
+            patch.object(server, "_session_is_open", return_value=True),
+            patch.object(server, "_session_is_ended", return_value=True),
+            patch.object(server, "engram_summarize_session", return_value={"status": "checkpointed", "session_id": 321}) as summarize,
+            patch.object(server, "_stm_post", return_value={"status": "ok", "closed_session_id": 321}) as stm_post,
             patch.object(server, "_apply_autonomous_reflection", return_value=False),
             patch.object(server, "mark_session_continuity_saved"),
         ):
             result = await server.engram_close_session(
                 summary="실제 세션 요약",
+                open_intents="배포 확인",
                 scope_key="project:e2e",
+                session_id=321,
                 trigger_sync=False,
             )
 
         self.assertEqual(result["status"], "ok")
-        close_session.assert_called_once_with(321, "실제 세션 요약")
-        self.assertEqual(save_memory.call_args.args[0], 321)
+        self.assertEqual(summarize.call_args.kwargs["session_id"], 321)
+        self.assertEqual(stm_post.call_args.args[0], "/stm/session/close")
+        close_payload = stm_post.call_args.args[1]
+        self.assertEqual(close_payload["session_id"], 321)
+        self.assertEqual(close_payload["scope_key"], "project:e2e")
+        self.assertEqual(close_payload["summary"], "실제 세션 요약")
+        self.assertEqual(close_payload["open_intents"], "배포 확인")
 
 
 if __name__ == "__main__":

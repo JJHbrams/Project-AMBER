@@ -19,15 +19,44 @@ BLOCKED_EXIT_CODE = 2
 
 _CLAUDE_HOOK_REQUEST_TYPE = "claude-pretool-hook"
 _CODEX_HOOK_REQUEST_TYPE = "codex-pretool-hook"
+_COPILOT_HOOK_REQUEST_TYPE = "copilot-pretool-hook"
+_GEMINI_HOOK_REQUEST_TYPE = "gemini-pretool-hook"
 _AGENT_HOOK_REQUEST_TYPES = {
     _CLAUDE_HOOK_REQUEST_TYPE: "claude-code",
     _CODEX_HOOK_REQUEST_TYPE: "codex",
+    _COPILOT_HOOK_REQUEST_TYPE: "copilot",
+    _GEMINI_HOOK_REQUEST_TYPE: "gemini",
+}
+_AGENT_HOOK_PROVIDER_LABELS = {
+    "claude-code": "Claude",
+    "codex": "Codex",
+    "copilot": "Copilot",
+    "gemini": "Gemini",
 }
 _WRITE_TOOL_NAMES = {"write", "edit", "multiedit", "notebookedit"}
 _COMMAND_TOOL_NAMES = {"bash", "powershell"}
+# Provider tool names that mean the same repo-write operation as the canonical names above.
+# Keyed by the lowercased tool name each CLI reports in its pre-tool hook payload.
+_TOOL_NAME_ALIASES = {
+    # shell execution
+    "shell": "bash",
+    "run_shell_command": "bash",
+    "run_command": "bash",
+    "execute_bash": "bash",
+    "terminal": "bash",
+    "pwsh": "powershell",
+    # file writes
+    "write_file": "write",
+    "create_file": "write",
+    "createfile": "write",
+    "str_replace": "edit",
+    "str_replace_editor": "edit",
+    "edit_file": "edit",
+    "replace": "edit",
+}
 _WRITE_TOOL_PATH_FIELDS = {
-    "write": ("file_path", "path"),
-    "edit": ("file_path", "path"),
+    "write": ("file_path", "path", "absolute_path"),
+    "edit": ("file_path", "path", "absolute_path"),
     "multiedit": ("file_path", "path"),
     "notebookedit": ("notebook_path", "file_path", "path", "notebookPath"),
 }
@@ -1185,11 +1214,12 @@ def classify_agent_pretool_payload(
     provider: str,
 ) -> dict[str, Any]:
     normalized_provider = _normalize_text(provider).lower()
-    if normalized_provider not in {"claude-code", "codex"}:
+    if normalized_provider not in _AGENT_HOOK_PROVIDER_LABELS:
         raise HookPayloadError(f"unsupported agent policy provider '{normalized_provider or provider}'")
 
     tool_name = _extract_tool_name(hook_payload)
-    normalized_tool_name = tool_name.lower()
+    reported_tool_name = tool_name.lower()
+    normalized_tool_name = _TOOL_NAME_ALIASES.get(reported_tool_name, reported_tool_name)
     tool_input = _extract_tool_input(hook_payload)
     normalized_cwd = _normalize_text(cwd)
     hook_context: dict[str, Any] = {
@@ -1197,7 +1227,7 @@ def classify_agent_pretool_payload(
         "cwd": normalized_cwd,
     }
 
-    if normalized_provider == "codex" and normalized_tool_name == "apply_patch":
+    if normalized_tool_name == "apply_patch":
         target_paths = _extract_apply_patch_target_paths(tool_input)
         if not target_paths:
             return {
@@ -1513,7 +1543,7 @@ def process_policy_request(payload: dict[str, Any]) -> tuple[dict[str, Any], int
     try:
         hook_payload = _load_hook_payload(
             payload,
-            provider_label="Claude" if provider == "claude-code" else "Codex",
+            provider_label=_AGENT_HOOK_PROVIDER_LABELS.get(provider, provider),
         )
         classified = classify_agent_pretool_payload(
             hook_payload,

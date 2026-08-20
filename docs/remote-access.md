@@ -460,6 +460,38 @@ mcp__engram__engram_get_context_once(caller='claude-code', scope_key='project:<�
 
 클라이언트가 늘 때마다 빠뜨리기 쉬우므로 토큰 쪽이 낫다.
 
+### 4-1. 원격 세션 종료와 Daily Note
+
+원격 클라이언트의 명시적 종료(또는 `engram_close_session`을 호출하는 매크로)는
+로컬 메모리를 닫고, 관리형 Wiki daily ledger와 설정된 로컬 Obsidian의 사람이 읽는
+작업 저널을 함께 기록한다. 원격 프로세스의 종료는 로컬 PID watchdog에서 보이지 않으므로,
+원격 작업의 종료 기록은 명시적 도구 호출에 의존한다.
+
+### 4-2. 자동 체크포인트 조건과 한계
+
+자동 체크포인트는 원격 메시지가 토큰으로 고정된 일치 scope의 로컬 SQLite에 실제로
+저장된 경우에만 후보가 된다. 또한 그 scope의 최신 열린 세션이어야 하고, 새 assistant
+최종 메시지가 있으며, `min_user_turns`와 idle interval 조건을 모두 충족해야 한다.
+
+현재 loop는 `scope_key="overlay"`와 로컬 `get_workdir`를 사용한다. 따라서 원격 프로젝트의
+귀속은 로컬 프로젝트로 기록되거나 잘못될 수 있다. 원격 프로젝트별 정확한 귀속이 필요하면
+자동 체크포인트에 기대지 말고 명시적 종료 시 요약·진행·다음 단계를 전달한다.
+
+### 4-3. 운영자 체크리스트
+
+- 원격에서 `curl -s http://127.0.0.1:17386/health`가 `{"status":"ok"}`를 반환하는지 확인한다.
+- 토큰에 원격 클라이언트와 같은 scope를 고정한다.
+- 로컬 `~/.engram/logs/remote-audit.jsonl`에서 해당 principal의 호출과
+  `scope pinned to ...` 기록을 확인한다. 토큰 값은 출력하지 않는다.
+- 원격 세션의 user/assistant 메시지가 로컬 SQLite에 기록되는지 확인한다.
+- 작업 종료 시 `engram_close_session`을 호출하는 매크로 또는 절차를 사용한다.
+- 종료 도구의 성공 응답, 관리형 Wiki daily ledger, 설정된 로컬 Obsidian Daily Note의
+  작업 저널을 차례로 확인한다.
+- 자동 체크포인트에 의존할 때는 assistant 최종 메시지, 최소 user turn 수, idle interval을
+  모두 확인한다.
+- 자동 체크포인트는 보조 수단으로만 보고, 원격 PID 종료 감지는 기대하지 않는다.
+- 토큰·인증 헤더·원격 URL의 비밀값은 문서나 일일 노트에 기록하지 않는다.
+
 ---
 
 ## 5. 검증

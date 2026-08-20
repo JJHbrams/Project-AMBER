@@ -22,6 +22,10 @@
 
 ## Session End Protocol
 
+사용자가 **중간 메모리/위키 정리**만 요청하면 세션을 끝내지 말고
+`engram_summarize_session(summary="...", open_intents="...", cwd="...")`을 호출한다.
+`/reflect`, 명시적 세션 종료, goodbye/끝/수고는 아래 terminal close protocol을 따른다.
+
 대화 종료 시 (goodbye, /exit, 종료, 끝, 수고 등):
 
 `engram_close_session(...)` 을 모든 파라미터와 함께 한 번에 호출:

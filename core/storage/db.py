@@ -154,7 +154,33 @@ def initialize_db(db_dir: "str | Path | None" = None):
                 scope_key  TEXT NOT NULL DEFAULT 'default',
                 started_at TEXT DEFAULT (datetime('now','localtime')),
                 ended_at   TEXT,
-                summary    TEXT
+                summary    TEXT,
+                continued_from_session_id INTEGER REFERENCES sessions(id),
+                root_client_token TEXT NOT NULL DEFAULT '',
+                journal_provenance TEXT NOT NULL DEFAULT ''
+            );
+
+            -- Durable checkpoint watermark.  Unlike the old home-directory JSON
+            -- state this survives broker restarts and is scoped to one session.
+            CREATE TABLE IF NOT EXISTS session_checkpoints (
+                session_id INTEGER PRIMARY KEY REFERENCES sessions(id),
+                last_message_id INTEGER NOT NULL DEFAULT 0,
+                checkpoint_id TEXT NOT NULL DEFAULT '',
+                updated_at TEXT DEFAULT (datetime('now','localtime'))
+            );
+            CREATE TABLE IF NOT EXISTS root_cli_owners (
+                client_token TEXT PRIMARY KEY, pid INTEGER NOT NULL,
+                creation_identity TEXT NOT NULL DEFAULT '', started_at REAL NOT NULL, ended_at REAL,
+                status TEXT NOT NULL DEFAULT 'running', session_id INTEGER
+            );
+
+            CREATE TABLE IF NOT EXISTS session_checkpoint_claims (
+                session_id INTEGER NOT NULL REFERENCES sessions(id),
+                last_message_id INTEGER NOT NULL,
+                claim_id TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'processing',
+                claimed_at REAL NOT NULL,
+                PRIMARY KEY (session_id, last_message_id)
             );
 
             CREATE TABLE IF NOT EXISTS session_projects (
@@ -267,6 +293,33 @@ def initialize_db(db_dir: "str | Path | None" = None):
 
         # 마이그레이션: sessions.scope_key 컬럼이 없으면 추가
         _add_column_if_missing(conn, "sessions", "scope_key", "TEXT NOT NULL DEFAULT 'default'")
+        _add_column_if_missing(conn, "sessions", "continued_from_session_id", "INTEGER")
+        _add_column_if_missing(conn, "sessions", "root_client_token", "TEXT NOT NULL DEFAULT ''")
+        # New sessions only: never infer journal ownership from historical rows.
+        _add_column_if_missing(conn, "sessions", "journal_provenance", "TEXT NOT NULL DEFAULT ''")
+        conn.execute("CREATE TABLE IF NOT EXISTS root_cli_owners (client_token TEXT PRIMARY KEY, pid INTEGER NOT NULL, creation_identity TEXT NOT NULL DEFAULT '', started_at REAL NOT NULL, ended_at REAL, status TEXT NOT NULL DEFAULT 'running', session_id INTEGER)")
+        _add_column_if_missing(conn, "root_cli_owners", "creation_identity", "TEXT NOT NULL DEFAULT ''")
+        _add_column_if_missing(conn, "root_cli_owners", "status", "TEXT NOT NULL DEFAULT 'running'")
+        _add_column_if_missing(conn, "root_cli_owners", "session_id", "INTEGER")
+
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS session_checkpoints (
+                session_id INTEGER PRIMARY KEY REFERENCES sessions(id),
+                last_message_id INTEGER NOT NULL DEFAULT 0,
+                checkpoint_id TEXT NOT NULL DEFAULT '',
+                updated_at TEXT DEFAULT (datetime('now','localtime'))
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS session_checkpoint_claims (
+                session_id INTEGER NOT NULL REFERENCES sessions(id),
+                last_message_id INTEGER NOT NULL,
+                claim_id TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'processing',
+                claimed_at REAL NOT NULL,
+                PRIMARY KEY (session_id, last_message_id)
+            )
+        """)
 
         # 마이그레이션: session_projects 테이블이 없으면 생성
         tables = _table_names(conn)
@@ -490,6 +543,7 @@ def initialize_db(db_dir: "str | Path | None" = None):
 
         # 인덱스 보장 (마이그레이션 이후)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_scope_started ON sessions(scope_key, started_at)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_continued_from ON sessions(continued_from_session_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_session_ts ON messages(session_id, timestamp)")
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_directives_active_scope_priority "

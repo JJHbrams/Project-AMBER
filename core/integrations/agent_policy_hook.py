@@ -9,10 +9,34 @@ from typing import Any, TextIO
 from core.integrations.policy_preflight import process_policy_request
 
 
-_REQUEST_TYPES = {
-    "claude-code": "claude-pretool-hook",
-    "codex": "codex-pretool-hook",
+# Every CLI provider Engram ships a shim for and whose runtime exposes a pre-tool hook.
+# ``event`` is the provider's hook event name; ``dialect`` selects the denial payload shape.
+# ``warn`` guidance always uses ``hookSpecificOutput.additionalContext`` — every supported
+# runtime injects that string back into the model context.
+_PROVIDERS: dict[str, dict[str, str]] = {
+    "claude-code": {
+        "request_type": "claude-pretool-hook",
+        "event": "PreToolUse",
+        "dialect": "claude",
+    },
+    "codex": {
+        "request_type": "codex-pretool-hook",
+        "event": "PreToolUse",
+        "dialect": "claude",
+    },
+    "copilot": {
+        "request_type": "copilot-pretool-hook",
+        "event": "PreToolUse",
+        "dialect": "claude",
+    },
+    "gemini": {
+        "request_type": "gemini-pretool-hook",
+        "event": "BeforeTool",
+        "dialect": "gemini",
+    },
 }
+
+_REQUEST_TYPES = {name: spec["request_type"] for name, spec in _PROVIDERS.items()}
 
 
 def _compact_json(value: dict[str, Any]) -> str:
@@ -70,14 +94,15 @@ def process_provider_hook_input(
 ) -> tuple[str, str, int]:
     """Convert a provider PreToolUse payload into warning or agent-only denial output."""
     normalized_provider = str(provider or "").strip().lower()
-    if normalized_provider not in _REQUEST_TYPES:
+    spec = _PROVIDERS.get(normalized_provider)
+    if spec is None:
         reason = f"unsupported agent policy provider '{normalized_provider or provider}'"
         return "", f"Engram policy guidance: {reason}\n", 0
 
     try:
         result, backend_exit_code, _ = process_policy_request(
             {
-                "request_type": _REQUEST_TYPES[normalized_provider],
+                "request_type": spec["request_type"],
                 "cwd": _payload_cwd(raw_text, cwd or os.getcwd()),
                 "hook_payload": raw_text,
             }
@@ -92,24 +117,28 @@ def process_provider_hook_input(
         return "", "", 0
 
     message = f"Engram policy {'enforcement' if enforce else 'guidance'}: {reason}"
+    event = spec["event"]
     if enforce:
-        response = {
-            "hookSpecificOutput": {
-                "hookEventName": "PreToolUse",
-                "permissionDecision": "deny",
-                "permissionDecisionReason": message,
+        if spec["dialect"] == "gemini":
+            # Gemini CLI has no permissionDecision; it blocks on a top-level decision/reason.
+            response: dict[str, Any] = {"decision": "deny", "reason": message}
+        else:
+            response = {
+                "hookSpecificOutput": {
+                    "hookEventName": event,
+                    "permissionDecision": "deny",
+                    "permissionDecisionReason": message,
+                }
             }
-        }
         return _compact_json(response), "", 0
-    if normalized_provider == "codex":
-        response = {
-            "hookSpecificOutput": {
-                "hookEventName": "PreToolUse",
-                "additionalContext": message,
-            }
+    # warn: every supported runtime injects additionalContext back into the model context.
+    response = {
+        "hookSpecificOutput": {
+            "hookEventName": event,
+            "additionalContext": message,
         }
-        return _compact_json(response), "", 0
-    return "", f"{message}\n", 0
+    }
+    return _compact_json(response), "", 0
 
 
 def provider_hook_main(
@@ -134,7 +163,7 @@ def provider_hook_main(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run advisory-only Engram agent policy guidance")
-    parser.add_argument("--provider", required=True, choices=sorted(_REQUEST_TYPES))
+    parser.add_argument("--provider", required=True, choices=sorted(_PROVIDERS))
     parser.add_argument("--cwd", default="")
     args = parser.parse_args(argv)
     return provider_hook_main(args.provider, cwd=args.cwd)

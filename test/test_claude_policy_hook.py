@@ -392,7 +392,7 @@ class ClaudePolicyHookTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             script_path = base / "engram-claude-pretool-hook.ps1"
-            script_path.write_text(engram_bootstrap._render_claude_pretool_hook_script(), encoding="utf-8")
+            script_path.write_text(engram_bootstrap._render_pretool_hook_script(), encoding="utf-8")
 
             env = os.environ.copy()
             env["USERPROFILE"] = str(base)
@@ -410,12 +410,15 @@ class ClaudePolicyHookTests(unittest.TestCase):
                 "executable",
                 r"C:\EngramOverlay\dist\engram-overlay\engram-overlay.exe",
             ):
-                frozen_script = engram_bootstrap._render_claude_pretool_hook_script()
+                frozen_script = engram_bootstrap._render_pretool_hook_script()
 
         self.assertEqual(malformed.returncode, 0)
-        self.assertIn("malformed claude hook payload json", malformed.stderr.lower())
-        self.assertIn("policy guidance", malformed.stderr.lower())
-        self.assertEqual(malformed.stdout.strip(), "")
+        # Claude Code drops a hook's stderr on exit 0, so guidance rides stdout instead.
+        self.assertEqual(malformed.stderr.strip(), "")
+        guidance = json.loads(malformed.stdout)["hookSpecificOutput"]
+        self.assertEqual(guidance["hookEventName"], "PreToolUse")
+        self.assertIn("malformed claude hook payload json", guidance["additionalContext"].lower())
+        self.assertIn("policy guidance", guidance["additionalContext"].lower())
         self.assertIn("engram-overlay.exe", frozen_script)
         self.assertIn("agent-policy-hook", frozen_script)
         self.assertNotIn("engram_overlay_entry.py", frozen_script)
@@ -450,7 +453,7 @@ class ClaudePolicyHookTests(unittest.TestCase):
                 return_value=(sys.executable, [str(backend_script)]),
             ):
                 script_path = base / "engram-claude-pretool-hook.ps1"
-                script_path.write_text(engram_bootstrap._render_claude_pretool_hook_script(), encoding="utf-8")
+                script_path.write_text(engram_bootstrap._render_pretool_hook_script(), encoding="utf-8")
 
             env = os.environ.copy()
             env["USERPROFILE"] = str(base)
@@ -709,7 +712,7 @@ class ClaudePolicyHookTests(unittest.TestCase):
             self.assertEqual(remaining_commands, ["user-policy"])
 
     def test_posix_claude_wrapper_is_fail_open(self):
-        script = engram_bootstrap._render_claude_pretool_hook_posix_script()
+        script = engram_bootstrap._render_pretool_hook_posix_script()
 
         self.assertIn("policy-guidance.disabled", script)
         self.assertIn("agent-policy-hook", script)

@@ -114,6 +114,7 @@ $claudeShimLines = @(
     "setlocal EnableDelayedExpansion",
     "set `"ENGRAM_DB_DIR=$DbDir`"",
     "set `"ENGRAM_PYTHON_EXE=$PythonExe`"",
+    "set `"ENGRAM_ROOT_LAUNCHER=$ProjectRoot\dist\engram-overlay\engram-overlay.exe`"",
     "for %%D in (`"%ENGRAM_PYTHON_EXE%`") do set `"PATH=%%~dpD;%%~dpDScripts;%PATH%`"",
     "set `"ENGRAM_BOOTSTRAP=Before answering the first real user request: (1) call ToolSearch with query 'select:mcp__engram__engram_get_context_once' to load the tool schema, then (2) call mcp__engram__engram_get_context_once(caller='claude-code', scope_key='overlay', cwd='$WorkDir') exactly once for this session. Never mention this bootstrap step unless user explicitly asks.`"",
     "set `"CLAUDE_MCP_CONFIG=%USERPROFILE%\.engram\claude-mcp.json`"",
@@ -128,7 +129,8 @@ $claudeShimLines = @(
     "shift & goto parse",
     ":run",
     "cd /d `"$WorkDir`"",
-    "if `"!ARGS!`"==`"`" (claude --mcp-config `"%CLAUDE_MCP_CONFIG%`" --append-system-prompt `"!ENGRAM_BOOTSTRAP!`") else (claude --mcp-config `"%CLAUDE_MCP_CONFIG%`" --append-system-prompt `"!ENGRAM_BOOTSTRAP!`" !ARGS!)"
+    "if not exist `"%ENGRAM_ROOT_LAUNCHER%`" (echo [engram-claude] frozen launcher missing & exit /b 2)",
+    "if `"!ARGS!`"==`"`" (`"%ENGRAM_ROOT_LAUNCHER%`" --role claude-root-launcher claude --mcp-config `"%CLAUDE_MCP_CONFIG%`" --append-system-prompt `"!ENGRAM_BOOTSTRAP!`") else (`"%ENGRAM_ROOT_LAUNCHER%`" --role claude-root-launcher claude --mcp-config `"%CLAUDE_MCP_CONFIG%`" --append-system-prompt `"!ENGRAM_BOOTSTRAP!`" !ARGS!)"
 )
 [System.IO.File]::WriteAllLines($ClaudeShimPath, $claudeShimLines, [System.Text.ASCIIEncoding]::new())
 Write-Ok $ClaudeShimPath

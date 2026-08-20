@@ -14,12 +14,18 @@ import json
 import logging
 import os
 import threading
+import time
+import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
 from core.storage.db import get_connection
 from core.memory.store import save_memory, upsert_working_memory
+from core.context.project_scope import resolve_kg_node_id, resolve_project_key
+from core.memory.daily_checkpoint import append_daily_checkpoint
+from core.observability.activity import log_activity
+from core.graph.knowledge import get_kg
 from .semantic_graph import get_semantic_graph, run_sg_coro
 
 logger = logging.getLogger(__name__)
@@ -27,6 +33,169 @@ logger = logging.getLogger(__name__)
 _PROMOTE_TS_FILE = Path.home() / ".engram" / "_stm_promote_ts.json"
 _AUTO_CHECKPOINT_STATE_FILE = Path.home() / ".engram" / "_auto_checkpoint_state.json"
 _AUTO_CHECKPOINT_LOCK = threading.Lock()
+_CHECKPOINT_LOCKS: dict[int, threading.Lock] = {}
+_CHECKPOINT_LOCKS_GUARD = threading.Lock()
+_CHECKPOINT_LEASE_SECONDS = 300.0
+_CHECKPOINT_CLAIM_LOCAL = threading.local()
+
+
+def _checkpoint_lock(session_id: int) -> threading.Lock:
+    """Serialize one session's watermark read/side-effects/write in-process."""
+    with _CHECKPOINT_LOCKS_GUARD:
+        return _CHECKPOINT_LOCKS.setdefault(session_id, threading.Lock())
+
+
+def _claim_checkpoint(session_id: int, last_message_id: int) -> tuple[str, str]:
+    """Atomically claim a watermark across broker/direct SQLite processes."""
+    claim_id, now = uuid.uuid4().hex, time.time()
+    conn = get_connection()
+    try:
+        with conn:
+            inserted = conn.execute(
+                "INSERT OR IGNORE INTO session_checkpoint_claims(session_id,last_message_id,claim_id,status,claimed_at) VALUES(?,?,?,'processing',?)",
+                (session_id, last_message_id, claim_id, now),
+            ).rowcount
+            if inserted:
+                _CHECKPOINT_CLAIM_LOCAL.value = (session_id, last_message_id, claim_id)
+                return "acquired", claim_id
+            row = conn.execute(
+                "SELECT claim_id,status,claimed_at FROM session_checkpoint_claims WHERE session_id=? AND last_message_id=?",
+                (session_id, last_message_id),
+            ).fetchone()
+            if not row or row["status"] == "completed":
+                return "completed", ""
+            if row["status"] == "failed" or float(row["claimed_at"] or 0) < now - _CHECKPOINT_LEASE_SECONDS:
+                replaced = conn.execute(
+                    "UPDATE session_checkpoint_claims SET claim_id=?,status='processing',claimed_at=? WHERE session_id=? AND last_message_id=? AND claim_id=? AND status=?",
+                    (claim_id, now, session_id, last_message_id, row["claim_id"], row["status"]),
+                ).rowcount
+                if replaced:
+                    _CHECKPOINT_CLAIM_LOCAL.value = (session_id, last_message_id, claim_id)
+                    return "acquired", claim_id
+            return "busy", ""
+    finally:
+        conn.close()
+
+
+def _finish_checkpoint_claim(session_id: int, last_message_id: int, claim_id: str, status: str) -> None:
+    conn = get_connection()
+    try:
+        with conn:
+            conn.execute(
+                "UPDATE session_checkpoint_claims SET status=?,claimed_at=? WHERE session_id=? AND last_message_id=? AND claim_id=?",
+                (status, time.time(), session_id, last_message_id, claim_id),
+            )
+    finally:
+        conn.close()
+        if getattr(_CHECKPOINT_CLAIM_LOCAL, "value", None) == (session_id, last_message_id, claim_id):
+            _CHECKPOINT_CLAIM_LOCAL.value = None
+
+
+def checkpoint_open_session(
+    session_id: int,
+    scope_key: str,
+    summary: str,
+    open_intents: str = "",
+    *,
+    progress: str = "",
+    cwd: str = "",
+    external_daily_dir: str = "",
+    source: str = "explicit",
+) -> dict:
+    """Commit one non-terminal STM checkpoint through the shared coordinator.
+
+    The database watermark, rather than a process-local file, makes retries and
+    broker restarts idempotent.  This function intentionally never reflects or
+    changes ``sessions.ended_at``.
+    """
+    with _checkpoint_lock(session_id):
+        try:
+            return _checkpoint_open_session_locked(
+                session_id, scope_key, summary, open_intents, progress=progress,
+                cwd=cwd, external_daily_dir=external_daily_dir, source=source,
+            )
+        except Exception:
+            active = getattr(_CHECKPOINT_CLAIM_LOCAL, "value", None)
+            if active and active[0] == session_id:
+                _finish_checkpoint_claim(*active, "failed")
+            raise
+
+
+def _checkpoint_open_session_locked(
+    session_id: int, scope_key: str, summary: str, open_intents: str = "", *,
+    progress: str = "", cwd: str = "", external_daily_dir: str = "", source: str = "explicit",
+) -> dict:
+    conn = get_connection()
+    try:
+        session = conn.execute(
+            "SELECT id FROM sessions WHERE id=? AND scope_key=? AND ended_at IS NULL",
+            (session_id, scope_key),
+        ).fetchone()
+        if not session:
+            return {"status": "no_open_session"}
+        checkpoint = conn.execute(
+            "SELECT last_message_id FROM session_checkpoints WHERE session_id=?", (session_id,)
+        ).fetchone()
+        watermark = int(checkpoint["last_message_id"] if checkpoint else 0)
+        rows = conn.execute(
+            "SELECT id, role, content FROM messages WHERE session_id=? AND id>? ORDER BY id",
+            (session_id, watermark),
+        ).fetchall()
+        if not rows or not any(row["role"] in {"user", "assistant"} for row in rows):
+            return {"status": "no_new_messages", "session_id": session_id}
+        last_message_id = int(rows[-1]["id"])
+    finally:
+        conn.close()
+
+    claim_state, claim_id = _claim_checkpoint(session_id, last_message_id)
+    if claim_state == "completed":
+        return {"status": "no_new_messages", "session_id": session_id}
+    if claim_state != "acquired":
+        return {"status": "busy", "session_id": session_id}
+
+    project_key = resolve_project_key(cwd=cwd) if cwd else ""
+    project_node_id = resolve_kg_node_id(project_key) if project_key else None
+    if project_node_id:
+        try:
+            kg = get_kg()
+            if kg.update_node_progress(project_node_id, summary=summary, progress=progress, open_intents=open_intents):
+                node = kg.get_node(project_node_id)
+                sg = get_semantic_graph()
+                if node and sg.enabled:
+                    run_sg_coro(sg.upsert_node(
+                        node_id=node["id"], title=node["title"], node_type=node["type"],
+                        tags=node.get("tags", []), summary=node["summary"], force_reembed=True,
+                    ))
+        except Exception:
+            logger.exception("checkpoint KG progress update failed: session=%s", session_id)
+    upsert_working_memory(scope_key, summary, open_intents=open_intents)
+    promoted = maybe_promote(
+        scope_key, summary_override=summary, project=project_key,
+        session_id=session_id, after_message_id=watermark,
+        source="auto-checkpoint" if source == "automatic" else "save",
+    )
+    checkpoint_id = f"{scope_key}-{session_id}-{last_message_id}"
+    note_result = append_daily_checkpoint(
+        checkpoint_id=checkpoint_id, now=datetime.now().astimezone(), summary=summary,
+        open_intents=open_intents, project_key=project_key, project_node_id=project_node_id,
+        external_daily_dir=external_daily_dir,
+        journal_transcript=[dict(row) for row in rows] if source == "automatic" else None,
+    )
+    conn = get_connection()
+    try:
+        with conn:
+            conn.execute(
+                "INSERT INTO session_checkpoints(session_id,last_message_id,checkpoint_id,updated_at) VALUES(?,?,?,datetime('now','localtime')) "
+                "ON CONFLICT(session_id) DO UPDATE SET last_message_id=excluded.last_message_id, checkpoint_id=excluded.checkpoint_id, updated_at=excluded.updated_at",
+                (session_id, last_message_id, checkpoint_id),
+            )
+    finally:
+        conn.close()
+    _finish_checkpoint_claim(session_id, last_message_id, claim_id, "completed")
+    log_activity(actor="auto-checkpoint" if source == "automatic" else "session-summary", project=project_key,
+                 action=summary, detail=f"checkpoint={checkpoint_id}; ltm_promoted={promoted}")
+    return {"status": "checkpointed", "session_id": session_id, "checkpoint_id": checkpoint_id,
+        "ltm_promoted": promoted, **note_result}
 
 
 # ── Triangular membership + COG defuzz ─────────────────────────────────────
@@ -83,8 +252,18 @@ def _set_last_promoted_ts(scope_key: str) -> None:
 # ── Message retrieval ────────────────────────────────────────────────────────
 
 
-def _get_promotable_messages(scope_key: str, max_minutes: int = 240) -> list[dict]:
+def _get_promotable_messages(scope_key: str, max_minutes: int = 240, session_id: int | None = None, after_message_id: int = 0) -> list[dict]:
     """마지막 승격 이후 + max_minutes 범위 내 메시지만 반환 (중복 방지)."""
+    if session_id is not None:
+        conn = get_connection()
+        try:
+            rows = conn.execute(
+                "SELECT role, content FROM messages WHERE session_id=? AND id>? ORDER BY id LIMIT 100",
+                (session_id, after_message_id),
+            ).fetchall()
+        finally:
+            conn.close()
+        return [{"role": r["role"], "content": r["content"]} for r in rows]
     last_ts = _get_last_promoted_ts(scope_key)
     conn = get_connection()
     try:
@@ -266,10 +445,11 @@ def maybe_promote(
     summary_override: str = "",
     project: str = "",
     session_id: int | None = None,
+    after_message_id: int = 0,
     source: str = "save",
 ) -> bool:
     """STM → LTM 승격 시도. 승격 발생 시 True 반환."""
-    msgs = _get_promotable_messages(scope_key)
+    msgs = _get_promotable_messages(scope_key, session_id=session_id, after_message_id=after_message_id)
     if not msgs:
         logger.debug("promote skip: 새 메시지 없음 (scope=%s)", scope_key)
         return False
@@ -329,8 +509,6 @@ def _get_auto_checkpoint_candidate(
     idle_seconds: int,
     min_user_turns: int,
 ) -> dict | None:
-    state = _load_auto_checkpoint_state().get(scope_key, {})
-    last_message_id = int(state.get("last_message_id", 0) or 0)
     conn = get_connection()
     try:
         session = conn.execute(
@@ -341,22 +519,16 @@ def _get_auto_checkpoint_candidate(
         ).fetchone()
         if not session:
             return None
-        memory_watermark = conn.execute(
-            """SELECT MAX(ts) AS ts FROM (
-                   SELECT MAX(created_at) AS ts FROM memories WHERE session_id = ?
-                   UNION ALL
-                   SELECT MAX(updated_at) AS ts FROM working_memory WHERE scope_key = ?
-               )""",
-            (session["id"], scope_key),
+        checkpoint = conn.execute(
+            "SELECT last_message_id FROM session_checkpoints WHERE session_id=?", (session["id"],)
         ).fetchone()
-        cutoff_ts = str(memory_watermark["ts"] or "") if memory_watermark else ""
+        last_message_id = int(checkpoint["last_message_id"] if checkpoint else 0)
         rows = conn.execute(
             """SELECT id, role, content, timestamp
                FROM messages
                WHERE session_id = ? AND id > ?
-                 AND (? = '' OR timestamp > ?)
                ORDER BY id DESC LIMIT 200""",
-            (session["id"], last_message_id, cutoff_ts, cutoff_ts),
+            (session["id"], last_message_id),
         ).fetchall()
     finally:
         conn.close()
@@ -404,64 +576,16 @@ def maybe_auto_checkpoint(
         if not result:
             return {"status": "summary_failed"}
 
-        from core.context.project_scope import resolve_kg_node_id, resolve_project_key
-        from core.memory.daily_checkpoint import append_daily_checkpoint
-        from core.observability.activity import log_activity
-
-        project_key = resolve_project_key(cwd=cwd)
-        project_node_id = resolve_kg_node_id(project_key) if project_key else None
-        upsert_working_memory(
-            scope_key,
-            result["summary"],
-            open_intents=result["open_intents"],
+        coordinated = checkpoint_open_session(
+            candidate["session_id"], scope_key, result["summary"], result["open_intents"],
+            cwd=cwd, external_daily_dir=external_daily_dir, source="automatic",
         )
-        promoted = maybe_promote(
-            scope_key,
-            summary_override=result["summary"],
-            project=project_key,
-            session_id=candidate["session_id"],
-            source="auto-checkpoint",
-        )
-        checkpoint_id = (
-            f"{scope_key}-{candidate['session_id']}-{candidate['last_message_id']}"
-        )
-        note_result = append_daily_checkpoint(
-            checkpoint_id=checkpoint_id,
-            now=datetime.now().astimezone(),
-            summary=result["summary"],
-            open_intents=result["open_intents"],
-            project_key=project_key,
-            project_node_id=project_node_id,
-            external_daily_dir=external_daily_dir,
-        )
-        log_activity(
-            actor="auto-checkpoint",
-            project=project_key,
-            action=result["summary"],
-            detail=(
-                f"checkpoint={checkpoint_id}; user_turns={candidate['user_turns']}; "
-                f"ltm_promoted={promoted}"
-            ),
-        )
-        state = _load_auto_checkpoint_state()
-        state[scope_key] = {
-            "last_message_id": candidate["last_message_id"],
-            "checkpoint_id": checkpoint_id,
-            "updated_at": datetime.now().astimezone().isoformat(),
-        }
-        _save_auto_checkpoint_state(state)
         logger.info(
             "auto checkpoint 완료 scope=%s turns=%d promoted=%s checkpoint=%s",
-            scope_key,
-            candidate["user_turns"],
-            promoted,
-            checkpoint_id,
+            scope_key, candidate["user_turns"], coordinated.get("ltm_promoted"), coordinated.get("checkpoint_id"),
         )
         return {
-            "status": "checkpointed",
-            "checkpoint_id": checkpoint_id,
-            "ltm_promoted": promoted,
-            **note_result,
+            **coordinated,
         }
     except Exception:
         logger.exception("auto checkpoint 실패 (scope=%s)", scope_key)

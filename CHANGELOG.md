@@ -4,6 +4,28 @@ All notable changes to this project are documented in this file.
 
 ## Unreleased
 
+## [1.5.5] — 2026-08-19
+
+### Added
+
+- 세션을 닫지 않고 working memory, LTM gate, KG/Wiki progress와 Daily Note를 갱신하는
+  `engram_summarize_session` 진입점과 영속 checkpoint watermark를 추가했다.
+- Codex, Claude Code, Copilot CLI 등 지원 공급자 모두에 저장소 정책 안내를 전달한다.
+
+### Changed
+
+- 외부 Obsidian Daily Note는 체크포인트마다 로그를 추가하지 않고, KG 프로젝트별 당일
+  스냅샷 하나를 최신 summary와 open intents로 갱신한다. 관리형 Wiki Daily ledger는
+  기존 append-only 체크포인트 이력을 유지한다.
+- 커스텀 overlay Event API v1 릴리즈 라인을 현재 세션 수명주기 변경과 통합했다.
+
+### Fixed
+
+- 종료된 STM 세션의 fingerprint/context binding을 무효화하고, scope resolver와 메시지
+  저장 경로가 열린 세션만 사용하도록 강화했다.
+- 외부 Daily Note 갱신 시 기존 내용, 구형 marker, CRLF와 trailing whitespace를
+  바이트 단위로 보존한다.
+
 ## [1.5.4] — 2026-08-18
 
 ### Added

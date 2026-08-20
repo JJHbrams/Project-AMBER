@@ -48,6 +48,8 @@ def _run_git(repo: Path, *args: str, check: bool = True) -> subprocess.Completed
             encoding="utf-8",
             errors="replace",
             timeout=10,
+            # 콘솔 없는 overlay/hook 프로세스에서 호출돼도 콘솔 창이 뜨지 않게 한다.
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise GitHookError("git-unavailable", f"Git command failed: {exc}") from exc

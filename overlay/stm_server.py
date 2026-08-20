@@ -16,9 +16,15 @@ import json
 import logging
 import os
 import threading
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Optional
 from urllib.parse import parse_qs, urlparse
+
+from core.storage.db import get_connection
+from core.graph.semantic import checkpoint_open_session
+from core.memory import close_session as _close_session, save_message
+from core.memory.store import session_has_external_journal_eligibility
+from core.config.runtime_config import get_cfg_value
 
 logger = logging.getLogger(__name__)
 
@@ -36,35 +42,72 @@ def _resolve_open_session_id(session_id: object, scope_key: Optional[str]) -> Op
         try:
             sid = int(session_id)
             if sid > 0:
-                return sid
+                conn = get_connection()
+                try:
+                    row = conn.execute(
+                        "SELECT id FROM sessions WHERE id=? AND ended_at IS NULL" + (" AND scope_key=?" if scope_key else ""),
+                        (sid, scope_key) if scope_key else (sid,),
+                    ).fetchone()
+                    return sid if row else None
+                finally:
+                    conn.close()
         except (TypeError, ValueError):
             return None
 
     try:
-        from core.storage.db import get_connection
-
         conn = get_connection()
         if scope_key:
-            row = conn.execute(
+            rows = conn.execute(
                 "SELECT id FROM sessions WHERE ended_at IS NULL AND scope_key = ? "
-                "ORDER BY started_at DESC, id DESC LIMIT 1",
+                "ORDER BY started_at DESC, id DESC LIMIT 2",
                 (scope_key,),
-            ).fetchone()
+            ).fetchall()
         else:
-            row = conn.execute(
+            rows = conn.execute(
                 "SELECT id FROM sessions WHERE ended_at IS NULL "
-                "ORDER BY started_at DESC, id DESC LIMIT 1"
-            ).fetchone()
+                "ORDER BY started_at DESC, id DESC LIMIT 2"
+            ).fetchall()
         conn.close()
     except Exception:
         return None
 
-    if not row:
+    if len(rows) != 1:
         return None
     try:
-        return int(row[0])
+        return int(rows[0][0])
     except (TypeError, ValueError, IndexError, KeyError):
         return None
+
+
+def _has_multiple_open_sessions(scope_key: Optional[str]) -> bool:
+    conn = get_connection()
+    try:
+        if scope_key:
+            rows = conn.execute("SELECT id FROM sessions WHERE ended_at IS NULL AND scope_key=? LIMIT 2", (scope_key,)).fetchall()
+        else:
+            rows = conn.execute("SELECT id FROM sessions WHERE ended_at IS NULL LIMIT 2").fetchall()
+        return len(rows) > 1
+    finally:
+        conn.close()
+
+
+def _explicit_session_status(session_id: object, scope_key: Optional[str]) -> str:
+    try:
+        sid = int(session_id)
+    except (TypeError, ValueError):
+        return "invalid_session_id"
+    if sid <= 0:
+        return "invalid_session_id"
+    conn = get_connection()
+    try:
+        row = conn.execute("SELECT scope_key, ended_at FROM sessions WHERE id=?", (sid,)).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        return "session_not_found"
+    if scope_key and row["scope_key"] != scope_key:
+        return "session_scope_mismatch"
+    return "open" if row["ended_at"] is None else "ended_session"
 
 
 def _get_port() -> int:
@@ -180,10 +223,13 @@ class _STMHandler(BaseHTTPRequestHandler):
                 self._send_json({"error": "session_id 또는 scope_key가 필요합니다."}, 400)
                 return
             try:
-                from core.memory import save_message
-
                 save_message(int(session_id), role, content)
                 self._send_json({"status": "ok"})
+            except ValueError as e:
+                if "not open" in str(e):
+                    self._send_json({"status": "ended_session"}, 409)
+                else:
+                    self._send_json({"error": str(e)}, 400)
             except Exception as e:
                 logger.error("save_message 실패: %s", e)
                 self._send_json({"error": str(e)}, 500)
@@ -192,21 +238,60 @@ class _STMHandler(BaseHTTPRequestHandler):
             session_id = body.get("session_id")
             scope_key = body.get("scope_key") or None
             summary = body.get("summary", "") or ""
+            open_intents = body.get("open_intents", "") or ""
+            progress = body.get("progress", "") or ""
+            journal_origin = body.get("journal_origin", "automatic") or "automatic"
+            project_key = body.get("project_key", "") or ""
+            project_node_id = body.get("project_node_id", "") or None
+            project_label = body.get("project_label", "") or ""
             try:
+                if session_id is not None:
+                    explicit_status = _explicit_session_status(session_id, scope_key)
+                    if explicit_status != "open":
+                        self._send_json({"status": explicit_status}, 404 if explicit_status == "session_not_found" else 409)
+                        return
                 closed_session_id = _resolve_open_session_id(session_id, scope_key)
+                if closed_session_id is None and session_id is None and _has_multiple_open_sessions(scope_key):
+                    self._send_json({"status": "ambiguous_open_session"}, 409)
+                    return
                 if closed_session_id is not None:
-                    from core.memory import close_session as _close_session
-
-                    _close_session(closed_session_id, str(summary))
-                if scope_key:
-                    import threading
-                    from core.graph.semantic import maybe_promote
-
-                    t = threading.Thread(target=maybe_promote, kwargs={"scope_key": scope_key}, daemon=True)
-                    t.start()
-                self._send_json({"status": "ok", "closed_session_id": closed_session_id})
+                    # HTTP hints are not authority: durable session provenance is.
+                    external_dir = (str(get_cfg_value("memory.auto_checkpoint.external_daily_dir", "") or "")
+                                    if session_has_external_journal_eligibility(closed_session_id) else "")
+                    checkpoint = checkpoint_open_session(
+                        closed_session_id, scope_key or "", str(summary), str(open_intents),
+                        progress=str(progress), cwd=str(body.get("cwd", "") or ""), source="automatic", external_daily_dir=external_dir,
+                    )
+                    if checkpoint.get("status") not in {"checkpointed", "no_new_messages"}:
+                        self._send_json(checkpoint, 409 if checkpoint.get("status") == "busy" else 500)
+                        return
+                    _close_session(closed_session_id, str(summary), str(open_intents), str(progress), str(journal_origin), str(project_key), str(project_node_id) if project_node_id else None, str(project_label))
+                self._send_json({"status": "ok" if closed_session_id is not None else "no_open_session", "closed_session_id": closed_session_id})
             except Exception as e:
                 logger.error("session/close 실패: %s", e)
+                self._send_json({"error": str(e)}, 500)
+
+        elif path == "/stm/session/summarize":
+            session_id = body.get("session_id")
+            scope_key = body.get("scope_key") or ""
+            try:
+                if session_id is not None:
+                    explicit_status = _explicit_session_status(session_id, scope_key)
+                    if explicit_status != "open":
+                        self._send_json({"status": explicit_status}, 404 if explicit_status == "session_not_found" else 409)
+                        return
+                target = _resolve_open_session_id(session_id, scope_key)
+                if target is None and session_id is None and _has_multiple_open_sessions(scope_key):
+                    self._send_json({"status": "ambiguous_open_session"}, 409)
+                    return
+                if target is None:
+                    self._send_json({"status": "no_open_session"})
+                else:
+                    external_dir = (str(get_cfg_value("memory.auto_checkpoint.external_daily_dir", "") or "")
+                                    if session_has_external_journal_eligibility(target) else "")
+                    self._send_json(checkpoint_open_session(target, scope_key, str(body.get("summary", "") or ""), str(body.get("open_intents", "") or ""), cwd=str(body.get("cwd", "") or ""), external_daily_dir=external_dir))
+            except Exception as e:
+                logger.error("session/summarize 실패: %s", e)
                 self._send_json({"error": str(e)}, 500)
 
         elif path == "/shutdown":
@@ -237,14 +322,14 @@ class STMServer:
                  new_session_callback: "Optional[callable]" = None):
         global _shutdown_callback, _new_session_callback
         self._port = port or _get_port()
-        self._server: Optional[HTTPServer] = None
+        self._server: Optional[ThreadingHTTPServer] = None
         self._thread: Optional[threading.Thread] = None
         _shutdown_callback = shutdown_callback
         _new_session_callback = new_session_callback
 
     def start(self):
         try:
-            self._server = HTTPServer(("127.0.0.1", self._port), _STMHandler)
+            self._server = ThreadingHTTPServer(("127.0.0.1", self._port), _STMHandler)
             self._thread = threading.Thread(
                 target=self._server.serve_forever,
                 daemon=True,

@@ -61,10 +61,10 @@ session:
         self.assertIn('["memory", "auto_checkpoint", "external_daily_dir"]', settings)
         self.assertNotIn('text="자동 체크포인트"', settings)
 
-    def test_installer_version_is_1_5_3(self):
+    def test_installer_version_is_1_5_5(self):
         iss = (ROOT / "installer" / "engram-overlay.iss").read_text(encoding="utf-8-sig")
 
-        self.assertIn('#define AppVersion "1.5.4"', iss)
+        self.assertIn('#define AppVersion "1.5.5"', iss)
         self.assertIn(
             'OutputBaseFilename=EngramOverlay_{#AppVersion}{#BuildOutputSuffix}_x64-setup',
             iss,
