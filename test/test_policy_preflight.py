@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from core.integrations.engram_bootstrap import _render_claude_pretool_hook_script
+from core.integrations.engram_bootstrap import _render_pretool_hook_script
 from core.integrations.policy_preflight import (
     HookPayloadError,
     classify_agent_pretool_payload,
@@ -44,7 +44,7 @@ class PolicyPreflightTests(unittest.TestCase):
     def _run_rendered_wrapper(self, hook_payload_text: str) -> subprocess.CompletedProcess[str]:
         with tempfile.TemporaryDirectory() as tmp:
             script_path = Path(tmp) / "engram-claude-pretool-hook.ps1"
-            script_path.write_text(_render_claude_pretool_hook_script(), encoding="utf-8")
+            script_path.write_text(_render_pretool_hook_script(), encoding="utf-8")
             return subprocess.run(
                 ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path)],
                 cwd=ROOT,
@@ -331,7 +331,7 @@ class PolicyPreflightTests(unittest.TestCase):
         self.assertEqual(payload["request_type"], "claude-pretool-hook")
 
     def test_rendered_claude_wrapper_forwards_to_agent_policy_adapter_and_fails_open(self):
-        script = _render_claude_pretool_hook_script()
+        script = _render_pretool_hook_script()
 
         self.assertIn("agent-policy-hook", script)
         self.assertIn("'--provider', 'claude-code'", script)
@@ -347,10 +347,20 @@ class PolicyPreflightTests(unittest.TestCase):
 
         self.assertEqual(allowed.returncode, 0)
         self.assertEqual(allowed.stderr, "")
+        # Warnings must reach the model through stdout additionalContext, never stderr:
+        # Claude Code discards a hook's stderr when the hook exits 0.
         self.assertEqual(malformed.returncode, 0)
-        self.assertIn("malformed Claude hook payload JSON", malformed.stderr)
+        self.assertEqual(malformed.stderr, "")
+        self.assertIn(
+            "malformed Claude hook payload JSON",
+            json.loads(malformed.stdout)["hookSpecificOutput"]["additionalContext"],
+        )
         self.assertEqual(unsupported.returncode, 0)
-        self.assertIn("git subcommand 'ci'", unsupported.stderr)
+        self.assertEqual(unsupported.stderr, "")
+        self.assertIn(
+            "git subcommand 'ci'",
+            json.loads(unsupported.stdout)["hookSpecificOutput"]["additionalContext"],
+        )
 
 
 if __name__ == "__main__":

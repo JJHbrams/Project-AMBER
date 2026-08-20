@@ -43,6 +43,19 @@ _PRETOOL_HOOK_SCRIPT_PATH = _ENGRAM_DIR / "engram-claude-pretool-hook.ps1"
 _PRETOOL_HOOK_POSIX_PATH = _ENGRAM_DIR / "engram-claude-pretool-hook.sh"
 _PRETOOL_HOOK_MARKER = "engram-claude-pretool-hook"
 _CODEX_PRETOOL_HOOK_MARKER = "engram-codex-pretool-hook"
+_GEMINI_SETTINGS_PATH = Path.home() / ".gemini" / "settings.json"
+_COPILOT_HOOKS_PATH = Path.home() / ".copilot" / "hooks" / "engram.json"
+_GEMINI_PRETOOL_HOOK_MARKER = "engram-gemini-pretool-hook"
+_COPILOT_PRETOOL_HOOK_MARKER = "engram-copilot-pretool-hook"
+_GEMINI_PRETOOL_HOOK_SCRIPT_PATH = _ENGRAM_DIR / "engram-gemini-pretool-hook.ps1"
+_GEMINI_PRETOOL_HOOK_POSIX_PATH = _ENGRAM_DIR / "engram-gemini-pretool-hook.sh"
+_COPILOT_PRETOOL_HOOK_SCRIPT_PATH = _ENGRAM_DIR / "engram-copilot-pretool-hook.ps1"
+_COPILOT_PRETOOL_HOOK_POSIX_PATH = _ENGRAM_DIR / "engram-copilot-pretool-hook.sh"
+# provider -> (windows script, posix script)
+_PROVIDER_HOOK_SCRIPT_PATHS = {
+    "gemini": (_GEMINI_PRETOOL_HOOK_SCRIPT_PATH, _GEMINI_PRETOOL_HOOK_POSIX_PATH),
+    "copilot": (_COPILOT_PRETOOL_HOOK_SCRIPT_PATH, _COPILOT_PRETOOL_HOOK_POSIX_PATH),
+}
 
 
 # ── 설정 ────────────────────────────────────────────────────────────────
@@ -153,8 +166,8 @@ def _policy_preflight_backend_command_parts() -> tuple[str, list[str]]:
     )
 
 
-def _render_claude_pretool_hook_script() -> str:
-    backend_exe, backend_args = _agent_policy_hook_command_parts("claude-code")
+def _render_pretool_hook_script(provider: str = "claude-code") -> str:
+    backend_exe, backend_args = _agent_policy_hook_command_parts(provider)
     rendered_args = ", ".join(_ps_single_quote(arg) for arg in backend_args)
     return (
         "# engram Claude PreToolUse hook — Engram Overlay 가 자동 생성/관리한다.\n"
@@ -177,8 +190,8 @@ def _render_claude_pretool_hook_script() -> str:
     )
 
 
-def _render_claude_pretool_hook_posix_script() -> str:
-    executable, args = _agent_policy_hook_command_parts("claude-code")
+def _render_pretool_hook_posix_script(provider: str = "claude-code") -> str:
+    executable, args = _agent_policy_hook_command_parts(provider)
     command = _shell_command([executable, *args])
     return (
         "#!/bin/sh\n"
@@ -343,9 +356,9 @@ def sync_sessionstart_hook(enabled: bool) -> dict[str, Any]:
 def sync_claude_pretool_hook(enabled: bool) -> dict[str, Any]:
     script_path = _PRETOOL_HOOK_SCRIPT_PATH if os.name == "nt" else _PRETOOL_HOOK_POSIX_PATH
     script_content = (
-        _render_claude_pretool_hook_script()
+        _render_pretool_hook_script("claude-code")
         if os.name == "nt"
-        else _render_claude_pretool_hook_posix_script()
+        else _render_pretool_hook_posix_script("claude-code")
     )
     result = _sync_managed_hook(
         event_name="PreToolUse",
@@ -363,6 +376,118 @@ def sync_claude_pretool_hook(enabled: bool) -> dict[str, Any]:
             except OSError:
                 pass
     return result
+
+
+def _write_provider_hook_script(
+    provider: str,
+    *,
+    enabled: bool,
+) -> tuple[Path, dict[str, Any] | None]:
+    """Render (or remove) the per-provider pre-tool wrapper script. Returns (path, error)."""
+    windows = os.name == "nt"
+    script_path = _PROVIDER_HOOK_SCRIPT_PATHS[provider][0 if windows else 1]
+    alternate = _PROVIDER_HOOK_SCRIPT_PATHS[provider][1 if windows else 0]
+    try:
+        if enabled:
+            content = (
+                _render_pretool_hook_script(provider)
+                if windows
+                else _render_pretool_hook_posix_script(provider)
+            )
+            _ENGRAM_DIR.mkdir(parents=True, exist_ok=True)
+            if not script_path.exists() or script_path.read_text(encoding="utf-8") != content:
+                script_path.write_text(content, encoding="utf-8")
+            if not windows:
+                script_path.chmod(0o755)
+        else:
+            script_path.unlink(missing_ok=True)
+        alternate.unlink(missing_ok=True)
+    except OSError as exc:
+        return script_path, {"ok": False, "changed": False, "enabled": enabled, "error": str(exc)}
+    return script_path, None
+
+
+def sync_gemini_pretool_hook(enabled: bool) -> dict[str, Any]:
+    """Merge only the Engram BeforeTool handler into ~/.gemini/settings.json."""
+    script_path, error = _write_provider_hook_script("gemini", enabled=enabled)
+    if error is not None:
+        return error
+    try:
+        if _GEMINI_SETTINGS_PATH.exists():
+            raw = json.loads(_GEMINI_SETTINGS_PATH.read_text(encoding="utf-8"))
+            if not isinstance(raw, dict):
+                return {"ok": False, "changed": False, "error": "Gemini settings.json is not an object"}
+            settings: dict[str, Any] = raw
+        elif not enabled:
+            return {"ok": True, "changed": False, "enabled": enabled}
+        else:
+            settings = {}
+        before = json.dumps(settings, sort_keys=True)
+        hooks = settings.get("hooks")
+        if not isinstance(hooks, dict):
+            hooks = {}
+        entries = hooks.get("BeforeTool")
+        if not isinstance(entries, list):
+            entries = []
+        entries = _strip_engram_entries(entries, _GEMINI_PRETOOL_HOOK_MARKER)
+        if enabled:
+            entries.append(
+                {
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": _hook_command(script_path),
+                            "timeout": 30000,
+                        }
+                    ]
+                }
+            )
+        if entries:
+            hooks["BeforeTool"] = entries
+        else:
+            hooks.pop("BeforeTool", None)
+        if hooks:
+            settings["hooks"] = hooks
+        else:
+            settings.pop("hooks", None)
+        changed = before != json.dumps(settings, sort_keys=True)
+        if changed:
+            _write_json_atomic(_GEMINI_SETTINGS_PATH, settings)
+        return {"ok": True, "changed": changed, "enabled": enabled}
+    except Exception as exc:
+        logger.exception("[engram-bootstrap] Gemini BeforeTool hook 동기화 실패")
+        return {"ok": False, "changed": False, "enabled": enabled, "error": str(exc)}
+
+
+def sync_copilot_pretool_hook(enabled: bool) -> dict[str, Any]:
+    """Own ~/.copilot/hooks/engram.json outright — Copilot merges every file in that directory."""
+    script_path, error = _write_provider_hook_script("copilot", enabled=enabled)
+    if error is not None:
+        return error
+    try:
+        before = (
+            _COPILOT_HOOKS_PATH.read_text(encoding="utf-8")
+            if _COPILOT_HOOKS_PATH.exists()
+            else ""
+        )
+        if not enabled:
+            if before:
+                _COPILOT_HOOKS_PATH.unlink(missing_ok=True)
+            return {"ok": True, "changed": bool(before), "enabled": enabled}
+        handler: dict[str, Any] = {"type": "command", "timeoutSec": 30}
+        if os.name == "nt":
+            handler["powershell"] = _hook_command(script_path)
+        else:
+            handler["command"] = _hook_command(script_path)
+        payload = {"version": 1, "hooks": {"PreToolUse": [handler]}}
+        rendered = json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
+        changed = before != rendered
+        if changed:
+            _write_json_atomic(_COPILOT_HOOKS_PATH, payload)
+        return {"ok": True, "changed": changed, "enabled": enabled}
+    except Exception as exc:
+        logger.exception("[engram-bootstrap] Copilot PreToolUse hook 동기화 실패")
+        return {"ok": False, "changed": False, "enabled": enabled, "error": str(exc)}
 
 
 def sync_codex_pretool_hook(enabled: bool) -> dict[str, Any]:

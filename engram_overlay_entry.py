@@ -120,6 +120,9 @@ def _dispatch_backend_role() -> bool:
             import mcp_server
             mcp_server.main(rest)
             return True
+        if role == "claude-root-launcher":
+            from core.integrations.claude_root_launcher import main
+            raise SystemExit(main(argv[2:]))
         if role == "kg-watcher":
             import kg_watcher
             kg_watcher.main(rest)

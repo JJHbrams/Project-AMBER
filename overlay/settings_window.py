@@ -2792,6 +2792,8 @@ class _SettingsWindow:
         from core.integrations.engram_bootstrap import (
             sync_claude_pretool_hook,
             sync_codex_pretool_hook,
+            sync_copilot_pretool_hook,
+            sync_gemini_pretool_hook,
             sync_sessionstart_hook,
         )
         from core.integrations.policy_guidance_state import sync_policy_guidance_disabled_marker
@@ -2801,6 +2803,8 @@ class _SettingsWindow:
             "SessionStart": sync_sessionstart_hook(auto_inject),
             "Claude": sync_claude_pretool_hook(policy_guidance),
             "Codex": sync_codex_pretool_hook(policy_guidance),
+            "Copilot": sync_copilot_pretool_hook(policy_guidance),
+            "Gemini": sync_gemini_pretool_hook(policy_guidance),
         }
         self._policy_sync_warnings = [
             f"{name}: {result.get('error') or '적용 실패'}"
@@ -2818,7 +2822,7 @@ class _SettingsWindow:
             )
             behavior = "Agent 위반 차단 · 사람 경고" if policy_level == "enforce_agents" else "모두 경고만"
             self._policy_status_var.set(
-                f"{behavior} · Claude 적용됨 · Codex 설정됨 — {codex_note}"
+                f"{behavior} · Claude·Copilot·Gemini 적용됨 · Codex 설정됨 — {codex_note}"
             )
         else:
             self._policy_status_var.set("정책 가이드 OFF · Git advisor backend 실행 안 함")

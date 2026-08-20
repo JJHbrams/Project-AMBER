@@ -56,6 +56,8 @@ from core.integrations.engram_bootstrap import (
     is_policy_guidance_enabled,
     sync_claude_pretool_hook,
     sync_codex_pretool_hook,
+    sync_copilot_pretool_hook,
+    sync_gemini_pretool_hook,
     sync_sessionstart_hook,
 )
 from core.integrations.policy_guidance_state import sync_policy_guidance_disabled_marker
@@ -445,7 +447,9 @@ class OverlayApp:
         )
         self._stm_server.start()  # 포트 충돌 시 STMServer.start() 내부에서 조용히 실패
 
-        threading.Thread(target=self._claude_code_watchdog_loop, daemon=True, name="overlay-claude-watchdog").start()
+        # Global claude.exe discovery is intentionally disabled.  It cannot
+        # distinguish Desktop Electron, safe-mode one-shots, or subagents.
+        # Root CLI ownership is handled by the dedicated shim launcher.
         threading.Thread(target=self._stm_transcript_capture_loop, daemon=True, name="overlay-stm-capture").start()
         threading.Thread(target=self._auto_memory_checkpoint_loop, daemon=True, name="overlay-memory-checkpoint").start()
 
@@ -688,7 +692,8 @@ class OverlayApp:
             try:
                 port = self._stm_server.port
                 payload = json.dumps({
-                    "summary": f"[watchdog] Claude Code PID {dead_pid} 종료 감지 — 자동 close_session"
+                    "summary": f"[watchdog] Claude Code PID {dead_pid} 종료 감지 — 자동 close_session",
+                    "scope_key": "overlay",
                 }).encode()
                 req = urllib.request.Request(
                     f"http://127.0.0.1:{port}/stm/session/close",
@@ -696,20 +701,11 @@ class OverlayApp:
                     headers={"Content-Type": "application/json"},
                     method="POST",
                 )
-                with urllib.request.urlopen(req, timeout=5) as resp:
+                with urllib.request.urlopen(req, timeout=70) as resp:
                     body = resp.read().decode()
                     log.info("[watchdog] close_session 완료 (PID=%d): %s", dead_pid, body)
             except Exception as exc:
                 log.warning("[watchdog] close_session 실패 (PID=%d): %s", dead_pid, exc)
-
-            # working_memory 갱신 — 로컬 Ollama로 요약, Claude API 호출 없음.
-            # engram_close_session(모델 tool-call 의존)과 달리 세션 종료마다 항상 실행됨.
-            try:
-                from core.graph.semantic import update_working_memory_from_recent_session
-
-                update_working_memory_from_recent_session(scope_key="overlay")
-            except Exception as exc:
-                log.warning("[watchdog] working_memory 갱신 실패 (PID=%d): %s", dead_pid, exc)
 
             # 페르소나 반성 이벤트 감지 — resume 가능한 Claude 세션(기존 CLI 인증 재사용,
             # 새 API 키 불필요)으로 판단만 하고, narrative/persona는 절대 여기서 안 건드림.
@@ -967,6 +963,8 @@ class OverlayApp:
             ("policy marker", sync_policy_guidance_disabled_marker(guidance_enabled)),
             ("Claude PreToolUse", sync_claude_pretool_hook(guidance_enabled)),
             ("Codex PreToolUse", sync_codex_pretool_hook(guidance_enabled)),
+            ("Copilot PreToolUse", sync_copilot_pretool_hook(guidance_enabled)),
+            ("Gemini BeforeTool", sync_gemini_pretool_hook(guidance_enabled)),
         ):
             if not result.get("ok"):
                 log.error("[overlay] %s 동기화 실패: %s", name, result.get("error", "unknown error"))

@@ -5,13 +5,15 @@
 import re
 import threading
 import concurrent.futures
+import logging
 from datetime import datetime, timezone
 from typing import Any, List, Optional, Dict
 
 from core.storage.db import get_connection
 from core.common.sanitizer import sanitize
 from core.config.runtime_config import get_cfg_value, get_default_fallback_scope_key
-from core.context.project_scope import resolve_project_key
+from core.context.project_scope import resolve_kg_node_id, resolve_project_key
+from core.memory.daily_checkpoint import append_session_close_daily_note
 
 DEFAULT_SCOPE_KEY = get_default_fallback_scope_key()
 DEFAULT_PROJECT_KEY = "general"
@@ -45,13 +47,24 @@ def _normalize_project_keys(keys: Optional[List[str]]) -> List[str]:
     return safe if safe else [DEFAULT_PROJECT_KEY]
 
 
-def create_session(scope_key: Optional[str] = None, project_keys: Optional[List[str]] = None) -> int:
+def create_session(scope_key: Optional[str] = None, project_keys: Optional[List[str]] = None, continued_from_session_id: Optional[int] = None, journal_provenance: str = "") -> int:
     """스코프와 연관 프로젝트를 지정해 세션을 생성한다.
     project_keys가 비어있으면 'general'로 기록된다."""
     normalized_scope = _normalize_scope_key(scope_key)
     norm_keys = _normalize_project_keys(project_keys)
     conn = get_connection()
-    cursor = conn.execute("INSERT INTO sessions (scope_key) VALUES (?)", (normalized_scope,))
+    if continued_from_session_id is not None:
+        parent = conn.execute(
+            "SELECT 1 FROM sessions WHERE id=? AND scope_key=? AND ended_at IS NOT NULL",
+            (continued_from_session_id, normalized_scope),
+        ).fetchone()
+        if not parent:
+            conn.close()
+            raise ValueError("continued_from_session_id must be an ended session in the same scope")
+    cursor = conn.execute(
+        "INSERT INTO sessions (scope_key, continued_from_session_id, journal_provenance) VALUES (?, ?, ?)",
+        (normalized_scope, continued_from_session_id, journal_provenance),
+    )
     session_id = cursor.lastrowid
     for key in norm_keys:
         conn.execute(
@@ -63,15 +76,103 @@ def create_session(scope_key: Optional[str] = None, project_keys: Optional[List[
     return int(session_id)
 
 
-def close_session(session_id: int, summary: str = "") -> None:
-    """세션 종료 시각과 요약을 sessions 테이블에 기록한다."""
+def set_session_journal_provenance(session_id: int, provenance: str) -> bool:
+    """Mark a session only from a trusted lifecycle owner, never a request hint."""
+    if provenance not in {"root_bootstrap", "root_cli", "bubble"}:
+        return False
     conn = get_connection()
+    try:
+        with conn:
+            return bool(conn.execute(
+                "UPDATE sessions SET journal_provenance=? WHERE id=? AND ended_at IS NULL "
+                "AND journal_provenance=''",
+                (provenance, session_id),
+            ).rowcount)
+    finally:
+        conn.close()
+
+
+def session_has_external_journal_eligibility(session_id: int) -> bool:
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            "SELECT journal_provenance FROM sessions WHERE id=?",
+            (session_id,),
+        ).fetchone()
+        return bool(row and row["journal_provenance"] in {"root_bootstrap", "root_cli", "bubble"})
+    finally:
+        conn.close()
+
+
+def close_session(session_id: int, summary: str = "", open_intents: str = "", progress: str = "", origin: str = "automatic", project_key_override: str = "", project_node_id_override: str | None = None, project_label_override: str = "") -> None:
+    """Close STM and record its idempotent managed daily-note entry.
+
+    This is deliberately the shared close coordinator for MCP fallback, the STM
+    HTTP endpoint/watchdog, and the bubble bridge.  A failed note integration
+    must never turn a successfully closed STM session into an endpoint failure.
+    """
+    conn = get_connection()
+    row = conn.execute(
+        "SELECT scope_key, ended_at FROM sessions WHERE id = ?",
+        (session_id,),
+    ).fetchone()
+    project_rows = conn.execute(
+        "SELECT project_key FROM session_projects WHERE session_id = ? "
+        "ORDER BY project_key",
+        (session_id,),
+    ).fetchall()
+    message_rows = conn.execute(
+        "SELECT role, content FROM messages WHERE session_id = ? ORDER BY id",
+        (session_id,),
+    ).fetchall()
     with conn:
-        conn.execute(
-            "UPDATE sessions SET ended_at=datetime('now','localtime'), summary=? WHERE id=?",
+        update = conn.execute(
+            "UPDATE sessions SET ended_at=datetime('now','localtime'), summary=? "
+            "WHERE id=? AND ended_at IS NULL",
             (sanitize(summary, max_length=500) if summary else None, session_id),
         )
     conn.close()
+
+    if not row:
+        return
+    # A concurrent closer that observed the session before it was closed must
+    # not race the successful closer into a duplicate file append.  Later
+    # retries see ``ended_at`` and are allowed through for recovery.
+    if not row["ended_at"] and update.rowcount != 1:
+        return
+    try:
+        scope_key = str(row["scope_key"] or "")
+        project_key = project_key_override or next(
+            (str(item["project_key"]) for item in project_rows if item["project_key"] != "general"),
+            str(project_rows[0]["project_key"]) if project_rows else "",
+        )
+        # A direct STM caller may not have supplied session_projects.  Project
+        # scopes still contain enough context to link the managed daily note.
+        if not project_key and scope_key.startswith("project:"):
+            project_key = scope_key.removeprefix("project:")
+        note_time = datetime.now().astimezone()
+        if row["ended_at"]:
+            try:
+                note_time = datetime.fromisoformat(str(row["ended_at"])).astimezone()
+            except ValueError:
+                pass
+        append_session_close_daily_note(
+            session_id=session_id,
+            now=note_time,
+            summary=summary,
+            open_intents=open_intents,
+            progress=progress,
+            transcript=[{"role": item["role"], "content": item["content"]} for item in message_rows],
+            automatic=origin != "explicit",
+            scope_key=scope_key,
+            project_key=project_key,
+            project_label=project_label_override,
+            project_node_id=project_node_id_override or (resolve_kg_node_id(project_key) if project_key else None),
+        )
+    except Exception:
+        # Session closure is the durable operation; daily-note availability is
+        # an auxiliary integration and can be retried safely with the marker.
+        logging.getLogger(__name__).exception("session close daily note 기록 실패: id=%s", session_id)
 
 
 def link_session_projects(session_id: int, project_keys: List[str]) -> None:
@@ -102,6 +203,9 @@ def save_message(session_id: int, role: str, content: str):
     safe_content = sanitize(content, max_length=4000)
     conn = get_connection()
     with conn:
+        open_row = conn.execute("SELECT 1 FROM sessions WHERE id=? AND ended_at IS NULL", (session_id,)).fetchone()
+        if not open_row:
+            raise ValueError("session is not open")
         conn.execute("INSERT INTO messages (session_id, role, content) VALUES (?,?,?)", (session_id, role, safe_content))
     conn.close()
 
@@ -111,7 +215,7 @@ def resolve_session_id_by_scope(scope_key: Optional[str]) -> Optional[int]:
     normalized = _normalize_scope_key(scope_key)
     conn = get_connection()
     row = conn.execute(
-        "SELECT id FROM sessions WHERE scope_key = ? ORDER BY started_at DESC LIMIT 1",
+        "SELECT id FROM sessions WHERE scope_key = ? AND ended_at IS NULL ORDER BY started_at DESC, id DESC LIMIT 1",
         (normalized,),
     ).fetchone()
     conn.close()

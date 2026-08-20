@@ -1,5 +1,54 @@
 # Release Notes
 
+## 2026-08-20 - v1.5.5: Safe Session Checkpoints and Project Daily Snapshots
+
+> Patch release. Engram now separates non-terminal memory checkpoints from irreversible session
+> closure, rejects writes to ended sessions, and keeps external Obsidian Daily notes organized as
+> one current snapshot per project and day.
+
+### Highlights
+
+- **`engram_summarize_session` checkpoints without closing the session.** Working memory, LTM
+  promotion, KG/Wiki progress, and Daily notes update behind a durable message watermark while the
+  active session remains open.
+- **`engram_close_session` is now a terminal boundary.** It performs the final checkpoint, records
+  `ended_at`, invalidates cached fingerprint/context bindings, and returns `no_open_session` when
+  there is nothing open to close.
+- **Ended sessions are write-protected.** Scope resolution accepts open sessions only; stale
+  implicit fingerprints create a linked continuation session, while explicit ended IDs fail.
+- **Daily-note ownership is durable.** Trusted root sessions and bubble sessions carry stored
+  journal provenance, preventing subagents or spoofed origins from writing root-session journals.
+- **External Daily notes are project snapshots.** Each project has one replaceable snapshot per
+  day, keyed by KG project identity when available. Managed Wiki Daily checkpoints remain an
+  append-only ledger.
+- **Provider policy guidance covers supported CLI providers.** Codex, Claude Code, Copilot, and
+  Goose receive the same session-lifecycle and policy-preflight expectations.
+
+### Fixed
+
+- Closed STM sessions can no longer accumulate new messages through stale cached bindings.
+- Legacy external Daily content, CRLF line endings, and trailing whitespace remain byte-preserved
+  outside Engram's managed snapshot block.
+- The memory-initiative cooldown test now pins monotonic time, so validation is deterministic even
+  immediately after a Windows reboot.
+
+### Validation
+
+- AMBER release source: 480 tests passed in an isolated Windows profile.
+- Prebuilt frozen artifact: runtime contract, embedding validation, role smoke tests, dashboard
+  smoke, and live overlay/MCP/KG health passed before AMBER packaging.
+- Installer: `EngramOverlay_1.5.5_x64-setup.exe` (419,609,396 bytes).
+- SHA-256: `CE1A12D69BE2728F90CF5AA85C2718E24954356E61CF60BF71E719289C07D106`.
+
+### Upgrade Notes
+
+- Existing databases, Wiki content, and Daily notes are preserved. Historical messages previously
+  stranded after a session close are not moved automatically.
+- The installer upgrades the existing Engram Overlay installation in place.
+- After a fresh OS boot, the existing memory-initiative source may wait for its configured cooldown
+  before its first proactive nudge; ordinary chat, MCP, summarization, and session closure are not
+  affected.
+
 ## 2026-08-18 - v1.5.4: Custom Overlay Event API
 
 > Patch release. Engram can now publish its overlay events to a separately implemented custom

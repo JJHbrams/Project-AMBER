@@ -29,6 +29,8 @@ class MemoryBus:
         *,
         project_key: Optional[str] = None,
         project_keys: Optional[List[str]] = None,
+        continued_from_session_id: Optional[int] = None,
+        journal_provenance: str = "",
         cwd: Optional[str] = None,
     ) -> MemorySession:
         resolved_scope = resolve_scope_key(scope_key, project_key=project_key, cwd=cwd)
@@ -38,7 +40,12 @@ class MemoryBus:
             all_keys.append(project_key)
         if project_keys:
             all_keys.extend(project_keys)
-        session_id = create_session(scope_key=resolved_scope, project_keys=all_keys or None)
+        kwargs = {"scope_key": resolved_scope, "project_keys": all_keys or None}
+        if continued_from_session_id is not None:
+            kwargs["continued_from_session_id"] = continued_from_session_id
+        if journal_provenance:
+            kwargs["journal_provenance"] = journal_provenance
+        session_id = create_session(**kwargs)
         return MemorySession(session_id=session_id, scope_key=resolved_scope)
 
     def record_user_message(self, session: SessionLike, content: str):

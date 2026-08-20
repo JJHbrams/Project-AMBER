@@ -192,9 +192,12 @@ class CodexPolicyHookTests(unittest.TestCase):
         self.assertEqual(codex_exit, 0)
         self.assertEqual(claude_exit, 0)
         self.assertEqual(codex_stderr, "")
-        self.assertEqual(claude_stdout, "")
-        self.assertIn("backend unavailable", json.loads(codex_stdout)["hookSpecificOutput"]["additionalContext"])
-        self.assertIn("backend unavailable", claude_stderr)
+        self.assertEqual(claude_stderr, "")
+        for stdout in (codex_stdout, claude_stdout):
+            self.assertIn(
+                "backend unavailable",
+                json.loads(stdout)["hookSpecificOutput"]["additionalContext"],
+            )
 
     def test_malformed_codex_payload_warns_but_exits_zero(self):
         stdout, stderr, exit_code = process_provider_hook_input("not-json", "codex")

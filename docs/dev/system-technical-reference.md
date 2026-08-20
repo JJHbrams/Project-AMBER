@@ -80,20 +80,36 @@
 - 사용자 설정/템플릿
   - `~/.engram/user.config.yaml`
   - `~/.engram/overlay.user.yaml`
+- Agent managed hooks (공급자 공통 규칙)
+  - 설치 조건: `directives.policy.guidance_level != off`
+  - `warn` 위험은 **모든 공급자**에게 `hookSpecificOutput.additionalContext`(stdout)로
+    전달한다. stderr 경고는 exit 0인 hook에서 모델에 도달하지 않으므로 사용하지 않는다.
+  - `enforce_agents`의 유효한 정책 위반만 차단하며, 차단도 exit code가 아니라 JSON으로 전달한다.
+  - backend·정책 오류는 항상 fail-open(경고만)이다.
+  - 공급자 tool 이름은 `_TOOL_NAME_ALIASES`로 정규화한다(`run_shell_command`→`bash`,
+    `write_file`→`write`, `replace`/`str_replace`→`edit` 등).
+
+| 공급자 | hook 파일 | event | 차단 계약 |
+| --- | --- | --- | --- |
+| claude-code | `~/.claude/settings.json` | `PreToolUse` | `hookSpecificOutput.permissionDecision: deny` |
+| codex | `~/.codex/hooks.json` | `PreToolUse` | 동일 |
+| copilot | `~/.copilot/hooks/engram.json` (Engram 전용 파일) | `PreToolUse` | 동일 |
+| gemini | `~/.gemini/settings.json` | `BeforeTool` | 최상위 `{"decision":"deny","reason":...}` |
+| goose | 없음 — hook 런타임 미제공 | — | 세션 bootstrap instructions만 적용 |
+
 - Claude Code managed hooks
   - `~/.claude/settings.json`의 Engram 관리 `SessionStart` / `PreToolUse` 항목만 멱등 동기화
   - `~/.engram/engram-sessionstart-hook.ps1`
   - `~/.engram/engram-claude-pretool-hook.ps1`
   - `SessionStart`는 `session.auto_inject=true`일 때만 설치
-  - `PreToolUse`는 `directives.policy.guidance_level != off`일 때 설치된다.
-  - `warn`은 repo-write 위험을 경고·추천·audit만 하고, `enforce_agents`는 유효한
-    정책 위반 tool call을 `permissionDecision: deny`로 차단한다.
 - Codex managed hooks
   - `~/.codex/hooks.json`의 Engram 관리 `PreToolUse` handler만 멱등 동기화
   - `Bash`와 `apply_patch` repo-write를 공통 policy preflight로 평가
-  - `warn` 위험은 `hookSpecificOutput.additionalContext`, `enforce_agents`의 유효한
-    정책 위반은 `permissionDecision: deny`로 전달
   - user hook은 Codex `/hooks`에서 최초 및 내용 변경 시 신뢰 승인이 필요
+- Copilot / Gemini managed hooks
+  - `~/.engram/engram-copilot-pretool-hook.ps1`, `~/.engram/engram-gemini-pretool-hook.ps1`
+  - Copilot은 `~/.copilot/hooks/engram.json`을 Engram이 통째로 소유하고, guidance OFF 시 삭제한다.
+  - Gemini는 `settings.json`의 `hooks.BeforeTool`에 Engram 항목만 병합하고 사용자 항목은 보존한다.
 - Repository managed Git advisor
   - `engram_get_context_once` 세션 bootstrap은 cwd가 Git 저장소이고 정책 가이드가 켜져
     있으면 공용 Git 디렉터리의 managed advisor를 멱등 설치한다.

@@ -5,10 +5,45 @@ from pathlib import Path
 from unittest.mock import patch
 
 from core.graph.semantic import stm_promoter
-from core.memory.daily_checkpoint import append_daily_checkpoint
+from core.memory.daily_checkpoint import append_daily_checkpoint, append_session_close_daily_note
+from core.memory import daily_checkpoint
 
 
 class AutoMemoryCheckpointTest(unittest.TestCase):
+    def test_automatic_journal_parses_fenced_json(self):
+        transcript = [{"role": "user", "content": "외부 일지를 사람이 읽기 좋게 정리해줘."}, {"role": "assistant", "content": "프로젝트별 저널 렌더러와 보존 테스트를 구현했다."}]
+        with patch("core.memory.daily_checkpoint._call_journal_claude", return_value='```json\n{"title":"일지 개선","background":"","work":"렌더러 구현","result":"테스트 통과","next":""}\n```'):
+            journal = daily_checkpoint._automatic_journal_from_transcript(transcript)
+        self.assertEqual(journal["title"], "일지 개선")
+
+    def test_meaningful_automatic_llm_failure_keeps_managed_ledger_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root, external = Path(tmp) / "engram", Path(tmp) / "external"
+            external.mkdir()
+            with patch("core.memory.daily_checkpoint.get_db_root_dir", return_value=str(root)), patch(
+                "core.memory.daily_checkpoint.get_kg", return_value=unittest.mock.MagicMock()
+            ), patch("core.memory.daily_checkpoint.get_cfg_value", return_value=str(external)), patch(
+                "core.memory.daily_checkpoint._call_journal_claude", return_value="not json"
+            ):
+                result = append_session_close_daily_note(session_id=88, now=datetime(2026, 8, 14, 9, 0).astimezone(), summary="", transcript=[{"role":"user","content":"저널 기능을 검토하고 문제를 정리해줘."}, {"role":"assistant","content":"문제를 확인하고 개선 방향을 제안했다."}], automatic=True)
+            self.assertTrue(result["engram_written"])
+            self.assertFalse(result["external_written"])
+            self.assertFalse(list(external.glob("*.md")))
+
+    def test_automatic_journal_rejects_auto_checkpoint_plumbing_but_keeps_managed_ledger(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root, external = Path(tmp) / "engram", Path(tmp) / "external"
+            external.mkdir()
+            payload = '{"title":"auto-checkpoint 기록","background":"","work":"작업","result":"완료","next":""}'
+            with patch("core.memory.daily_checkpoint.get_db_root_dir", return_value=str(root)), patch(
+                "core.memory.daily_checkpoint.get_kg", return_value=unittest.mock.MagicMock()
+            ), patch("core.memory.daily_checkpoint.get_cfg_value", return_value=str(external)), patch(
+                "core.memory.daily_checkpoint._call_journal_claude", return_value=payload
+            ):
+                result = append_session_close_daily_note(session_id=89, now=datetime(2026, 8, 14, 9, 0).astimezone(), summary="", transcript=[{"role":"user","content":"저널 기능을 검토하고 문제를 정리해줘."}, {"role":"assistant","content":"문제를 확인하고 개선 방향을 제안했다."}], automatic=True)
+            self.assertTrue(result["engram_written"])
+            self.assertFalse(result["external_written"])
+            self.assertFalse(list(external.glob("*.md")))
     def test_candidate_requires_completed_idle_exchange_and_turn_gap(self):
         rows = [
             {"id": i, "role": "user" if i % 2 else "assistant", "content": str(i), "timestamp": "2026-08-14 08:00:00"}
@@ -18,7 +53,7 @@ class AutoMemoryCheckpointTest(unittest.TestCase):
         conn = unittest.mock.MagicMock()
         conn.execute.side_effect = [
             unittest.mock.MagicMock(fetchone=lambda: session),
-            unittest.mock.MagicMock(fetchone=lambda: {"ts": ""}),
+            unittest.mock.MagicMock(fetchone=lambda: None),
             unittest.mock.MagicMock(fetchall=lambda: list(reversed(rows))),
         ]
 
@@ -42,6 +77,7 @@ class AutoMemoryCheckpointTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             db_root = Path(tmp) / "engram"
             external = Path(tmp) / "daily_notes"
+            external.mkdir()
             fake_kg = unittest.mock.MagicMock()
             with patch(
                 "core.memory.daily_checkpoint.get_db_root_dir",
@@ -95,6 +131,58 @@ class AutoMemoryCheckpointTest(unittest.TestCase):
             self.assertTrue(result["engram_written"])
             self.assertFalse(result["external_written"])
             self.assertEqual(result["external_path"], "")
+
+    def test_daily_checkpoint_does_not_create_missing_external_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_root = Path(tmp) / "engram"
+            external = Path(tmp) / "missing" / "daily_notes"
+            with patch("core.memory.daily_checkpoint.get_db_root_dir", return_value=str(db_root)), patch(
+                "core.memory.daily_checkpoint.get_kg", return_value=unittest.mock.MagicMock()
+            ):
+                result = append_daily_checkpoint(
+                    checkpoint_id="overlay-3-30",
+                    now=datetime(2026, 8, 14, 10, 0).astimezone(),
+                    summary="외부 폴더 없음",
+                    open_intents="",
+                    project_key="general",
+                    project_node_id=None,
+                    external_daily_dir=str(external),
+                )
+
+            self.assertTrue(result["engram_written"])
+            self.assertFalse(result["external_written"])
+            self.assertFalse(external.exists())
+
+    def test_session_close_daily_note_is_idempotent_and_managed_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_root = Path(tmp) / "engram"
+            external = Path(tmp) / "daily_notes"
+            external.mkdir()
+            fake_kg = unittest.mock.MagicMock()
+            with patch("core.memory.daily_checkpoint.get_db_root_dir", return_value=str(db_root)), patch(
+                "core.memory.daily_checkpoint.get_kg", return_value=fake_kg
+            ), patch("core.memory.daily_checkpoint.get_cfg_value", return_value=str(external)):
+                args = {
+                    "session_id": 42,
+                    "now": datetime(2026, 8, 14, 11, 0).astimezone(),
+                    "summary": "세션 마무리",
+                    "open_intents": "다음 배포",
+                    "scope_key": "overlay",
+                }
+                first = append_session_close_daily_note(**args)
+                second = append_session_close_daily_note(**args)
+
+            self.assertTrue(first["engram_written"])
+            self.assertFalse(first["external_written"])
+            self.assertFalse(second["engram_written"])
+            self.assertFalse(second["external_written"])
+            self.assertEqual(
+                (db_root / "docs" / "daily" / "2026-08-14.md").read_text(encoding="utf-8").count(
+                    "engram-checkpoint:session-close-42"
+                ),
+                1,
+            )
+            self.assertIn("- 다음 작업: 다음 배포", (db_root / "docs" / "daily" / "2026-08-14.md").read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

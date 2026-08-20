@@ -1,12 +1,14 @@
 ---
 name: engram-close-session
-description: "Engram 세션 종료·정리·수동 반성을 누락 없이 수행한다. 트리거: 세션 종료, 대화 종료, 작업 정리, 수고, 끝, /reflect, 반성, close session, save session."
+description: "Engram의 명시적 세션 종료·수동 반성을 수행한다. 트리거: 세션 종료, 대화 종료, 수고, 끝, /reflect, 반성, close session. 중간 메모리/Wiki 정리는 이 skill이 아니라 engram_summarize_session을 사용한다."
 argument-hint: "다음 세션에 남길 open intent (선택)"
 ---
 
 # Engram session close workflow
 
 세션을 닫을 때 activity, curiosity, narrative, memory 저장을 한 번의 절차로 처리한다.
+
+중간 메모리/Wiki 정리, 진행상황 저장 요청은 세션을 닫지 않는다. `engram_summarize_session`을 사용하고 이 skill을 실행하지 않는다.
 
 ## 실행 절차
 

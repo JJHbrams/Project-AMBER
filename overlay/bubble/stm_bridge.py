@@ -12,6 +12,12 @@ thinking/tool_use/tool_result는 저장하지 않는다 — STM 히스토리는 
 import logging
 from typing import Optional
 
+from core.graph.semantic import checkpoint_open_session, flag_reflection_event_from_recent_session
+from core.memory import close_session
+from core.memory.store import session_has_external_journal_eligibility
+from core.storage.db import get_connection
+from core.config.runtime_config import get_cfg_value
+
 logger = logging.getLogger(__name__)
 
 try:
@@ -33,7 +39,7 @@ class StmBridge:
         if not _STM_AVAILABLE or self._session is not None:
             return
         try:
-            self._session = _memory_bus.start_session(scope_key=self._scope_key)
+            self._session = _memory_bus.start_session(scope_key=self._scope_key, journal_provenance="bubble")
             logger.info("[bubble] STM 세션 시작: id=%d scope=%s", self._session.session_id, self._scope_key)
         except Exception:
             logger.exception("[bubble] STM 세션 시작 실패")
@@ -60,31 +66,30 @@ class StmBridge:
             return
         session_id = self._session.session_id
         try:
-            from core.memory import close_session
-
+            checkpoint_open_session(
+                session_id, self._scope_key, summary or "세션 종료", source="automatic",
+                external_daily_dir=(str(get_cfg_value("memory.auto_checkpoint.external_daily_dir", "") or "")
+                                    if session_has_external_journal_eligibility(session_id) else ""),
+            )
             close_session(session_id, summary)
         except Exception:
             logger.exception("[bubble] STM close_session 실패")
+            return
 
         try:
-            from core.graph.semantic import update_working_memory_from_recent_session
-
-            update_working_memory_from_recent_session(scope_key=self._scope_key)
-        except Exception:
-            logger.exception("[bubble] working_memory 갱신 실패")
-
-        try:
-            from core.graph.semantic import flag_reflection_event_from_recent_session
-
             flag_reflection_event_from_recent_session(scope_key=self._scope_key)
         except Exception:
             logger.exception("[bubble] reflection event 감지 실패")
 
+        # Do not discard the frontend binding unless the durable terminal
+        # transition actually succeeded; callers can retry a failed close.
         try:
-            from core.graph.semantic import maybe_promote
-
-            maybe_promote(scope_key=self._scope_key)
+            conn = get_connection()
+            try:
+                row = conn.execute("SELECT ended_at FROM sessions WHERE id=?", (session_id,)).fetchone()
+            finally:
+                conn.close()
+            if row and row["ended_at"]:
+                self._session = None
         except Exception:
-            logger.exception("[bubble] STM promote 실패")
-
-        self._session = None
+            logger.exception("[bubble] STM close 확인 실패")
