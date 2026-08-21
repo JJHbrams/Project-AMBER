@@ -385,7 +385,10 @@ ssh -N -R 17386:127.0.0.1:17386 <ORCA가_붙는_그_대상>
 | 로컬 점검 | 토큰 선택·scope 확인, `:17386` LISTENING |
 | 원격 점검 | SSH 접속, OS 판별, 파이썬 탐색, 터널 실측(`/health`) — **ssh 1회** |
 | 등록 | `~/.claude.json` 기록 → 되읽기 → 실호출까지 **ssh 1회** |
+| 배치 | skill + SessionStart hook 을 원격 `~/` 에 놓고 되읽기 검증 — **ssh 1회** |
 | 검증 | 로컬 `remote-audit.jsonl` 에 방금 호출이 찍혔는지 |
+
+배치를 건너뛰려면 `-SkipProvision` 을 붙인다(MCP 등록만).
 
 원격 OS 는 **Linux / macOS / Windows 모두 지원**한다. 등록 내용은 셋 다 동일하고,
 다른 것은 파이썬 탐색·터널 확인·셸 인용 방식뿐이다.
@@ -405,6 +408,89 @@ ssh -N -R 17386:127.0.0.1:17386 <ORCA가_붙는_그_대상>
   ```
 - TTY 가 없는 환경(자동화·GUI 캡처)에서는 `-BatchMode` 를 붙인다. 안 붙이면
   비밀번호 프롬프트에서 무한 대기한다.
+
+---
+
+## 3-6. skill 과 hook — MCP 로는 안 넘어온다
+
+MCP 는 도구만 옮긴다. **skill 과 hook 은 순수 클라이언트 사이드 기능**이라 원격 머신의
+파일시스템에 물건이 있어야 한다. 터널이 옮겨주는 것은 MCP 엔드포인트 하나뿐이다.
+MCP 스펙에도 서버가 클라이언트의 skill/hook 을 심는 경로는 없다.
+
+`setup-remote.ps1` 의 배치 단계가 원격 `~/` 에 다음을 놓는다. 렌더링은
+`core/integrations/remote_provision.py` 가 단일 출처로 담당하고, PowerShell 은 바이트만 옮긴다.
+
+| 놓는 것 | 경로 | 원격 요구사항 |
+|---|---|---|
+| skill | `~/.claude/skills/<name>/SKILL.md` | 없음 (마크다운) |
+| SessionStart hook | `~/.engram/engram-sessionstart-hook.sh` (Windows 원격은 `.ps1`) | `sh` 또는 `powershell` |
+| hook 등록 | `~/.claude/settings.json` 의 `hooks.SessionStart` | — |
+
+### 보내는 skill 과 안 보내는 skill
+
+MCP 도구만 쓰는 것만 보낸다. 원격에서 실패하는 절차를 모델에게 쥐어주면 그걸 시도하다 막힌다.
+
+| skill | 원격 |
+|---|---|
+| `orchestrate`, `engram-wiki-workflow`, `engram-close-session` | 보낸다 — MCP 전용 |
+| `engram-task-workflow` | 보낸다 — 로컬 바이너리 언급 2줄은 설명문이고 실행 지시가 아니다 |
+| `engram-new-session` | **안 보낸다** — overlay bubble HTTP(`127.0.0.1:17384`)를 때린다. 그 포트는 터널에 실려 있지 않다 |
+| `engram` | 안 보낸다 — Copilot 전용 |
+
+목록은 `REMOTE_SAFE_SKILLS` 한 곳에서 관리한다. 원격용으로 본문을 고쳐 보내지 않는다 —
+포크를 만들면 로컬과 원격의 절차가 갈리고, 갈린 쪽이 조용히 낡는다.
+
+### SessionStart hook
+
+stdout 이 그대로 세션 컨텍스트에 붙는 동작을 쓴다. **백엔드 호출이 없다** — 부트스트랩
+지시문 문자열만 뱉으므로 원격에 런타임 의존성이 생기지 않는다. 지시문은 로컬과 같은
+`build_bootstrap_directive` 에서 나온다.
+
+`settings.json` 병합은 marker(`engram-sessionstart-hook`) 기준으로 멱등하다. 재실행해도
+항목이 쌓이지 않고, 사용자 자기 hook 과 다른 설정은 보존한다. 파싱이 안 되는
+`settings.json` 은 **건드리지 않고 중단**한다(`SETTINGS=PARSE_FAIL`).
+
+> 이미 열려 있던 원격 CLI 세션은 새 skill 목록과 hook 을 다시 읽지 않는다.
+> 배치 후 세션을 새로 시작해야 한다.
+
+### 자동 갱신 — 터널이 붙을 때
+
+첫 배치만 `setup-remote.ps1` 로 하고, 그 뒤로는 **터널이 UP 으로 전이할 때 overlay 가
+알아서 최신으로 맞춘다.** VS Code Remote-SSH 가 접속 시 서버 페이로드를 밀어넣는 것과
+같은 자리다 — ssh 를 여는 주체가 overlay 이므로 overlay 가 그 클라이언트 역할을 한다.
+
+동작 규칙:
+
+| 조건 | 동작 |
+|---|---|
+| 한 번도 `setup-remote.ps1` 을 안 돌린 호스트 | **아무것도 하지 않는다** |
+| 배치 내용이 그대로 | ssh 를 **띄우지 않는다** (지문 비교만) |
+| skill 이나 지시문이 바뀜 | `BatchMode=yes` 로 ssh 1회, 갱신 후 지문 기록 |
+| 갱신 실패 | 경고 로그만. 터널 상태에 영향 없음. 지문을 갱신하지 않아 다음 연결에 재시도 |
+
+기록은 `~/.engram/remote-provisioned.json` — 호스트별 지문·원격 파이썬 경로·원격 OS 다.
+자동 갱신은 **이 파일만 읽고** 띄울지 말지를 정하므로, 바뀐 게 없으면 ssh 왕복이 0 이다.
+재연결 backoff 중에는 UP 전이가 없으므로 호출되지 않는다.
+
+첫 배치를 자동화하지 않는 이유는 그 단계에 **토큰 전송과 터널 실측**이 들어 있기 때문이다.
+그 둘을 백그라운드에서 조용히 할 물건이 아니다.
+
+강제로 다시 밀어넣고 싶으면 `setup-remote.ps1` 을 그냥 다시 돌리면 된다.
+
+### PreToolUse 정책 hook 은 아직 없다
+
+repo-write 정책 안내는 원격에 배치하지 않는다. 분류기
+(`classify_agent_pretool_payload`)가 **서버 파일시스템에서 git worktree root 를 찾는**
+구조라, 원격 경로로는 모든 분류 경로가 `classified: False` 로 떨어진다.
+
+- write 계열 → `_find_git_worktree_root(resolved_path)` 가 빈 값 → `"target path is not inside a git worktree"`
+- bash/powershell → `_extract_git_command_context` 가 `None` → `"out of scope for repo-write enforcement"`
+
+즉 지금 구조로 원격 hook 을 붙이면 **언제나 "가이드 없음"만 돌려주는 no-op** 이다.
+경로 해석을 먼저 풀어야 한다(원격이 자기 worktree root 를 payload 에 실어 보내거나,
+로컬에 경로 매핑을 두거나). 정책 판정을 원격으로 뺄 때도 새 REST 라우트를 만들면 안 된다 —
+원격 리스너는 MCP 경로 허용 목록으로 뒤집혀 있고(7절), 라우트를 늘리면 도구 계층을
+우회하는 그 구멍이 되살아난다. **MCP 도구로 노출하는 것이 유일한 경로다.**
 
 ---
 

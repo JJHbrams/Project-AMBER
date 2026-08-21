@@ -39,6 +39,9 @@ _CLAUDE_SETTINGS_PATH = Path.home() / ".claude" / "settings.json"
 _CODEX_HOOKS_PATH = Path.home() / ".codex" / "hooks.json"
 _SESSIONSTART_HOOK_SCRIPT_PATH = _ENGRAM_DIR / "engram-sessionstart-hook.ps1"
 _SESSIONSTART_HOOK_MARKER = "engram-sessionstart-hook"
+# 원격 배치(core.integrations.remote_provision)도 같은 marker 로 settings.json 을
+# 병합한다. 여기서 갈리면 기존 항목을 못 걷어내 중복이 쌓인다.
+SESSIONSTART_HOOK_MARKER = _SESSIONSTART_HOOK_MARKER
 _PRETOOL_HOOK_SCRIPT_PATH = _ENGRAM_DIR / "engram-claude-pretool-hook.ps1"
 _PRETOOL_HOOK_POSIX_PATH = _ENGRAM_DIR / "engram-claude-pretool-hook.sh"
 _PRETOOL_HOOK_MARKER = "engram-claude-pretool-hook"
@@ -118,6 +121,14 @@ def _render_hook_script() -> str:
         "$dir = (Get-Location).Path\n"
         f'Write-Output "{directive}"\n'
     )
+
+
+def render_session_start_powershell_script() -> str:
+    """PowerShell SessionStart hook 본문 — 원격 배치(Windows 원격)도 같은 것을 쓴다.
+
+    원격용으로 따로 렌더링하면 지시문이 갈리고, 갈린 쪽은 조용히 낡는다.
+    """
+    return _render_hook_script()
 
 
 def _ps_single_quote(value: str) -> str:

@@ -34,6 +34,11 @@ param(
     # 비밀번호 프롬프트를 띄우지 않는다. TTY 가 없는 호출(자동화·GUI 캡처)에서
     # 프롬프트에 걸려 무한 대기하는 것을 막는다. 키 인증이 안 되어 있으면 즉시 실패.
     [switch]$BatchMode,
+    # skill / SessionStart hook 배치를 건너뛴다. MCP 등록만 하고 싶을 때 쓴다.
+    [switch]$SkipProvision,
+    # 원격 ~/.claude.json 을 절대 건드리지 않는다(읽기만 — 터널 실측은 그대로).
+    # 배치와는 독립이다. 이미 등록된 호스트에 skill/hook 만 놓을 때 쓴다.
+    [switch]$SkipRegister,
     [string]$Python = "",
     # 원격 파이썬 경로를 직접 지정한다. 비대화형 SSH 는 ~/.bashrc 를 읽지 않으므로
     # conda 로 설치한 파이썬은 PATH 에 안 잡힌다. 자동 탐색이 실패하면 이걸 쓴다.
@@ -212,20 +217,48 @@ fi
 # POSIX 셸이 실제로 돌았는지 = uname 결과가 센티널에 실려 왔는지로 판정한다.
 $posixRe = '(?m)^ENGRAM_PROBE=(Linux|Darwin|FreeBSD)'
 
-$probeOut = ssh -o BatchMode=yes -o ConnectTimeout=10 $Target $probeSh 2>$null
-$authOk = ($LASTEXITCODE -eq 0) -or ("$probeOut" -match $posixRe)
+# 프로브는 명령줄이 아니라 stdin 으로 POSIX 셸에 먹인다.
+#
+# 명령줄로 넘기면 원격 *로그인 셸* 이 우리 스크립트를 파싱한다. 로그인 셸이 zsh 면
+# sh 스크립트가 zsh 문법으로 해석되고, 실제로 24행(마지막 fi)에서 parse error 로 죽었다.
+# 게다가 이 .ps1 은 CRLF 라 here-string 의 줄바꿈도 CRLF 다 — 원격에는 then/fi 뒤에
+# CR 이 붙어 도착해 if 블록이 닫히지 않는다. 둘이 겹쳐 POSIX 원격을 판별 실패로 만들었다.
+#
+# 'sh -s' 는 stdin 에서 스크립트를 읽는다. 로그인 셸은 그 다섯 글자만 파싱하므로
+# 셸 방언(zsh/fish/csh)에 영향받지 않는다. CR 은 여기서 벗겨 LF 로만 보낸다.
+#
+# 주의: 이 주석에 백틱을 쓰지 말 것. 줄 끝 백틱은 PowerShell 의 줄 연속 문자라
+# 다음 줄이 코드로 이어붙는다 — 실제로 그렇게 깨졌다.
+# 끝에 'exit 0' 을 덧붙이는 이유:
+#   PowerShell 은 문자열을 네이티브 명령의 stdin 으로 파이프할 때 자기 줄바꿈(CRLF)을
+#   뒤에 붙인다. 프로브가 'fi' 로 끝나므로 원격에는 'fi' + CR 로 도착하고, 그것은 fi 가
+#   아니라서 if 블록이 닫히지 않는다 — sh 가 "end of file unexpected (expecting fi)" 로
+#   죽고, 마지막 HEALTH 줄이 사라져 터널이 멀쩡한데도 "터널이 안 뚫렸다" 로 오진했다.
+#   'exit 0' 을 마지막 문장으로 두면 그 CR 이 파싱 대상 밖으로 밀려난다.
+#   (stdin 으로 base64 를 보내는 다른 단계들은 원격에서 strip() 하므로 영향이 없다.)
+$probeShUnix = ($probeSh -replace "`r`n", "`n") + "`nexit 0`n"
+
+$probeOut = $probeShUnix | ssh -o BatchMode=yes -o ConnectTimeout=10 $Target "sh -s" 2>$null
+$sshExit = $LASTEXITCODE
+
+# 인증 실패와 "원격 명령이 실패함"은 다른 사건이다. ssh 는 자기 문제(연결 불가, 인증
+# 거부, 호스트키 불일치)일 때만 255 를 내고, 원격 명령이 실패하면 그 명령의 코드를
+# 그대로 넘긴다. 둘을 같이 묶으면 원격 스크립트가 깨진 것을 인증 실패로 오진한다 —
+# 실제로 로그인 셸이 zsh 인 호스트에서 키가 멀쩡한데도 "키 인증 실패" 를 띄웠다.
+$authOk = ($sshExit -ne 255) -or ("$probeOut" -match $posixRe)
 
 if (-not $authOk) {
     if ($BatchMode) {
         Die @"
-키 인증으로 접속할 수 없다 (-BatchMode 라 비밀번호를 묻지 않는다): $Target
-      키를 심거나(ssh-copy-id) -BatchMode 없이 대화형으로 실행할 것.
+ssh 접속 실패 (exit 255, -BatchMode 라 비밀번호를 묻지 않는다): $Target
+      인증 거부라면 키를 심고(ssh-copy-id), 그 외라면 아래로 원인을 직접 확인할 것:
+        ssh -v -o BatchMode=yes "$Target" true
 "@
     }
-    Warn "키 인증 실패 — 비밀번호를 최대 3번 물어본다 (점검/등록/검증 각 1회)."
+    Warn "ssh 접속 실패(exit 255) — 비밀번호를 최대 3번 물어본다 (점검/등록/검증 각 1회)."
     Warn "TTY 가 없는 환경이면 여기서 멈춘다. 그럴 땐 -BatchMode 를 쓸 것."
     Warn "매번 입력하기 싫으면: ssh-copy-id `"$Target`""
-    $probeOut = ssh -o ConnectTimeout=10 $Target $probeSh
+    $probeOut = $probeShUnix | ssh -o ConnectTimeout=10 $Target "sh -s"
     # 여기서 exit code 만으로 실패를 단정하면 안 된다 — Windows 원격은 POSIX 스크립트가
     # 에러를 내며 비영 코드로 끝나는 게 정상이고, 그건 다음 단계에서 처리한다.
 }
@@ -259,6 +292,8 @@ if ($probeText -notmatch $posixRe) {
 원격 셸이 POSIX 도 Windows cmd 도 아니다 — 판별 실패.
       POSIX 프로브 응답: '$($probeText.Trim())'
       cmd 프로브 응답  : '$($winOut.Trim())'
+      응답에 'parse error' 가 보이면 원격에 /bin/sh 가 없거나 로그인 셸이
+      'sh -s' 조차 처리하지 못하는 경우다. 원격에서 'sh -c "uname -s"' 를 직접 확인할 것.
       이 정보를 그대로 알려줄 것.
 "@
     }
@@ -337,16 +372,29 @@ try:
     cfg = json.loads(p.read_text(encoding="utf-8")) if p.exists() else {}
 except Exception:
     cfg = {}
-cfg.setdefault("mcpServers", {})["engram"] = {
+desired = {
     "type": "http",
     "url": "http://127.0.0.1:$RemotePort/mcp",
     "headers": {"Authorization": "Bearer " + tok},
 }
-p.write_text(json.dumps(cfg, indent=2, ensure_ascii=False), encoding="utf-8")
-try:
-    p.chmod(0o600)
-except Exception:
-    pass
+
+# ~/.claude.json 은 engram 전용 파일이 아니다 — Claude Code 자기 상태(projects, 캐시
+# 수십 개)가 같이 들어 있고, 세션이 돌고 있으면 그쪽도 수시로 쓴다. 우리가 읽고→쓰는
+# 사이에 그쪽이 쓰면 그 변경이 날아간다(lock 이 없다). 그래서 바꿀 것이 있을 때만 쓴다.
+# 이미 같은 값이면 파일을 열지 않으므로 경쟁 창 자체가 생기지 않는다.
+existing = (cfg.get("mcpServers") or {}).get("engram")
+if existing == desired:
+    print("REGISTER=UNCHANGED")
+elif "$SkipRegisterFlag" == "1":
+    print("REGISTER=SKIPPED-DIFFERS")
+else:
+    cfg.setdefault("mcpServers", {})["engram"] = desired
+    p.write_text(json.dumps(cfg, indent=2, ensure_ascii=False), encoding="utf-8")
+    try:
+        p.chmod(0o600)
+    except Exception:
+        pass
+    print("REGISTER=WRITTEN")
 
 # 같은 호출 안에서 되읽어 검증한다 — ssh 를 또 부르면 비밀번호를 또 묻는다.
 back = json.loads(p.read_text(encoding="utf-8"))
@@ -371,6 +419,8 @@ except Exception as e:
     print("PROBE=ERR %s %s" % (getattr(e, "code", ""), e))
 print("REGISTERED")
 "@
+$SkipRegisterFlag = if ($SkipRegister) { "1" } else { "0" }
+$registerPy = $registerPy.Replace('$SkipRegisterFlag', $SkipRegisterFlag)
 $b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($registerPy))
 
 # 원격 파이썬 인터프리터를 먼저 확정한다.
@@ -448,7 +498,76 @@ if ($registeredUrl -ne $expectedUrl) {
 if ($result -notmatch "REGISTERED") {
     Warn "완료 마커를 못 받았지만 원격 파일에는 정상 기록됨"
 }
-Ok "등록 완료 — 원격 ~/.claude.json → $registeredUrl"
+switch -Regex ($result) {
+    'REGISTER=UNCHANGED'        { Ok "등록 확인 — 이미 같은 값이라 파일을 쓰지 않았다"; break }
+    'REGISTER=WRITTEN'          { Ok "등록 완료 — 원격 ~/.claude.json 갱신"; break }
+    'REGISTER=SKIPPED-DIFFERS'  { Warn "등록 건너뜀(-SkipRegister) — 기존 값이 기대와 다르다"; break }
+    default                     { Ok "등록 확인 — $registeredUrl" }
+}
+Ok "engram.url = $registeredUrl"
+
+# ── skill / SessionStart hook 배치 ──────────────────────────────────────────
+# hook 과 skill 은 MCP 로 넘어오지 않는다 — 순수 클라이언트 사이드 기능이라 원격
+# 파일시스템에 물건이 있어야 한다. 렌더링은 파이썬(core.integrations.remote_provision)이
+# 단일 출처로 담당하고, 여기서는 바이트만 옮긴다.
+#
+# payload 는 stdin 으로 보낸다. skill 본문 네 개면 base64 가 수만 바이트라 argv
+# 한도(Windows CreateProcess 32767)를 넘긴다. 토큰은 payload 에 들어가지 않는다.
+if ($SkipProvision) {
+    Warn "배치 건너뜀(-SkipProvision) — 원격에 skill 과 SessionStart hook 이 없다"
+} else {
+    Step "원격에 skill / SessionStart hook 배치"
+
+    $remoteOs = if ($remoteIsWin) { "windows" } else { "posix" }
+    $provModule = "core.integrations.remote_provision"
+
+    $instB64 = (& $Python -m $provModule --emit installer) | Out-String
+    if ($LASTEXITCODE -ne 0) { Die "배치 스크립트 렌더링 실패" }
+    $instB64 = $instB64.Trim()
+
+    $payloadB64 = (& $Python -m $provModule --emit payload --remote-os $remoteOs --scope-key $scope) | Out-String
+    if ($LASTEXITCODE -ne 0) { Die "배치 payload 렌더링 실패 — .github/skills 확인" }
+    $payloadB64 = $payloadB64.Trim()
+
+    $skillList = @(& $Python -m $provModule --emit skills)
+    Ok "보낼 skill: $($skillList -join ', ')"
+
+    if ($remoteIsWin) {
+        $provCmd = "`"$remotePy`" -c `"import base64;exec(base64.b64decode('$instB64'))`""
+    } else {
+        $provCmd = "'$remotePy' -c `"import base64;exec(base64.b64decode('$instB64'))`""
+    }
+    $provRaw = ($payloadB64 | ssh $Target $provCmd 2>&1 | Out-String).Trim()
+
+    if ($provRaw -notmatch "PROVISIONED") {
+        Die @"
+배치 실패.
+      원격 응답 전문:
+        $($provRaw -replace "`n", "`n        ")
+"@
+    }
+    # 성공한 호스트를 기록한다. 이 기록이 있는 호스트만 이후 터널이 붙을 때
+    # overlay 가 자동으로 배치를 갱신한다(내용이 바뀐 경우에만 ssh 를 띄운다).
+    $recorded = (& $Python -m $provModule --emit record --host $Target --remote-python $remotePy --remote-os $remoteOs) | Out-String
+    if ($recorded -match "RECORDED") {
+        Ok "자동 갱신 등록 — 이후 터널이 붙을 때 overlay 가 알아서 최신으로 맞춘다"
+    } else {
+        Warn "자동 갱신 등록 실패 — 앞으로도 이 스크립트를 수동으로 돌려야 한다"
+    }
+
+    foreach ($line in ($provRaw -split "`n")) {
+        $line = $line.Trim()
+        if ($line -match '^SKILL=(.+)$')    { Ok "skill  $($Matches[1])" }
+        elseif ($line -match '^HOOK=(.+)$') { Ok "hook   $($Matches[1])" }
+        elseif ($line -match '^SETTINGS=(.+) registered=(\d+)$') {
+            if ($Matches[2] -eq "1") {
+                Ok "등록   $($Matches[1]) (SessionStart 1건)"
+            } else {
+                Warn "SessionStart 등록 수가 1 이 아니다: $($Matches[2]) — $($Matches[1])"
+            }
+        }
+    }
+}
 
 # ── 검증 ─────────────────────────────────────────────────────────────────────
 # 원격 호출도 위 등록과 같은 ssh 세션에서 이미 수행됐다(PROBE=). 여기서 결과만 판정한다.
@@ -489,4 +608,9 @@ if (-not (Test-Path $auditPath)) {
 }
 
 Write-Host "`n완료. 원격에서 'claude mcp list' 로 engram 이 connected 인지 확인." -ForegroundColor Green
-Write-Host "scope=$scope 로 고정되어 있으므로 원격 세션은 이 스코프의 기억을 이어받는다.`n"
+Write-Host "scope=$scope 로 고정되어 있으므로 원격 세션은 이 스코프의 기억을 이어받는다."
+if (-not $SkipProvision) {
+    Write-Host "이미 열려 있던 원격 CLI 세션은 새 skill 목록과 hook 을 다시 읽지 않는다 — 세션을 새로 시작할 것.`n"
+} else {
+    Write-Host ""
+}

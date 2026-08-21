@@ -61,6 +61,7 @@ from core.integrations.engram_bootstrap import (
     sync_sessionstart_hook,
 )
 from core.integrations.policy_guidance_state import sync_policy_guidance_disabled_marker
+from core.integrations.remote_provision import refresh_host_on_tunnel_up
 
 # Claude 모델 alias — 이 외 이름은 Ollama 로컬 모델로 간주
 _CLAUDE_MODEL_ALIASES = {
@@ -349,6 +350,10 @@ class OverlayApp:
             get_auto_reconnect=lambda: bool(
                 (load_cfg().get("mcp") or {}).get("tunnel_auto_reconnect", False)
             ),
+            # 터널이 붙으면 원격의 skill/SessionStart hook 을 최신으로 맞춘다.
+            # 이미 setup-remote.ps1 로 한 번 등록된 호스트만 대상이고, 배치 내용이
+            # 바뀌지 않았으면 ssh 를 띄우지도 않는다.
+            on_tunnel_up=refresh_host_on_tunnel_up,
         )
         # Ollama 모델 목록 백그라운드 로드
         threading.Thread(target=_load_ollama_models, daemon=True).start()

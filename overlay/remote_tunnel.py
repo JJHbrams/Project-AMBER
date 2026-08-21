@@ -239,8 +239,13 @@ class TunnelManager:
         get_port: Callable[[], int],
         poll_interval: float = 2.0,
         get_auto_reconnect: Callable[[], bool] | None = None,
+        on_tunnel_up: Callable[[str], None] | None = None,
     ):
         self._get_port = get_port
+        # 터널이 UP 으로 전이할 때 한 번 호출된다(호스트명 인자).
+        # 원격 skill/hook 자동 갱신이 여기 붙는다 — VS Code Remote-SSH 가 접속 시
+        # 서버 페이로드를 밀어넣는 것과 같은 자리다. ssh 왕복이 드니 별 스레드로 던진다.
+        self._on_tunnel_up = on_tunnel_up
         # 끊겼을 때 다시 붙을지. 기본은 끔 — 사용자가 연결을 통제한다.
         self._get_auto_reconnect = get_auto_reconnect or (lambda: False)
         self._poll_interval = poll_interval
@@ -385,11 +390,33 @@ class TunnelManager:
 
     # ── 내부 ────────────────────────────────────────────────────────────────
     def _set_state(self, t: _Tunnel, state: str, error: str = "") -> None:
+        became_up = state == STATE_UP and t.status.state != STATE_UP
         if t.status.state != state:
             t.status.since = time.monotonic()
         t.status.state = state
         if error:
             t.status.last_error = error
+        if became_up:
+            self._notify_up(t.host)
+
+    def _notify_up(self, host: str) -> None:
+        """UP 전이를 알린다. 재연결 backoff 중에는 전이가 없으므로 여기로 오지 않는다.
+
+        _set_state 는 self._lock 을 쥔 채 호출되므로 콜백을 그 안에서 실행하면
+        ssh 왕복 동안 상태머신이 멈춘다. 별 스레드로 던지고, 예외는 삼킨다 —
+        배치 실패가 터널 상태에 영향을 주면 안 된다.
+        """
+        callback = self._on_tunnel_up
+        if callback is None:
+            return
+
+        def _run() -> None:
+            try:
+                callback(host)
+            except Exception:
+                log.exception("on_tunnel_up 콜백 실패: %s", host)
+
+        threading.Thread(target=_run, name=f"tunnel-up-{host}", daemon=True).start()
 
     def _stop_locked(self, host: str) -> None:
         t = self._tunnels.get(host)

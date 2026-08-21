@@ -6,10 +6,33 @@ All notable changes to this project are documented in this file.
 
 ## [1.5.6] — 2026-08-26
 
+### Added
+
+- 원격(SSH 리버스 터널) 세션에 engram skill 과 SessionStart hook 을 배치한다.
+  `setup-remote.ps1` 이 MCP 등록에 이어 원격 `~/.claude/skills` 와
+  `~/.claude/settings.json` 을 갱신하며, MCP 도구만 쓰는 skill 만 선별해 보낸다.
+  hook 은 백엔드를 호출하지 않아 원격에 런타임 의존성이 생기지 않는다.
+  `-SkipProvision` 으로 배치만 건너뛸 수 있다.
+- 원격 배치를 터널 연결 시 자동으로 갱신한다. 한 번 등록된 호스트만 대상이며, 배치
+  내용의 지문이 그대로면 ssh 를 띄우지 않는다. 실패는 터널 상태에 영향을 주지 않는다.
+
 ### Fixed
 
 - replace 외부 오버레이의 초기 위치는 Engram이 저장한 위치를 우선하도록 릴리즈
   메타데이터를 1.5.6으로 갱신했다.
+- 원격 로그인 셸이 zsh 인 호스트에서 `setup-remote.ps1` 의 OS 판별이 실패했다.
+  프로브 스크립트를 명령줄이 아니라 stdin 으로 `sh -s` 에 넘겨, 로그인 셸의 방언과
+  무관하게 동작하도록 고쳤다.
+- 같은 프로브의 마지막 줄이 원격에서 유실돼 터널이 정상인데도 "터널이 안 뚫렸다"로
+  중단했다. PowerShell 이 네이티브 명령 stdin 에 붙이는 CRLF 가 마지막 `fi` 를
+  `fi`+CR 로 만들어 if 블록을 깨뜨린 것으로, 프로브 끝에 `exit 0` 을 두어 해결했다.
+- ssh 자신의 실패(exit 255)와 원격 명령의 실패를 구분한다. 이전에는 원격 스크립트가
+  깨진 것을 "키 인증 실패"로 오진해 키가 정상인 호스트에서 비밀번호를 물었다.
+- 원격 `~/.claude.json` 은 기록할 내용이 기존 값과 다를 때만 쓴다. 이 파일은 Claude Code
+  자기 상태가 함께 들어 있어, 불필요한 재작성은 동시 쓰기와 경쟁할 뿐이다.
+  `-SkipRegister` 로 아예 건드리지 않을 수도 있다(배치와 독립).
+- 원격 `~/.claude/settings.json` 은 병합 전에 `.engram-bak` 으로 백업하며, 백업에
+  실패하면 병합하지 않는다.
 
 ## [1.5.5] — 2026-08-19
 
