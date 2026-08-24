@@ -16,14 +16,16 @@ with patch("core.storage.db.initialize_db"), patch.object(
 
 
 class MCPDirectiveToolTests(unittest.TestCase):
-    @patch.object(server, "begin_registration", return_value={"draft_id": "draft-1"})
-    def test_add_tool_starts_draft_and_never_calls_persistent_mutator(self, begin):
+    @patch.object(server, "add_directive")
+    @patch.object(server, "begin_registration", return_value={"status": "draft_started", "draft_id": "draft-1"})
+    def test_add_tool_starts_draft_and_never_calls_persistent_mutator(self, begin, persistent_add):
         result = server.engram_add_directive("demo", "rule", "test-agent", "session-a")
         self.assertEqual(result["status"], "registration_required")
         self.assertEqual(result["draft_id"], "draft-1")
         begin.assert_called_once()
+        persistent_add.assert_not_called()
 
-    @patch.object(server, "begin_registration", return_value={"draft_id": "draft-2"})
+    @patch.object(server, "begin_registration", return_value={"status": "draft_started", "draft_id": "draft-2"})
     @patch.object(server, "get_directive", return_value={"key": "demo", "content": "old"})
     def test_update_tool_starts_draft_without_persisting(self, _existing, begin):
         result = server.engram_update_directive("demo", "test-agent", "session-a", content="new")

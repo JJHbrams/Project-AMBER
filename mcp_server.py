@@ -1601,7 +1601,7 @@ def engram_add_directive(
         "trigger_data": _parse_optional_json_param(trigger_data_json, expect=dict, field_name="trigger_data_json") or {},
         "workflow_skill_id": workflow_skill_id, "guard_id": guard_id,
     })
-    return {"status": "registration_required", "message": "No directive was stored. Complete, preview, approve, then commit this draft.", **draft}
+    return {**draft, "status": "registration_required", "message": "No directive was stored. Complete, preview, approve, then commit this draft."}
 
 
 @engramMCP.tool()
@@ -1644,7 +1644,7 @@ def engram_update_directive(
     if workflow_skill_id is not None: candidate["workflow_skill_id"] = workflow_skill_id
     if guard_id is not None: candidate["guard_id"] = guard_id
     draft = begin_registration(actor, session_id, candidate)
-    return {"status": "registration_required", "message": "No directive was changed. Complete, preview, approve, then commit this draft.", **draft}
+    return {**draft, "status": "registration_required", "message": "No directive was changed. Complete, preview, approve, then commit this draft."}
 
 
 @engramMCP.tool()
