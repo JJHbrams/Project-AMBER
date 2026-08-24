@@ -272,6 +272,19 @@ def initialize_db(db_dir: "str | Path | None" = None):
                 created_at TEXT DEFAULT (datetime('now','localtime'))
             );
 
+            CREATE TABLE IF NOT EXISTS directive_registration_drafts (
+                draft_id TEXT PRIMARY KEY,
+                payload TEXT NOT NULL DEFAULT '{}',
+                digest TEXT NOT NULL DEFAULT '',
+                target_digest TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'draft',
+                approval_digest TEXT NOT NULL DEFAULT '',
+                approval_token_hash TEXT NOT NULL DEFAULT '',
+                approval_expires_at INTEGER NOT NULL DEFAULT 0,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS discord_queue (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
                 guild_id    TEXT NOT NULL,
@@ -411,6 +424,21 @@ def initialize_db(db_dir: "str | Path | None" = None):
         _add_column_if_missing(conn, "directives", "workflow_skill_id", "TEXT NOT NULL DEFAULT ''")
         _add_column_if_missing(conn, "directives", "guard_id", "TEXT NOT NULL DEFAULT ''")
         _add_column_if_missing(conn, "directives", "legacy_migration_markers", "TEXT NOT NULL DEFAULT '[]'")
+
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS directive_registration_drafts (
+                draft_id TEXT PRIMARY KEY,
+                payload TEXT NOT NULL DEFAULT '{}',
+                digest TEXT NOT NULL DEFAULT '',
+                target_digest TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'draft',
+                approval_digest TEXT NOT NULL DEFAULT '',
+                approval_token_hash TEXT NOT NULL DEFAULT '',
+                approval_expires_at INTEGER NOT NULL DEFAULT 0,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            )
+        """)
 
         rows = conn.execute(
             """
@@ -556,6 +584,10 @@ def initialize_db(db_dir: "str | Path | None" = None):
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_directive_policy_audit_decision_created_at "
             "ON directive_policy_audit(decision, created_at DESC)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_directive_registration_drafts_status_updated "
+            "ON directive_registration_drafts(status, updated_at DESC)"
         )
     conn.execute("CREATE INDEX IF NOT EXISTS idx_working_memory_expires ON working_memory(expires_at)")
 

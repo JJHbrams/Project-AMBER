@@ -65,6 +65,10 @@ from core.context.directives import (
     update_directive,
     remove_directive,
 )
+from core.context.directive_registration import (
+    approve_registration, begin_registration, commit_registration,
+    complete_registration, preview_registration, registration_schema,
+)
 from core.observability.activity import log_activity, get_recent_activities, render_activity_for_reflection
 from core.integrations.copilot_bridge import ask_copilot
 from core.integrations.git_policy_hook import ensure_repo_policy
@@ -1588,28 +1592,14 @@ def engram_add_directive(
     - trigger_data_json: structured trigger JSON object
     - workflow_skill_id / guard_id: structured policy 식별자
     - legacy_migration_markers_json: migration marker JSON string array"""
-    result = add_directive(
-        key,
-        content,
-        source,
-        scope,
-        priority,
-        trigger_type,
-        enforcement_level=enforcement_level if enforcement_level else None,
-        trigger_data=_parse_optional_json_param(
-            trigger_data_json,
-            expect=dict,
-            field_name="trigger_data_json",
-        ),
-        workflow_skill_id=workflow_skill_id if workflow_skill_id else None,
-        guard_id=guard_id if guard_id else None,
-        legacy_migration_markers=_parse_optional_json_param(
-            legacy_migration_markers_json,
-            expect=list,
-            field_name="legacy_migration_markers_json",
-        ),
-    )
-    return {"status": "directive_added", **result}
+    draft = begin_registration({
+        "key": key, "content": content, "source": source, "scope": scope,
+        "priority": priority, "trigger_type": trigger_type,
+        "enforcement_level": enforcement_level,
+        "trigger_data": _parse_optional_json_param(trigger_data_json, expect=dict, field_name="trigger_data_json") or {},
+        "workflow_skill_id": workflow_skill_id, "guard_id": guard_id,
+    })
+    return {"status": "registration_required", "message": "No directive was stored. Complete, preview, approve, then commit this draft.", **draft}
 
 
 @engramMCP.tool()
@@ -1639,32 +1629,54 @@ def engram_update_directive(
     trigger_type: 'always' | 'wiki' | 'code' | 'git' | 'reflection'
     enforcement_level: 'advisory' | 'workflow' | 'blocking'
     workflow_skill_id / guard_id 는 빈 문자열("")로 명시하면 기존 값을 지웁니다."""
-    updated = update_directive(
-        key,
-        content=content if content else None,
-        scope=scope if scope else None,
-        priority=priority if priority >= 0 else None,
-        active=active,
-        trigger_type=trigger_type if trigger_type else None,
-        enforcement_level=enforcement_level if enforcement_level else None,
-        trigger_data=_parse_optional_json_param(
-            trigger_data_json,
-            expect=dict,
-            field_name="trigger_data_json",
-        ),
-        workflow_skill_id=workflow_skill_id,
-        guard_id=guard_id,
-        legacy_migration_markers=_parse_optional_json_param(
-            legacy_migration_markers_json,
-            expect=list,
-            field_name="legacy_migration_markers_json",
-        ),
-    )
-    return {
-        "status": "directive_updated" if updated else "not_found",
-        "key": key,
-        "directive": get_directive(key) if updated else None,
-    }
+    candidate = dict(get_directive(key) or {"key": key})
+    if content: candidate["content"] = content
+    if scope: candidate["scope"] = scope
+    if priority >= 0: candidate["priority"] = priority
+    candidate["active"] = active
+    if trigger_type: candidate["trigger_type"] = trigger_type
+    if enforcement_level: candidate["enforcement_level"] = enforcement_level
+    if trigger_data_json: candidate["trigger_data"] = _parse_optional_json_param(trigger_data_json, expect=dict, field_name="trigger_data_json")
+    if workflow_skill_id is not None: candidate["workflow_skill_id"] = workflow_skill_id
+    if guard_id is not None: candidate["guard_id"] = guard_id
+    draft = begin_registration(candidate)
+    return {"status": "registration_required", "message": "No directive was changed. Complete, preview, approve, then commit this draft.", **draft}
+
+
+@engramMCP.tool()
+def engram_get_directive_registration_schema() -> dict:
+    """Server-owned fixed directive registration choices and conditional requirements."""
+    return registration_schema()
+
+
+@engramMCP.tool()
+def engram_begin_directive_registration(initial_json: str = "") -> dict:
+    """Create a draft only; this never writes a directive row."""
+    return begin_registration(_parse_optional_json_param(initial_json, expect=dict, field_name="initial_json") or {})
+
+
+@engramMCP.tool()
+def engram_complete_directive_registration(draft_id: str, fields_json: str) -> dict:
+    """Validate a fixed-choice directive draft and prepare it for preview."""
+    return complete_registration(draft_id, _parse_optional_json_param(fields_json, expect=dict, field_name="fields_json") or {})
+
+
+@engramMCP.tool()
+def engram_preview_directive_registration(draft_id: str) -> dict:
+    """Render the exact canonical directive, effective behavior, effect, and digest."""
+    return preview_registration(draft_id)
+
+
+@engramMCP.tool()
+def engram_approve_directive_registration(draft_id: str, digest: str, approved: bool = False) -> dict:
+    """Record explicit approval for one exact preview digest; returns a one-time token."""
+    return approve_registration(draft_id, digest, approved)
+
+
+@engramMCP.tool()
+def engram_commit_directive_registration(draft_id: str, digest: str, approval_token: str) -> dict:
+    """The only public MCP path that persists an approved directive."""
+    return commit_registration(draft_id, digest, approval_token)
 
 
 @engramMCP.tool()

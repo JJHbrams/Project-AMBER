@@ -303,6 +303,15 @@ def add_directive(
     return stored or directive
 
 
+def provision_directive_trusted(**fields: Any) -> dict:
+    """Compatibility-only provisioning primitive for installer/tests.
+
+    Public callers must use ``core.context.directive_registration``; this name
+    makes the deliberate bypass visible to bootstrap and migration code.
+    """
+    return add_directive(**fields)
+
+
 def get_directive(key: str) -> Optional[Dict[str, Any]]:
     conn = get_connection()
     try:

@@ -16,35 +16,19 @@ with patch("core.storage.db.initialize_db"), patch.object(
 
 
 class MCPDirectiveToolTests(unittest.TestCase):
-    @patch.object(server, "get_directive", return_value={"key": "demo"})
-    @patch.object(server, "update_directive", return_value=True)
-    def test_update_tool_leaves_workflow_and_guard_omitted_when_not_provided(
-        self,
-        mock_update_directive,
-        _mock_get_directive,
-    ):
-        server.engram_update_directive("demo")
+    @patch.object(server, "begin_registration", return_value={"draft_id": "draft-1"})
+    def test_add_tool_starts_draft_and_never_calls_persistent_mutator(self, begin):
+        result = server.engram_add_directive("demo", "rule")
+        self.assertEqual(result["status"], "registration_required")
+        self.assertEqual(result["draft_id"], "draft-1")
+        begin.assert_called_once()
 
-        _, kwargs = mock_update_directive.call_args
-        self.assertIsNone(kwargs["workflow_skill_id"])
-        self.assertIsNone(kwargs["guard_id"])
-
-    @patch.object(server, "get_directive", return_value={"key": "demo", "workflow_skill_id": "", "guard_id": ""})
-    @patch.object(server, "update_directive", return_value=True)
-    def test_update_tool_can_clear_workflow_and_guard_with_empty_string(
-        self,
-        mock_update_directive,
-        _mock_get_directive,
-    ):
-        server.engram_update_directive(
-            "demo",
-            workflow_skill_id="",
-            guard_id="",
-        )
-
-        _, kwargs = mock_update_directive.call_args
-        self.assertEqual(kwargs["workflow_skill_id"], "")
-        self.assertEqual(kwargs["guard_id"], "")
+    @patch.object(server, "begin_registration", return_value={"draft_id": "draft-2"})
+    @patch.object(server, "get_directive", return_value={"key": "demo", "content": "old"})
+    def test_update_tool_starts_draft_without_persisting(self, _existing, begin):
+        result = server.engram_update_directive("demo", content="new")
+        self.assertEqual(result["status"], "registration_required")
+        self.assertEqual(begin.call_args.args[0]["content"], "new")
 
     @patch.object(server, "preflight_directives", return_value={"decision": "allow"})
     def test_preflight_tool_passes_structured_guard_context(self, mock_preflight):
