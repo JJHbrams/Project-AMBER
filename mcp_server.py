@@ -1673,7 +1673,13 @@ def engram_preview_directive_registration(draft_id: str, actor: str, session_id:
 
 @engramMCP.tool()
 def engram_approve_directive_registration(draft_id: str, actor: str, session_id: str, digest: str, approved: bool = False) -> dict:
-    """Record explicit approval for one exact preview digest; returns a one-time token."""
+    """Record explicit approval for one exact preview digest; returns a one-time token.
+
+    First call preview, present its returned canonical directive and effective
+    behavior to the user, and call this tool only after the user explicitly
+    approves it. The server enforces preview-before-approval, although the MCP
+    host cannot cryptographically prove the visual presentation.
+    """
     return approve_registration(draft_id, actor, session_id, digest, approved)
 
 

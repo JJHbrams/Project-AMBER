@@ -64,6 +64,22 @@ class DirectiveRegistrationTests(unittest.TestCase):
         with self.assertRaises(self.r.RegistrationError):
             self.r.commit_registration(draft["draft_id"], self.actor, self.session_id, preview["digest"], approval["approval_token"])
 
+    def test_approval_requires_preview_of_current_digest(self):
+        draft = self.r.begin_registration(self.actor, self.session_id)
+        first = self.r.complete_registration(draft["draft_id"], self.actor, self.session_id, self.payload())
+        with self.assertRaisesRegex(self.r.RegistrationError, "preview"):
+            self.r.approve_registration(draft["draft_id"], self.actor, self.session_id, first["digest"], True)
+        preview = self.r.preview_registration(draft["draft_id"], self.actor, self.session_id)
+        changed = self.r.complete_registration(draft["draft_id"], self.actor, self.session_id, self.payload(content="Changed after preview."))
+        self.assertNotEqual(preview["digest"], changed["digest"])
+        with self.assertRaisesRegex(self.r.RegistrationError, "digest"):
+            self.r.approve_registration(draft["draft_id"], self.actor, self.session_id, preview["digest"], True)
+        with self.assertRaisesRegex(self.r.RegistrationError, "preview"):
+            self.r.approve_registration(draft["draft_id"], self.actor, self.session_id, changed["digest"], True)
+        refreshed = self.r.preview_registration(draft["draft_id"], self.actor, self.session_id)
+        approval = self.r.approve_registration(draft["draft_id"], self.actor, self.session_id, refreshed["digest"], True)
+        self.assertEqual(approval["status"], "approved")
+
     def test_actor_session_token_and_expiry_are_bound(self):
         draft = self.r.begin_registration(self.actor, self.session_id)
         with self.assertRaises(self.r.RegistrationError):

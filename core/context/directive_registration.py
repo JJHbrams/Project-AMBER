@@ -9,7 +9,7 @@ import uuid
 from typing import Any
 
 from core.common.sanitizer import sanitize
-from core.context.directive_policy import coerce_directive_record, normalize_trigger_data
+from core.context.directive_policy import coerce_directive_record, legacy_trigger_data_from_trigger_type, normalize_trigger_data
 from core.context.guard_execution import registered_guard_ids
 from core.storage.db import get_connection
 
@@ -136,7 +136,12 @@ def canonicalize(payload: dict[str, Any]) -> dict[str, Any]:
     if raw["trigger_type"] == "conditional" and not _meaningful_conditions(normalized_trigger):
         raise RegistrationError("conditional trigger requires meaningful structured conditions")
     # A structured condition must not silently turn into an always match.
-    if raw["trigger_type"] != "always" and raw["trigger_data"] and not _meaningful_conditions(normalized_trigger):
+    if (
+        raw["trigger_type"] != "always"
+        and raw["trigger_data"]
+        and normalized_trigger != legacy_trigger_data_from_trigger_type(raw["trigger_type"])
+        and not _meaningful_conditions(normalized_trigger)
+    ):
         raise RegistrationError("structured trigger requires meaningful conditions")
     raw["trigger_data"] = normalized_trigger
     raw["legacy_migration_markers"] = []
@@ -192,7 +197,7 @@ def complete_registration(draft_id: str, actor: str, session_id: str, fields: di
         target_digest = _target_snapshot(conn, directive["key"])
         digest = _digest(directive)
         with conn:
-            conn.execute("UPDATE directive_registration_drafts SET payload = ?, digest = ?, target_digest = ?, updated_at = ? WHERE draft_id = ?", (_canonical_json(directive), digest, target_digest, int(time.time()), draft_id))
+            conn.execute("UPDATE directive_registration_drafts SET payload = ?, digest = ?, target_digest = ?, preview_digest = '', previewed_at = 0, approval_digest = '', approval_token_hash = '', approval_expires_at = 0, updated_at = ? WHERE draft_id = ?", (_canonical_json(directive), digest, target_digest, int(time.time()), draft_id))
         return {"status": "draft_completed", "draft_id": draft_id, "directive": directive, "digest": digest}
     finally:
         conn.close()
@@ -211,6 +216,11 @@ def preview_registration(draft_id: str, actor: str, session_id: str) -> dict[str
             behavior += f" using workflow {directive['workflow_skill_id']}"
         if directive["guard_id"]:
             behavior += f" using guard {directive['guard_id']}"
+        with conn:
+            now = int(time.time())
+            cursor = conn.execute("UPDATE directive_registration_drafts SET preview_digest = ?, previewed_at = ?, updated_at = ? WHERE draft_id = ? AND status = 'draft' AND digest = ?", (row["digest"], now, now, draft_id, row["digest"]))
+            if cursor.rowcount != 1:
+                raise RegistrationError("draft changed while previewing; preview again")
         return {"status": "preview", "draft_id": draft_id, "directive": directive, "effective_behavior": behavior, "effect": effect, "digest": row["digest"], "approval_required": True}
     finally:
         conn.close()
@@ -224,6 +234,8 @@ def approve_registration(draft_id: str, actor: str, session_id: str, digest: str
         row = _owned_draft(conn, draft_id, actor, session_id)
         if row["status"] != "draft" or not row["digest"] or not secrets.compare_digest(str(row["digest"]), str(digest)):
             raise RegistrationError("approval digest does not match the current draft")
+        if not row["previewed_at"] or not secrets.compare_digest(str(row["preview_digest"]), str(digest)):
+            raise RegistrationError("preview the exact current digest before requesting approval")
         token = secrets.token_urlsafe(32)
         expires_at = int(time.time()) + APPROVAL_TTL_SECONDS
         with conn:

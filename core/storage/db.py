@@ -277,6 +277,8 @@ def initialize_db(db_dir: "str | Path | None" = None):
                 payload TEXT NOT NULL DEFAULT '{}',
                 digest TEXT NOT NULL DEFAULT '',
                 target_digest TEXT NOT NULL DEFAULT '',
+                preview_digest TEXT NOT NULL DEFAULT '',
+                previewed_at INTEGER NOT NULL DEFAULT 0,
                 status TEXT NOT NULL DEFAULT 'draft',
                 approval_digest TEXT NOT NULL DEFAULT '',
                 approval_token_hash TEXT NOT NULL DEFAULT '',
@@ -433,6 +435,8 @@ def initialize_db(db_dir: "str | Path | None" = None):
                 payload TEXT NOT NULL DEFAULT '{}',
                 digest TEXT NOT NULL DEFAULT '',
                 target_digest TEXT NOT NULL DEFAULT '',
+                preview_digest TEXT NOT NULL DEFAULT '',
+                previewed_at INTEGER NOT NULL DEFAULT 0,
                 status TEXT NOT NULL DEFAULT 'draft',
                 approval_digest TEXT NOT NULL DEFAULT '',
                 approval_token_hash TEXT NOT NULL DEFAULT '',
@@ -445,6 +449,8 @@ def initialize_db(db_dir: "str | Path | None" = None):
         """)
         _add_column_if_missing(conn, "directive_registration_drafts", "actor", "TEXT NOT NULL DEFAULT ''")
         _add_column_if_missing(conn, "directive_registration_drafts", "session_id", "TEXT NOT NULL DEFAULT ''")
+        _add_column_if_missing(conn, "directive_registration_drafts", "preview_digest", "TEXT NOT NULL DEFAULT ''")
+        _add_column_if_missing(conn, "directive_registration_drafts", "previewed_at", "INTEGER NOT NULL DEFAULT 0")
 
         rows = conn.execute(
             """
