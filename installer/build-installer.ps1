@@ -64,7 +64,7 @@ function Invoke-IsccCompile(
         }
     }
     try {
-        $versionDefine = "/DAppVersion=`"$AppVersion`""
+        $versionDefine = "/DAppVersion=$AppVersion"
         & $Iscc "/DBuildCompression=$Compression" `
             "/DBuildSolidCompression=$SolidCompression" `
             "/DBuildOutputSuffix=$OutputSuffix" $versionDefine $compileIss |

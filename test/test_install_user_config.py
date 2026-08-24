@@ -77,7 +77,8 @@ session:
         )
         self.assertIn("$frozenManifest.version.version", build_installer)
         self.assertIn("Frozen build version is not Major.Minor.Patch.Build", build_installer)
-        self.assertIn('$versionDefine = "/DAppVersion=', build_installer)
+        self.assertIn('$versionDefine = "/DAppVersion=$AppVersion"', build_installer)
+        self.assertNotIn('/DAppVersion=`"$AppVersion`"', build_installer)
 
     def test_configure_waits_for_every_frozen_installer_role_exit_code(self):
         configure = (ROOT / "installer" / "configure.ps1").read_text(encoding="utf-8-sig")

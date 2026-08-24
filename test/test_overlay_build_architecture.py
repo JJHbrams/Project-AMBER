@@ -263,7 +263,8 @@ class OverlayBuildArchitectureTests(unittest.TestCase):
         self.assertIn("StringStruct('FileVersion', _version_text)", spec)
         self.assertIn("StringStruct('ProductVersion', _version_text)", spec)
         self.assertIn("$frozenManifest.version.version", release)
-        self.assertIn('$versionDefine = "/DAppVersion=', release)
+        self.assertIn('$versionDefine = "/DAppVersion=$AppVersion"', release)
+        self.assertNotIn('/DAppVersion=`"$AppVersion`"', release)
         self.assertIn("#ifndef AppVersion", iss)
         self.assertIn("OutputBaseFilename=EngramOverlay_{#AppVersion}", iss)
 
