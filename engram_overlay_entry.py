@@ -13,6 +13,8 @@ import urllib.request
 import urllib.error
 import ctypes
 
+from core.install.versioning import resolve_version
+
 
 def _prepare_frozen_streams() -> None:
     """Give console-oriented libraries valid streams in a windowed executable."""
@@ -332,6 +334,7 @@ try:
         ],
     )
     _raw_log("[entry] logging 설정 완료")
+    _raw_log(f"[entry] Engram Overlay version={resolve_version().version}")
 
     _raw_log("[entry] 기존 overlay 종료 처리 시작")
     old_overlay_stopped = _shutdown_existing_overlay()

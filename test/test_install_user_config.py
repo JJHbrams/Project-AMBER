@@ -61,14 +61,23 @@ session:
         self.assertIn('["memory", "auto_checkpoint", "external_daily_dir"]', settings)
         self.assertNotIn('text="자동 체크포인트"', settings)
 
-    def test_installer_version_is_1_5_6(self):
+    def test_installer_version_uses_four_part_frozen_build_metadata(self):
+        base_version = (ROOT / "VERSION").read_text(encoding="utf-8-sig").strip()
         iss = (ROOT / "installer" / "engram-overlay.iss").read_text(encoding="utf-8-sig")
+        build_installer = (ROOT / "installer" / "build-installer.ps1").read_text(
+            encoding="utf-8-sig"
+        )
 
-        self.assertIn('#define AppVersion "1.5.6"', iss)
+        self.assertEqual(base_version, "1.5.5")
+        self.assertIn("#ifndef AppVersion", iss)
+        self.assertIn('#define AppVersion "0.0.0.0"', iss)
         self.assertIn(
             'OutputBaseFilename=EngramOverlay_{#AppVersion}{#BuildOutputSuffix}_x64-setup',
             iss,
         )
+        self.assertIn("$frozenManifest.version.version", build_installer)
+        self.assertIn("Frozen build version is not Major.Minor.Patch.Build", build_installer)
+        self.assertIn('$versionDefine = "/DAppVersion=', build_installer)
 
     def test_configure_waits_for_every_frozen_installer_role_exit_code(self):
         configure = (ROOT / "installer" / "configure.ps1").read_text(encoding="utf-8-sig")

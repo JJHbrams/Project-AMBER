@@ -14,6 +14,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from core.install.versioning import resolve_version
+
 
 def evaluate_runtime_contract() -> dict[str, Any]:
     if not getattr(sys, "frozen", False):
@@ -49,9 +51,13 @@ def evaluate_runtime_contract() -> dict[str, Any]:
     dashboard_cfg = cfg.get("dashboard") if isinstance(cfg.get("dashboard"), dict) else {}
     frozen = bool(getattr(sys, "frozen", False))
     source_root = "" if frozen else str(Path(__file__).resolve().parents[2])
+    version = resolve_version()
     return {
         "contract_version": 1,
         "runtime": "frozen" if frozen else "source",
+        "version": version.version,
+        "version_build_source": version.build_source,
+        "version_commit": version.commit,
         "entrypoint": "engram_overlay_entry.py",
         "pid": os.getpid(),
         "python": str(Path(sys.executable).resolve()),

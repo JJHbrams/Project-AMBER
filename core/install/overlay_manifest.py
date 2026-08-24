@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from core.install.model_manifest import validate_manifest
+from core.install.versioning import resolve_version
 
 
 MANIFEST_NAME = "build-manifest.json"
@@ -59,6 +60,7 @@ def input_files(root: Path) -> list[Path]:
         "installer/pyi_rth_engram_tk.py",
         "requirements.txt",
         "environment.yml",
+        "VERSION",
     ):
         path = root / name
         if path.is_file():
@@ -140,9 +142,11 @@ def make_manifest(
     inputs = input_hashes(root)
     if not inputs:
         raise ValueError("overlay build manifest cannot be written without inputs")
+    version = resolve_version(root)
     return {
         "schema_version": 1,
         "mode": mode,
+        "version": version.to_dict(),
         "environment": environment_metadata(),
         "inputs": inputs,
         "embedding_model": {
@@ -199,6 +203,8 @@ def validate_build(
         return False, f"build manifest unreadable: {exc}"
     if manifest.get("schema_version") != 1:
         return False, "unsupported build manifest schema"
+    if manifest.get("version") != resolve_version(root).to_dict():
+        return False, "overlay build version changed"
     manifest_inputs = manifest.get("inputs")
     if not isinstance(manifest_inputs, dict) or not manifest_inputs:
         return False, "overlay build manifest has no inputs"

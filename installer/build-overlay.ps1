@@ -20,6 +20,7 @@ $DefaultDist = Join-Path $Root "dist\engram-overlay"
 $ModelDir = Join-Path $Root "resource\embedding-model"
 $ModelManifest = Join-Path $ModelDir "manifest.json"
 $ModelId = "intfloat/multilingual-e5-small"
+$VersionSnapshot = Join-Path $Root "build\engram-version.json"
 $ProcessStopHelper = Join-Path $PSScriptRoot "stop-engram-processes.ps1"
 
 if (-not (Test-Path $ProcessStopHelper)) {
@@ -349,6 +350,18 @@ try {
         throw "Embedding model validation/export failed: $(Get-LastOutput $modelCheck.Output)"
     }
     Write-OverlayOk "Embedding model manifest validated"
+
+    Write-OverlayStep "Resolving four-part build version"
+    $versionResult = Invoke-OverlayPython $python @(
+        "-m", "core.install.versioning",
+        "--root", $Root,
+        "--write-snapshot", $VersionSnapshot
+    )
+    if ($versionResult.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $VersionSnapshot)) {
+        throw "Version snapshot generation failed: $(Get-LastOutput $versionResult.Output)"
+    }
+    $versionMetadata = Get-Content -LiteralPath $VersionSnapshot -Raw | ConvertFrom-Json
+    Write-OverlayOk "Build version: $($versionMetadata.version) ($($versionMetadata.build_source))"
 
     $validation = Invoke-OverlayPython $python @(
         "-m", "core.install.overlay_manifest",

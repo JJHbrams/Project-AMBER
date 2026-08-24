@@ -1,8 +1,52 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+import json
 import sys
 from pathlib import Path
 from PyInstaller.utils.hooks import collect_all
+from PyInstaller.utils.win32.versioninfo import (
+    FixedFileInfo,
+    StringFileInfo,
+    StringStruct,
+    StringTable,
+    VarFileInfo,
+    VarStruct,
+    VSVersionInfo,
+)
+
+
+_version_snapshot_path = Path('build') / 'engram-version.json'
+if not _version_snapshot_path.is_file():
+    raise FileNotFoundError(f'Version snapshot missing: {_version_snapshot_path}')
+_version_snapshot = json.loads(_version_snapshot_path.read_text(encoding='utf-8'))
+_version_text = _version_snapshot['version']
+_version_tuple = tuple(int(part) for part in _version_text.split('.'))
+if len(_version_tuple) != 4:
+    raise ValueError(f'Invalid four-part version: {_version_text}')
+_windows_version = VSVersionInfo(
+    ffi=FixedFileInfo(
+        filevers=_version_tuple,
+        prodvers=_version_tuple,
+        mask=0x3F,
+        flags=0x0,
+        OS=0x40004,
+        fileType=0x1,
+        subtype=0x0,
+        date=(0, 0),
+    ),
+    kids=[
+        StringFileInfo([StringTable('040904B0', [
+            StringStruct('CompanyName', 'DRTECH'),
+            StringStruct('FileDescription', 'Engram Overlay'),
+            StringStruct('FileVersion', _version_text),
+            StringStruct('InternalName', 'engram-overlay'),
+            StringStruct('OriginalFilename', 'engram-overlay.exe'),
+            StringStruct('ProductName', 'Engram Overlay'),
+            StringStruct('ProductVersion', _version_text),
+        ])]),
+        VarFileInfo([VarStruct('Translation', [1033, 1200])]),
+    ],
+)
 
 
 def _collect_tcl_tk() -> list[tuple[str, str]]:
@@ -122,6 +166,7 @@ a = Analysis(
         # runtime_config(core/config/runtime_config.py)가 읽는 파일.
         # 누락 시 resolve_runtime_path 가 못 찾아 tools.disabled 등이 조용히 무시된다.
         ('config\\config.yaml', 'config'),
+        (str(_version_snapshot_path), '.'),
         # Streamlit executes the dashboard entry as a raw source file.
         ('core\\dashboard\\app.py', 'core\\dashboard'),
         ('core\\dashboard\\assets', 'core\\dashboard\\assets'),
@@ -159,6 +204,7 @@ exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
     icon=['resource\\icon.png'],
+    version=_windows_version,
 )
 
 dashboard_exe = EXE(
@@ -179,6 +225,7 @@ dashboard_exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
     icon=['resource\\icon.png'],
+    version=_windows_version,
 )
 
 coll = COLLECT(

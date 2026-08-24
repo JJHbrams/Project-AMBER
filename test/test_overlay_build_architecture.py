@@ -100,6 +100,8 @@ class OverlayBuildArchitectureTests(unittest.TestCase):
     def test_build_manifest_reuse_and_input_invalidation(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary) / "build" / "overlay-worktree"
+            (root / "VERSION").parent.mkdir(parents=True, exist_ok=True)
+            (root / "VERSION").write_text("1.5.5\n", encoding="utf-8")
             (root / "overlay").mkdir(parents=True)
             (root / "overlay" / "main.py").write_text("value = 1", encoding="utf-8")
             model_dir = root / "resource" / "embedding-model"
@@ -127,7 +129,17 @@ class OverlayBuildArchitectureTests(unittest.TestCase):
 
             valid, reason = validate_build(root, artifact, model_manifest)
             self.assertTrue(valid, reason)
+            self.assertRegex(build_manifest["version"]["version"], r"^1\.5\.5\.\d+$")
 
+            build_manifest["version"]["version"] = "0.0.0.0"
+            (artifact / "build-manifest.json").write_text(
+                json.dumps(build_manifest), encoding="utf-8"
+            )
+            valid, reason = validate_build(root, artifact, model_manifest)
+            self.assertFalse(valid)
+            self.assertIn("version", reason)
+
+            build_manifest = make_manifest(root, model_manifest, "rebuild")
             build_manifest["inputs"] = {}
             (artifact / "build-manifest.json").write_text(
                 json.dumps(build_manifest), encoding="utf-8"
@@ -160,6 +172,7 @@ class OverlayBuildArchitectureTests(unittest.TestCase):
     def test_user_config_does_not_invalidate_frozen_bundle(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
+            (root / "VERSION").write_text("1.5.5\n", encoding="utf-8")
             (root / "overlay").mkdir()
             (root / "overlay" / "main.py").write_text("value = 1", encoding="utf-8")
             config = root / "config"
@@ -232,6 +245,27 @@ class OverlayBuildArchitectureTests(unittest.TestCase):
         self.assertIn('"--ensure"', build)
         self.assertIn('"--allow-download"', build)
         self.assertNotIn("--refresh-manifest", build)
+
+    def test_frozen_and_installer_versions_come_from_canonical_snapshot(self):
+        spec = (ROOT / "engram-overlay.spec").read_text(encoding="utf-8")
+        build = (ROOT / "installer" / "build-overlay.ps1").read_text(
+            encoding="utf-8-sig"
+        )
+        release = (ROOT / "installer" / "build-installer.ps1").read_text(
+            encoding="utf-8-sig"
+        )
+        iss = (ROOT / "installer" / "engram-overlay.iss").read_text(
+            encoding="utf-8-sig"
+        )
+
+        self.assertIn('"--write-snapshot", $VersionSnapshot', build)
+        self.assertEqual(spec.count("version=_windows_version"), 2)
+        self.assertIn("StringStruct('FileVersion', _version_text)", spec)
+        self.assertIn("StringStruct('ProductVersion', _version_text)", spec)
+        self.assertIn("$frozenManifest.version.version", release)
+        self.assertIn('$versionDefine = "/DAppVersion=', release)
+        self.assertIn("#ifndef AppVersion", iss)
+        self.assertIn("OutputBaseFilename=EngramOverlay_{#AppVersion}", iss)
 
     def test_mcp_check_requires_fastmcp_import(self):
         requirements = (ROOT / "requirements.txt").read_text(encoding="utf-8")

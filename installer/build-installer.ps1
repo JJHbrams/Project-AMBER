@@ -41,7 +41,8 @@ function Invoke-FrozenRole([string]$Role) {
 function Invoke-IsccCompile(
     [string]$Compression,
     [string]$SolidCompression,
-    [string]$OutputSuffix
+    [string]$OutputSuffix,
+    [string]$AppVersion
 ) {
     $mappedDrive = ""
     $compileIss = $Iss
@@ -63,9 +64,10 @@ function Invoke-IsccCompile(
         }
     }
     try {
+        $versionDefine = "/DAppVersion=`"$AppVersion`""
         & $Iscc "/DBuildCompression=$Compression" `
             "/DBuildSolidCompression=$SolidCompression" `
-            "/DBuildOutputSuffix=$OutputSuffix" $compileIss |
+            "/DBuildOutputSuffix=$OutputSuffix" $versionDefine $compileIss |
             Where-Object { $_ -notmatch '^\s+Compressing:' } |
             ForEach-Object { Write-Host $_ }
         $compileExit = [int]$LASTEXITCODE
@@ -130,10 +132,15 @@ if (-not (Test-Path $DashboardExe)) {
 Write-Ok "번들 확인: $DistExe"
 
 # ── 2) Resolve output and validated installer cache ──────────
-$issText = Get-Content -LiteralPath $Iss -Raw
-$versionMatch = [regex]::Match($issText, '#define\s+AppVersion\s+"([^"]+)"')
-if (-not $versionMatch.Success) { Write-Err "AppVersion not found in $Iss" }
-$version = $versionMatch.Groups[1].Value
+try {
+    $frozenManifest = Get-Content -LiteralPath $BuildManifestPath -Raw | ConvertFrom-Json
+    $version = [string]$frozenManifest.version.version
+} catch {
+    Write-Err "Frozen build version not found in $BuildManifestPath"
+}
+if ($version -notmatch '^\d+\.\d+\.\d+\.\d+$') {
+    Write-Err "Frozen build version is not Major.Minor.Patch.Build: $version"
+}
 $outputSuffix = if ($Release) { "" } else { "-dev" }
 $OutputPath = Join-Path $Root "EngramOverlay_${version}${outputSuffix}_x64-setup.exe"
 $BuildProfile = if ($Release) { "release-lzma2-solid" } else { "development-zip" }
@@ -172,7 +179,7 @@ if ($installerCacheHit) {
     $compression = if ($Release) { "lzma2" } else { "zip" }
     $solidCompression = if ($Release) { "yes" } else { "no" }
     Write-Step "ISCC — setup.exe packaging ($BuildProfile)"
-    $isccExit = Invoke-IsccCompile $compression $solidCompression $outputSuffix
+    $isccExit = Invoke-IsccCompile $compression $solidCompression $outputSuffix $version
     if ($isccExit -ne 0) { Write-Err "ISCC compile failed" }
     if (-not (Test-Path -LiteralPath $OutputPath -PathType Leaf)) {
         Write-Err "Output setup.exe not found: $OutputPath"
