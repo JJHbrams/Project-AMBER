@@ -7,6 +7,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from core.context.directive_registration import (RegistrationError, approve_registration, begin_registration, commit_registration, complete_registration, preview_registration, registration_schema)
+from core.storage.db import initialize_db
 
 def _ask(name, default=""):
     value = input(f"{name}" + (f" [{default}]" if default != "" else "") + ": ").strip()
@@ -40,6 +41,9 @@ def _conditional_json():
         print("trigger_data must be a non-empty JSON object; try again.")
 
 def main():
+    # The script is a public entrypoint and may target a freshly isolated DB.
+    # Ensure both the draft table and additive migrations exist before begin.
+    initialize_db()
     schema = registration_schema()
     actor = "local-script"
     session_id = "cli-" + uuid.uuid4().hex
