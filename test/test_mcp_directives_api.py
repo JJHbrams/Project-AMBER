@@ -18,7 +18,7 @@ with patch("core.storage.db.initialize_db"), patch.object(
 class MCPDirectiveToolTests(unittest.TestCase):
     @patch.object(server, "begin_registration", return_value={"draft_id": "draft-1"})
     def test_add_tool_starts_draft_and_never_calls_persistent_mutator(self, begin):
-        result = server.engram_add_directive("demo", "rule")
+        result = server.engram_add_directive("demo", "rule", "test-agent", "session-a")
         self.assertEqual(result["status"], "registration_required")
         self.assertEqual(result["draft_id"], "draft-1")
         begin.assert_called_once()
@@ -26,9 +26,9 @@ class MCPDirectiveToolTests(unittest.TestCase):
     @patch.object(server, "begin_registration", return_value={"draft_id": "draft-2"})
     @patch.object(server, "get_directive", return_value={"key": "demo", "content": "old"})
     def test_update_tool_starts_draft_without_persisting(self, _existing, begin):
-        result = server.engram_update_directive("demo", content="new")
+        result = server.engram_update_directive("demo", "test-agent", "session-a", content="new")
         self.assertEqual(result["status"], "registration_required")
-        self.assertEqual(begin.call_args.args[0]["content"], "new")
+        self.assertEqual(begin.call_args.args[2]["content"], "new")
 
     @patch.object(server, "preflight_directives", return_value={"decision": "allow"})
     def test_preflight_tool_passes_structured_guard_context(self, mock_preflight):

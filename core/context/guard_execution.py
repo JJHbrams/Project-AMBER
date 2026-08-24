@@ -421,6 +421,11 @@ _GUARD_REGISTRY: dict[str, Callable[..., dict[str, Any]]] = {
 }
 
 
+def registered_guard_ids() -> tuple[str, ...]:
+    """Public catalog of guards that registration may safely reference."""
+    return tuple(sorted(_GUARD_REGISTRY))
+
+
 def execute_guard(
     guard_id: str,
     *,

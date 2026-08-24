@@ -281,6 +281,8 @@ def initialize_db(db_dir: "str | Path | None" = None):
                 approval_digest TEXT NOT NULL DEFAULT '',
                 approval_token_hash TEXT NOT NULL DEFAULT '',
                 approval_expires_at INTEGER NOT NULL DEFAULT 0,
+                actor TEXT NOT NULL DEFAULT '',
+                session_id TEXT NOT NULL DEFAULT '',
                 created_at INTEGER NOT NULL,
                 updated_at INTEGER NOT NULL
             );
@@ -435,10 +437,14 @@ def initialize_db(db_dir: "str | Path | None" = None):
                 approval_digest TEXT NOT NULL DEFAULT '',
                 approval_token_hash TEXT NOT NULL DEFAULT '',
                 approval_expires_at INTEGER NOT NULL DEFAULT 0,
+                actor TEXT NOT NULL DEFAULT '',
+                session_id TEXT NOT NULL DEFAULT '',
                 created_at INTEGER NOT NULL,
                 updated_at INTEGER NOT NULL
             )
         """)
+        _add_column_if_missing(conn, "directive_registration_drafts", "actor", "TEXT NOT NULL DEFAULT ''")
+        _add_column_if_missing(conn, "directive_registration_drafts", "session_id", "TEXT NOT NULL DEFAULT ''")
 
         rows = conn.execute(
             """

@@ -1570,6 +1570,8 @@ def _parse_optional_json_param(raw: str, *, expect: type, field_name: str):
 def engram_add_directive(
     key: str,
     content: str,
+    actor: str,
+    session_id: str,
     source: str = "unknown",
     scope: str = "all",
     priority: int = 0,
@@ -1592,7 +1594,7 @@ def engram_add_directive(
     - trigger_data_json: structured trigger JSON object
     - workflow_skill_id / guard_id: structured policy 식별자
     - legacy_migration_markers_json: migration marker JSON string array"""
-    draft = begin_registration({
+    draft = begin_registration(actor, session_id, {
         "key": key, "content": content, "source": source, "scope": scope,
         "priority": priority, "trigger_type": trigger_type,
         "enforcement_level": enforcement_level,
@@ -1613,6 +1615,8 @@ def engram_list_directives(scope_filter: str = "all", include_inactive: bool = F
 @engramMCP.tool()
 def engram_update_directive(
     key: str,
+    actor: str,
+    session_id: str,
     content: str = "",
     scope: str = "",
     priority: int = -1,
@@ -1639,7 +1643,7 @@ def engram_update_directive(
     if trigger_data_json: candidate["trigger_data"] = _parse_optional_json_param(trigger_data_json, expect=dict, field_name="trigger_data_json")
     if workflow_skill_id is not None: candidate["workflow_skill_id"] = workflow_skill_id
     if guard_id is not None: candidate["guard_id"] = guard_id
-    draft = begin_registration(candidate)
+    draft = begin_registration(actor, session_id, candidate)
     return {"status": "registration_required", "message": "No directive was changed. Complete, preview, approve, then commit this draft.", **draft}
 
 
@@ -1650,33 +1654,33 @@ def engram_get_directive_registration_schema() -> dict:
 
 
 @engramMCP.tool()
-def engram_begin_directive_registration(initial_json: str = "") -> dict:
+def engram_begin_directive_registration(actor: str, session_id: str, initial_json: str = "") -> dict:
     """Create a draft only; this never writes a directive row."""
-    return begin_registration(_parse_optional_json_param(initial_json, expect=dict, field_name="initial_json") or {})
+    return begin_registration(actor, session_id, _parse_optional_json_param(initial_json, expect=dict, field_name="initial_json") or {})
 
 
 @engramMCP.tool()
-def engram_complete_directive_registration(draft_id: str, fields_json: str) -> dict:
+def engram_complete_directive_registration(draft_id: str, actor: str, session_id: str, fields_json: str) -> dict:
     """Validate a fixed-choice directive draft and prepare it for preview."""
-    return complete_registration(draft_id, _parse_optional_json_param(fields_json, expect=dict, field_name="fields_json") or {})
+    return complete_registration(draft_id, actor, session_id, _parse_optional_json_param(fields_json, expect=dict, field_name="fields_json") or {})
 
 
 @engramMCP.tool()
-def engram_preview_directive_registration(draft_id: str) -> dict:
+def engram_preview_directive_registration(draft_id: str, actor: str, session_id: str) -> dict:
     """Render the exact canonical directive, effective behavior, effect, and digest."""
-    return preview_registration(draft_id)
+    return preview_registration(draft_id, actor, session_id)
 
 
 @engramMCP.tool()
-def engram_approve_directive_registration(draft_id: str, digest: str, approved: bool = False) -> dict:
+def engram_approve_directive_registration(draft_id: str, actor: str, session_id: str, digest: str, approved: bool = False) -> dict:
     """Record explicit approval for one exact preview digest; returns a one-time token."""
-    return approve_registration(draft_id, digest, approved)
+    return approve_registration(draft_id, actor, session_id, digest, approved)
 
 
 @engramMCP.tool()
-def engram_commit_directive_registration(draft_id: str, digest: str, approval_token: str) -> dict:
+def engram_commit_directive_registration(draft_id: str, actor: str, session_id: str, digest: str, approval_token: str) -> dict:
     """The only public MCP path that persists an approved directive."""
-    return commit_registration(draft_id, digest, approval_token)
+    return commit_registration(draft_id, actor, session_id, digest, approval_token)
 
 
 @engramMCP.tool()
