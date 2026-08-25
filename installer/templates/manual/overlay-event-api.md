@@ -43,7 +43,7 @@ supported_modes: [observer, replace] # 생략 시 observer
 {"schema_version":1,"type":"pointer.action","payload":{"action":"drag_move","screen_x":240,"screen_y":160}}
 ```
 
-`observer`에서는 geometry와 입력을 보내지 않아도 된다. `replace`에서는 geometry를 반드시 보내야 Engram이 말풍선·입력창·기록 창 위치를 맞춘다. `left_click`은 채팅을 열거나 닫고, `right_click`은 Engram 공통 메뉴를 연다. `drag_move`와 `drag_end`는 Engram이 소유하는 위치를 갱신한다. handshake/JSONL/자식 종료 실패 시에는 번들 렌더러로 복구되며 API는 metadata-only라 대화·thinking·도구 payload와 파일 경로를 노출하지 않는다.
+`observer`에서는 geometry와 입력을 보내지 않아도 된다. 다만 geometry 뒤 `left_click`을 보내면 기존과 **같은 말풍선 세션**이 observer 창 위치에 열린다. observer geometry는 메모리에만 유지되고 번들 캐릭터의 저장 위치를 바꾸지 않으며, geometry 없는 observer 클릭은 무시된다. 번들을 클릭하면 앵커는 다시 번들로 돌아온다. `replace`에서는 geometry를 반드시 보내야 Engram이 말풍선·입력창·기록 창 위치를 맞춘다. `left_click`은 채팅을 열거나 닫고, `right_click`은 Engram 공통 메뉴를 연다. `drag_move`와 `drag_end`는 replace에서만 Engram이 소유하는 위치를 갱신한다. handshake/JSONL/자식 종료 실패 시에는 번들 렌더러로 복구되고 열린 풍선도 번들 기준으로 다시 배치되며, API는 metadata-only라 대화·thinking·도구 payload와 파일 경로를 노출하지 않는다.
 
 ```mermaid
 flowchart LR

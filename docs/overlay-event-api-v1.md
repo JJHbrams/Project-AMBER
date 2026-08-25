@@ -28,7 +28,7 @@ supported_modes: [observer, replace] # 생략하면 observer만
 
 Engram은 커스텀 오버레이 프로세스의 stdin에 JSONL로 `engram.welcome`, `state.snapshot`, replace 초기/보정 위치의 `overlay.set_position`, 그리고 의미 이벤트 envelope을 쓴다. replace의 첫 `overlay.geometry_changed`는 renderer bootstrap 보고다. Engram에 저장된 x/y가 authoritative이므로 renderer는 받은 초기 `overlay.set_position`을 최종 위치로 적용해야 한다. 첫 geometry의 width/height만 채택할 수 있고, 이후 사용자 이동 geometry만 저장 위치를 갱신한다. `state.snapshot`은 현재 `display_hint: idle`, `payload: {generation_active: false, tool_category: null}`이다. envelope은 `schema_version`, `id`, `sequence`, `timestamp`, `type`, `display_hint`, `payload`를 가진다. hint는 `idle`, `hover`, `click`, `input`, `generating`, `search`, `thought`, `memory`, `success`, `provider_error`, `error`, `default`다.
 
-`observer`는 기본값이며 번들 캐릭터를 유지한다. `replace`는 hello 성공 뒤 번들을 숨기고 geometry를 말풍선 앵커로 사용한다. 자식 종료·잘못된 JSONL·handshake 실패에는 번들 창을 복구한다. API는 `metadata_only`라 대화 원문·thinking·도구 내용·파일 경로를 보내지 않는다. 진단이 필요하면 manifest 경로, schema/id 일치, 실행 파일 존재, stdout 첫 hello를 순서대로 확인한다.
+`observer`는 기본값이며 번들 캐릭터를 유지한다. observer가 `geometry_changed`와 `left_click`을 보내면 Engram은 **같은 말풍선 세션**을 그 observer 창 위치로 앵커링한다. 이 좌표는 메모리에만 유지되며 번들 캐릭터 위치를 저장하거나 변경하지 않는다. geometry 없이 온 observer 클릭은 무시된다. 번들을 클릭하면 다시 번들 위치가 앵커가 된다. `replace`는 hello 성공 뒤 번들을 숨기고 geometry를 말풍선 앵커와 저장 위치로 사용한다. 자식 종료·잘못된 JSONL·handshake 실패에는 번들 창을 복구하고 열린 풍선도 번들 기준으로 다시 배치한다. API는 `metadata_only`라 대화 원문·thinking·도구 내용·파일 경로를 보내지 않는다. 진단이 필요하면 manifest 경로, schema/id 일치, 실행 파일 존재, stdout 첫 hello를 순서대로 확인한다.
 
 ```python
 import json, sys

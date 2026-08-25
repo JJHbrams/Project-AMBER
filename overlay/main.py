@@ -387,6 +387,10 @@ class OverlayApp:
             on_history=self.show_bubble_history,
             on_pointer_event=self._on_bundled_pointer_event,
         )
+        # Observer geometry is an in-memory click anchor only.  Replacement
+        # geometry remains owned by CharacterOverlay and is persisted there.
+        self._observer_rect: tuple[int, int, int, int] | None = None
+        self._bubble_anchor = "bundled"
         self._overlay_events = OverlayEventPublisher(
             cfg,
             on_failure=lambda: self._renderer_inbound.put({"type": "_renderer.failure"}),
@@ -406,15 +410,18 @@ class OverlayApp:
         # 실제 Claude 세션(BubbleSessionManager)은 캐릭터를 처음 클릭할 때 지연 기동한다.
         bubble_cfg = get_bubble_cfg(cfg)
         terminal_cfg = cfg.get("terminal") or {}
-        self._bubble_manager = BubbleManager(self.root, self.character.get_phys_rect, bubble_cfg, terminal_cfg)
+        self._bubble_manager = BubbleManager(self.root, self._get_bubble_anchor_rect, bubble_cfg, terminal_cfg)
         self._bubble_input = InputBar(
             self.root,
-            self.character.get_phys_rect,
+            self._get_bubble_anchor_rect,
             bubble_cfg,
             terminal_cfg,
             get_speech_rect=self._bubble_manager.get_speech_rect,
         )
-        self._bubble_history = HistoryPanel(self.root, get_stm_port=lambda: self._stm_server.port, scope_key="overlay", cfg_bubble=bubble_cfg)
+        self._bubble_history = HistoryPanel(
+            self.root, get_stm_port=lambda: self._stm_server.port, scope_key="overlay",
+            cfg_bubble=bubble_cfg, get_anchor_rect=self._get_bubble_anchor_rect,
+        )
 
         # 능동적 상주(initiative) — 유휴 시 캐릭터가 스스로 말을 건다.
         # 활동 추적: 마지막 상호작용 시각 + 현재 턴 진행 여부(발화 가능 판정용).
@@ -1219,8 +1226,28 @@ class OverlayApp:
             self._toggle_bubble_input()
         else:
             self._ensure_tui_mode()
-            x, y, w, h = self.character.get_phys_rect()
+            x, y, w, h = self._get_bubble_anchor_rect()
             self.chat.show_at_overlay(x, y, w, h)
+
+    def _get_bubble_anchor_rect(self) -> tuple[int, int, int, int]:
+        """Resolve one shared bubble session's visual source on every layout."""
+        if self._overlay_events.mode == "replace":
+            return self.character.get_phys_rect()
+        if self._bubble_anchor == "observer" and self._observer_rect is not None:
+            return self._observer_rect
+        return self.character.get_bundled_phys_rect()
+
+    def _select_bubble_anchor(self, source: str) -> None:
+        if source == "observer" and self._observer_rect is None:
+            return
+        self._bubble_anchor = source
+        # Reflow existing speech/thought bubbles as well as the next input.
+        if hasattr(self, "_bubble_manager"):
+            self._bubble_manager.refresh_positions()
+        if hasattr(self, "_bubble_input"):
+            self._bubble_input.refresh_position()
+        if hasattr(self, "_bubble_history"):
+            self._bubble_history.refresh_position()
 
     def _hotkey_chat(self):
         if self._chat_mode == "bubble":
@@ -1318,6 +1345,8 @@ class OverlayApp:
         """Replacement failure must always return control to the bundled window."""
         try:
             self.character.restore_bundled_renderer()
+            self._observer_rect = None
+            self._select_bubble_anchor("bundled")
         except Exception:
             log.debug("[overlay-api] bundled renderer restore skipped", exc_info=True)
         finally:
@@ -1325,6 +1354,8 @@ class OverlayApp:
 
     def _on_bundled_pointer_event(self, action: str, payload: dict) -> None:
         """Expose host-owned pointer semantics to observer renderers."""
+        if action in {"left_click", "right_click"}:
+            self._select_bubble_anchor("bundled")
         mapping = {
             "pointer_enter": ("pointer.entered", "hover"),
             "pointer_leave": ("pointer.left", "idle"),
@@ -1360,28 +1391,47 @@ class OverlayApp:
         kind = message.get("type")
         try:
             if kind == "overlay.geometry_changed":
-                startup_geometry = getattr(self, "_replace_startup_geometry_pending", False)
-                rect = self.character.apply_external_geometry(
-                    payload["x"], payload["y"], payload["width"], payload["height"],
-                    preserve_position=startup_geometry,
-                )
-                self._replace_startup_geometry_pending = False
-                self._overlay_events.publish(
-                    "overlay.set_position", "idle", {"x": rect[0], "y": rect[1]}
-                )
+                if self._overlay_events.mode == "observer":
+                    width, height = max(1, int(payload["width"])), max(1, int(payload["height"]))
+                    x, y = int(payload["x"]), int(payload["y"])
+                    self._observer_rect = (x, y, width, height)
+                    if self._bubble_anchor == "observer":
+                        self._bubble_manager.refresh_positions()
+                else:
+                    startup_geometry = getattr(self, "_replace_startup_geometry_pending", False)
+                    rect = self.character.apply_external_geometry(
+                        payload["x"], payload["y"], payload["width"], payload["height"],
+                        preserve_position=startup_geometry,
+                    )
+                    self._replace_startup_geometry_pending = False
+                    self._overlay_events.publish(
+                        "overlay.set_position", "idle", {"x": rect[0], "y": rect[1]}
+                    )
             elif kind == "pointer.action":
                 action = payload.get("action")
                 if action == "left_click":
                     self._overlay_events.publish("pointer.left_clicked", "click")
+                    if self._overlay_events.mode == "observer":
+                        if self._observer_rect is None:
+                            log.warning("[overlay-api] ignored observer click without geometry")
+                            return
+                        self._select_bubble_anchor("observer")
                     self.character.external_activate()
                 elif action == "right_click":
                     self._overlay_events.publish("pointer.right_clicked", "click")
+                    if self._overlay_events.mode == "observer":
+                        if self._observer_rect is None:
+                            log.warning("[overlay-api] ignored observer context click without geometry")
+                            return
+                        self._select_bubble_anchor("observer")
                     self.character.external_context_menu(int(payload["screen_x"]), int(payload["screen_y"]))
                 elif action == "pointer_enter":
                     self._overlay_events.publish("pointer.entered", "hover")
                 elif action == "pointer_leave":
                     self._overlay_events.publish("pointer.left", "idle")
                 elif action in {"drag_move", "drag_end"}:
+                    if self._overlay_events.mode == "observer":
+                        return
                     rect = self.character.get_phys_rect()
                     rect = self.character.apply_external_geometry(
                         int(payload["screen_x"]), int(payload["screen_y"]), rect[2], rect[3]

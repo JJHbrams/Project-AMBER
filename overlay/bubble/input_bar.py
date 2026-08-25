@@ -81,6 +81,13 @@ class InputBar:
     def is_showing(self) -> bool:
         return self._entry is not None
 
+    def refresh_position(self) -> None:
+        """Reflow an open input shell after its shared overlay anchor changes."""
+        if self.is_showing():
+            char_x, char_y, char_w, _char_h = self._get_char_rect()
+            body_w = self._width_override or geometry.default_bubble_width(char_x, char_y, char_w, self._cfg)
+            self._layout(body_w, self._body_h)
+
     def show(
         self,
         on_submit: Callable[[str], None],

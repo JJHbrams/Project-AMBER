@@ -201,6 +201,53 @@ class OverlayEventApiTests(unittest.TestCase):
             ("overlay.set_position", "idle", {"x": 700, "y": 800}),
         )
 
+    def test_observer_geometry_is_transient_and_click_selects_shared_anchor(self):
+        app = object.__new__(OverlayApp)
+        app._overlay_events = Mock(mode="observer")
+        app.character = Mock()
+        app.character.get_bundled_phys_rect.return_value = (1, 2, 30, 40)
+        app._bubble_manager = Mock()
+        app._observer_rect = None
+        app._bubble_anchor = "bundled"
+
+        app._handle_external_renderer_message({
+            "schema_version": 1, "type": "overlay.geometry_changed",
+            "payload": {"x": 100, "y": 200, "width": 300, "height": 400},
+        })
+        self.assertEqual(app._observer_rect, (100, 200, 300, 400))
+        app.character.apply_external_geometry.assert_not_called()
+        self.assertEqual(app._get_bubble_anchor_rect(), (1, 2, 30, 40))
+
+        app._handle_external_renderer_message({
+            "schema_version": 1, "type": "pointer.action", "payload": {"action": "left_click"},
+        })
+        self.assertEqual(app._bubble_anchor, "observer")
+        self.assertEqual(app._get_bubble_anchor_rect(), (100, 200, 300, 400))
+        app.character.external_activate.assert_called_once()
+
+    def test_observer_click_without_geometry_does_not_activate(self):
+        app = object.__new__(OverlayApp)
+        app._overlay_events = Mock(mode="observer")
+        app.character = Mock()
+        app._bubble_manager = Mock()
+        app._observer_rect = None
+        app._bubble_anchor = "bundled"
+
+        app._handle_external_renderer_message({
+            "schema_version": 1, "type": "pointer.action", "payload": {"action": "left_click"},
+        })
+        app.character.external_activate.assert_not_called()
+        self.assertEqual(app._bubble_anchor, "bundled")
+
+    def test_bundled_click_reselects_bundled_anchor(self):
+        app = object.__new__(OverlayApp)
+        app._overlay_events = Mock()
+        app._bubble_manager = Mock()
+        app._observer_rect = (100, 200, 30, 40)
+        app._bubble_anchor = "observer"
+        app._on_bundled_pointer_event("left_click", {})
+        self.assertEqual(app._bubble_anchor, "bundled")
+
     def test_overlay_api_help_uses_manual_deep_link(self):
         opened = []
         open_overlay_event_api_manual(opened.append)

@@ -1545,3 +1545,16 @@ class CharacterOverlay:
             self._img_w,
             self._img_h,
         )
+
+    def get_bundled_phys_rect(self):
+        """Return the visible bundled window rect, never a replacement rect.
+
+        Observer renderers are separate windows; their transient geometry must
+        never become this window's persisted position.
+        """
+        return (
+            self.root.winfo_x(),
+            self.root.winfo_y(),
+            self._img_w,
+            self._img_h,
+        )

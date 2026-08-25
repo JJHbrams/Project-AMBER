@@ -19,23 +19,30 @@ class HistoryPanel:
         get_stm_port: Callable[[], Optional[int]],
         scope_key: str = "overlay",
         cfg_bubble: Optional[dict] = None,
+        get_anchor_rect: Optional[Callable[[], tuple[int, int, int, int]]] = None,
     ):
         self._root = root
         self._get_stm_port = get_stm_port
         self._scope_key = scope_key
         self._cfg = cfg_bubble or {}
+        self._get_anchor_rect = get_anchor_rect
         self._win: Optional[tk.Toplevel] = None
         self._list_frame: Optional[ttk.Frame] = None
 
     def show(self) -> None:
         if self._win is not None and self._win.winfo_exists():
+            self.refresh_position()
             self._win.lift()
             self._win.focus_force()
             return
 
         self._win = tk.Toplevel(self._root)
         self._win.title("대화 기록")
-        self._win.geometry("480x560")
+        if self._get_anchor_rect is None:
+            self._win.geometry("480x560")
+        else:
+            x, y, width, _height = self._get_anchor_rect()
+            self._win.geometry(f"480x560+{x + width + 12}+{y}")
 
         top = ttk.Frame(self._win)
         top.pack(fill="x", padx=8, pady=8)
@@ -58,6 +65,12 @@ class HistoryPanel:
         scrollbar.pack(side="right", fill="y")
 
         self._reload()
+
+    def refresh_position(self) -> None:
+        if self._win is None or not self._win.winfo_exists() or self._get_anchor_rect is None:
+            return
+        x, y, width, _height = self._get_anchor_rect()
+        self._win.geometry(f"+{x + width + 12}+{y}")
 
     def _reload(self) -> None:
         if self._list_frame is None:
