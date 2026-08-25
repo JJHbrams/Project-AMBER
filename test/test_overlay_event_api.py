@@ -337,13 +337,14 @@ class OverlayEventApiTests(unittest.TestCase):
         # (1100,2200) rather than stale absolute coordinates.
         manager._echo.place.assert_called_once_with(1100, 2210, 120, 40)
 
-    def test_refresh_positions_reanchors_visible_echo(self):
+    def test_refresh_positions_reanchors_thought_speech_and_echo(self):
         manager = object.__new__(BubbleManager)
-        manager._render_thought = Mock()
-        manager._render_echo = Mock()
+        calls = []
+        manager._render_thought = lambda: calls.append("thought")
+        manager._render_speech = lambda: calls.append("speech")
+        manager._render_echo = lambda: calls.append("echo")
         manager.refresh_positions()
-        manager._render_thought.assert_called_once()
-        manager._render_echo.assert_called_once()
+        self.assertEqual(calls, ["thought", "speech", "echo"])
 
     def test_observer_click_without_geometry_does_not_activate(self):
         app = object.__new__(OverlayApp)

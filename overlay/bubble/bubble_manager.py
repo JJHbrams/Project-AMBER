@@ -279,7 +279,11 @@ class BubbleManager:
         안 따라가고 옛 위치에 남는다. 캐릭터를 클릭(제자리 클릭, 드래그 아님)해서
         입력창을 열 때마다 호출해서 캐릭터를 따라가게 한다 — 자동 배치든 사용자가
         드래그해서 옮긴 위치든(캐릭터 기준 오프셋이라) 그대로 다시 적용된다."""
-        self._render_thought()  # 내부에서 _render_speech()까지 호출(버튼 행 포함)
+        # _render_thought() intentionally skips speech while a thought is
+        # active to avoid streaming jitter.  An explicit anchor reflow is a
+        # different operation: all visible slots must follow the new source.
+        self._render_thought()
+        self._render_speech()
         self._render_echo()
 
     def replay_last(self) -> None:
