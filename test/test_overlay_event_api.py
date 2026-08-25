@@ -1,6 +1,7 @@
 import io
 import json
 import sys
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -34,10 +35,19 @@ class OverlayEventApiTests(unittest.TestCase):
         self.assertEqual(tool_category("read_file"), "read")
 
     def test_child_handshake_snapshot_and_jsonl_event(self):
+        class HeldStdout:
+            def __init__(self):
+                self.release = threading.Event()
+
+            def __iter__(self):
+                yield '{"type":"overlay.hello","payload":{"supported_schema_versions":[1]}}\n'
+                self.release.wait(1.0)
+
+            def close(self):
+                self.release.set()
+
         proc = Mock()
-        proc.stdout = io.StringIO(
-            '{"type":"overlay.hello","payload":{"supported_schema_versions":[1]}}\n'
-        )
+        proc.stdout = HeldStdout()
         proc.stdin = io.StringIO()
         proc.poll.return_value = None
         with patch("overlay.event_api.subprocess.Popen", return_value=proc):
@@ -54,6 +64,7 @@ class OverlayEventApiTests(unittest.TestCase):
         self.assertEqual(messages[-1]["payload"], {"category": "search"})
         self.assertEqual(messages[-1]["sequence"], 3)
         self.assertEqual(messages[-1]["schema_version"], 1)
+        publisher.stop()
 
     def test_invalid_child_handshake_falls_back_without_raising(self):
         proc = Mock()
@@ -68,6 +79,29 @@ class OverlayEventApiTests(unittest.TestCase):
             )
             self.assertFalse(publisher.start())
         self.assertEqual(failed, [True])
+
+    def test_stdout_eof_fails_even_when_poll_has_not_observed_exit(self):
+        proc = Mock()
+        proc.stdout = io.StringIO("")
+        proc.poll.return_value = None  # Reproduces the Windows EOF/poll race.
+        failed = []
+        publisher = OverlayEventPublisher(on_failure=lambda: failed.append(True))
+        publisher._proc = proc
+        publisher._read_stdout()
+        self.assertTrue(publisher._failed)
+        self.assertEqual(failed, [True])
+
+    def test_stdout_eof_after_intentional_stop_does_not_fail(self):
+        proc = Mock()
+        proc.stdout = io.StringIO("")
+        proc.poll.return_value = None
+        failed = []
+        publisher = OverlayEventPublisher(on_failure=lambda: failed.append(True))
+        publisher._proc = proc
+        publisher._stopping = True
+        publisher._read_stdout()
+        self.assertFalse(publisher._failed)
+        self.assertEqual(failed, [])
 
     def test_replace_mode_exposes_inbound_geometry_callbacks(self):
         proc = Mock()

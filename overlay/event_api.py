@@ -66,6 +66,11 @@ class OverlayEventPublisher:
         if self.mode not in {"observer", "replace"}:
             self.mode = "observer"
         self._proc: subprocess.Popen | None = None
+        # stdout reader and Tk shutdown run on different threads.  A process can
+        # close stdout before poll() observes its exit, so lifecycle identity
+        # (not poll timing) decides whether EOF is a renderer failure.
+        self._lifecycle_lock = threading.Lock()
+        self._stopping = False
         self._sequence = 0
         self._failed = False
         self._on_failure = on_failure
@@ -80,10 +85,13 @@ class OverlayEventPublisher:
             self._fail("command must be a non-empty string list")
             return False
         try:
-            self._proc = subprocess.Popen(self._command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            proc = subprocess.Popen(self._command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                 text=True, encoding="utf-8", bufsize=1, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         except OSError as exc:
             self._fail(str(exc)); return False
+        with self._lifecycle_lock:
+            self._proc = proc
+            self._stopping = False
         self._reader = threading.Thread(target=self._read_stdout, daemon=True, name="overlay-renderer-stdout")
         self._reader.start()
         try:
@@ -103,9 +111,11 @@ class OverlayEventPublisher:
 
     def _read_stdout(self) -> None:
         """Read JSONL without blocking the Tk thread; later input is retained for a future host adapter."""
-        if not self._proc or not self._proc.stdout:
+        with self._lifecycle_lock:
+            proc = self._proc
+        if not proc or not proc.stdout:
             return
-        for raw in self._proc.stdout:
+        for raw in proc.stdout:
             if len(raw) > 65536:
                 self._fail("renderer emitted an oversized JSONL message")
                 self.stop()
@@ -120,19 +130,27 @@ class OverlayEventPublisher:
                 self._inbound.put(message)
                 if self._on_message is not None:
                     self._on_message(message)
-        if not self._failed and self._proc is not None and self._proc.poll() is not None:
+        with self._lifecycle_lock:
+            # EOF is unexpected whenever this reader still owns the active
+            # process. poll() is deliberately not consulted: Windows can leave
+            # it at None briefly after the stdout pipe has already closed.
+            unexpected_eof = not self._failed and not self._stopping and self._proc is proc
+        if unexpected_eof:
             self._fail("renderer stdout closed")
 
     def publish(self, type: str, display_hint: str, payload: dict[str, Any] | None = None) -> None:
-        if self._failed or not self._proc or self._proc.poll() is not None:
+        with self._lifecycle_lock:
+            proc = self._proc
+            stopping = self._stopping
+        if self._failed or stopping or not proc or proc.poll() is not None:
             return
         self._sequence += 1
         message = {"schema_version": SCHEMA_VERSION, "id": f"evt_{uuid.uuid4().hex}", "sequence": self._sequence,
             "timestamp": _dt.datetime.now(_dt.timezone.utc).isoformat(), "type": type,
             "display_hint": display_hint if display_hint in DISPLAY_HINTS else "idle", "payload": payload or {}}
         try:
-            assert self._proc.stdin is not None
-            self._proc.stdin.write(json.dumps(message, separators=(",", ":")) + "\n"); self._proc.stdin.flush()
+            assert proc.stdin is not None
+            proc.stdin.write(json.dumps(message, separators=(",", ":")) + "\n"); proc.stdin.flush()
         except (OSError, ValueError) as exc:
             self._fail(f"write failed: {exc}")
             self.stop()
@@ -143,8 +161,12 @@ class OverlayEventPublisher:
             self.publish(*mapped)
 
     def stop(self) -> None:
-        proc = self._proc
-        self._proc = None
+        with self._lifecycle_lock:
+            # Set this before touching the pipes so an EOF unblocked by our own
+            # close cannot race into the fallback callback.
+            self._stopping = True
+            proc = self._proc
+            self._proc = None
         if proc is not None:
             try:
                 if proc.stdin is not None:
@@ -170,9 +192,10 @@ class OverlayEventPublisher:
         self._reader = None
 
     def _fail(self, reason: str) -> None:
-        if self._failed:
-            return
-        self._failed = True
+        with self._lifecycle_lock:
+            if self._failed:
+                return
+            self._failed = True
         log.warning("[overlay-api] external renderer disabled; bundled renderer remains active: %s", reason)
         if self._on_failure:
             self._on_failure()
