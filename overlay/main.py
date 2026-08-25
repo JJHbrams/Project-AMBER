@@ -1140,6 +1140,10 @@ class OverlayApp:
 
     def _reload_config(self):
         """설정 저장 후 overlay config를 다시 읽어 반영한다."""
+        # external_renderer is intentionally start-time only.  A new selection
+        # takes effect after a full overlay restart, preserving handshake and
+        # bundled-renderer fallback ownership in the lifecycle startup path.
+        log.info("[overlay] external renderer selection is restart-only; keeping current renderer lifecycle")
         # CharacterOverlay owns image/profile caches, so saving from the GUI must
         # replace them now rather than waiting for the filesystem watcher tick.
         if not self.character.reload_config():

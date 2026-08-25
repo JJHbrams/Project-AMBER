@@ -43,6 +43,7 @@ from overlay.character_assets import (
     resolve_bundled_reaction_sheet,
     resolve_reaction_pack,
 )
+from overlay.external_renderer import InstalledRenderer, apply_renderer_selection, discover_renderers
 from overlay.cli_capabilities import effort_key, efforts as provider_efforts, model_key, models as provider_models, validate as validate_cli
 from core.identity import get_persona_db_baseline, set_persona_baseline
 from core.config.runtime_config import normalize_policy_guidance_level
@@ -609,6 +610,7 @@ class _SettingsWindow:
         self._tunnels = tunnels  # overlay.remote_tunnel.TunnelManager | None
         self._remote_after_id: str | None = None
         self._toast_after_id: str | None = None
+        self._renderer_restart_required = False
 
         self.window = tk.Toplevel(root)
         self.window._is_settings_window = True
@@ -743,9 +745,27 @@ class _SettingsWindow:
         )
         self._custom_overlay_help_button.grid(row=0, column=3, sticky="w", padx=(0, 8), pady=(5, 0))
 
+        # Selection is manifest-only: Settings never accepts an arbitrary command.
+        renderer_box = ttk.LabelFrame(f, text="외부 오버레이")
+        renderer_box.grid(row=1, column=0, columnspan=5, sticky="ew", padx=8, pady=(4, 4))
+        renderer_box.columnconfigure(1, weight=1)
+        self._renderer_var = tk.StringVar(value="기본 오버레이 사용")
+        self._renderer_mode_var = tk.StringVar(value="observer")
+        self._renderer_status_var = tk.StringVar(value="설치된 manifest를 확인하는 중입니다.")
+        self._renderers: dict[str, InstalledRenderer | None] = {}
+        self._renderer_existing_invalid = False
+        ttk.Label(renderer_box, text="오버레이:").grid(row=0, column=0, sticky="w", **PAD)
+        self._renderer_combo = ttk.Combobox(renderer_box, textvariable=self._renderer_var, state="readonly", width=42)
+        self._renderer_combo.grid(row=0, column=1, sticky="ew", **PAD)
+        ttk.Label(renderer_box, text="모드:").grid(row=1, column=0, sticky="w", **PAD)
+        self._renderer_mode_combo = ttk.Combobox(renderer_box, textvariable=self._renderer_mode_var, state="readonly", width=14)
+        self._renderer_mode_combo.grid(row=1, column=1, sticky="w", **PAD)
+        ttk.Label(renderer_box, textvariable=self._renderer_status_var, foreground="gray", wraplength=650).grid(row=2, column=0, columnspan=2, sticky="w", padx=8, pady=(0, 4))
+        self._renderer_combo.bind("<<ComboboxSelected>>", self._on_renderer_selected)
+
         # 캐릭터 소스 — 서로 배타적인 세 모드를 한 프레임에 모아 이후 설정 행과 겹치지 않게 둔다.
         source_box = ttk.LabelFrame(f, text="캐릭터 소스")
-        source_box.grid(row=1, column=0, columnspan=5, sticky="ew", padx=8, pady=(4, 4))
+        source_box.grid(row=2, column=0, columnspan=5, sticky="ew", padx=8, pady=(4, 4))
         # Keep the growing path column bounded so the browse controls never leave a
         # normal 850–950px settings window.  Grid fields below are intentionally
         # split across rows instead of determining this frame's requested width.
@@ -866,10 +886,10 @@ class _SettingsWindow:
             variable.trace_add("write", self._on_grid_value_changed)
 
         # 캐릭터 높이 비율
-        ttk.Label(f, text="캐릭터 높이 비율\n(0.05 ~ 0.5):").grid(row=2, column=0, sticky="w", **PAD)
+        ttk.Label(f, text="캐릭터 높이 비율\n(0.05 ~ 0.5):").grid(row=3, column=0, sticky="w", **PAD)
         self._char_height_var = tk.DoubleVar()
         height_frame = ttk.Frame(f)
-        height_frame.grid(row=2, column=1, columnspan=2, sticky="ew", **PAD)
+        height_frame.grid(row=3, column=1, columnspan=2, sticky="ew", **PAD)
         self._height_scale = ttk.Scale(
             height_frame,
             from_=0.05,
@@ -884,13 +904,13 @@ class _SettingsWindow:
         self._height_label.pack(side="left", padx=(4, 0))
 
         # 작업 디렉토리
-        ttk.Label(f, text="작업 디렉토리:").grid(row=3, column=0, sticky="w", **PAD)
+        ttk.Label(f, text="작업 디렉토리:").grid(row=4, column=0, sticky="w", **PAD)
         self._workdir_var = tk.StringVar()
-        ttk.Entry(f, textvariable=self._workdir_var, width=22).grid(row=3, column=1, sticky="ew", **PAD)
-        ttk.Button(f, text="찾기...", command=self._browse_workdir).grid(row=3, column=2, **PAD)
+        ttk.Entry(f, textvariable=self._workdir_var, width=22).grid(row=4, column=1, sticky="ew", **PAD)
+        ttk.Button(f, text="찾기...", command=self._browse_workdir).grid(row=4, column=2, **PAD)
 
         # 채팅 UI 모드
-        ttk.Label(f, text="채팅 UI 모드:").grid(row=4, column=0, sticky="w", **PAD)
+        ttk.Label(f, text="채팅 UI 모드:").grid(row=5, column=0, sticky="w", **PAD)
         self._chat_mode_var = tk.StringVar()
         ttk.Combobox(
             f,
@@ -898,15 +918,15 @@ class _SettingsWindow:
             values=_CHAT_MODE_OPTIONS,
             state="readonly",
             width=22,
-        ).grid(row=4, column=1, sticky="ew", **PAD)
+        ).grid(row=5, column=1, sticky="ew", **PAD)
         ttk.Label(
             f,
             text="말풍선 모드는 아직 미구현이라 선택해도 터미널로 동작합니다.",
             foreground="gray",
-        ).grid(row=5, column=0, columnspan=3, sticky="w", padx=8, pady=(0, 4))
+        ).grid(row=6, column=0, columnspan=3, sticky="w", padx=8, pady=(0, 4))
 
         # 말풍선 모드 권한 수준
-        ttk.Label(f, text="말풍선 권한 수준:").grid(row=6, column=0, sticky="w", **PAD)
+        ttk.Label(f, text="말풍선 권한 수준:").grid(row=7, column=0, sticky="w", **PAD)
         self._permission_level_var = tk.StringVar()
         ttk.Combobox(
             f,
@@ -914,16 +934,16 @@ class _SettingsWindow:
             values=_PERMISSION_LEVEL_OPTIONS,
             state="readonly",
             width=22,
-        ).grid(row=6, column=1, sticky="ew", **PAD)
+        ).grid(row=7, column=1, sticky="ew", **PAD)
         ttk.Label(
             f,
             text="말풍선 모드에서 도구 사용을 얼마나 자동으로 승인할지 (기본: 자동).",
             foreground="gray",
-        ).grid(row=7, column=0, columnspan=3, sticky="w", padx=8, pady=(0, 4))
+        ).grid(row=8, column=0, columnspan=3, sticky="w", padx=8, pady=(0, 4))
 
         # ── 능동 발화 (initiative) — 유휴 시 캐릭터가 스스로 말을 건다(말풍선 모드 전용) ──
         init_box = ttk.LabelFrame(f, text="능동 발화 — 유휴 시 스스로 말 걸기")
-        init_box.grid(row=8, column=0, columnspan=3, sticky="we", padx=8, pady=(10, 4))
+        init_box.grid(row=9, column=0, columnspan=3, sticky="we", padx=8, pady=(10, 4))
 
         ttk.Checkbutton(
             init_box, text="능동 발화 사용", variable=self._initiative_enabled_var,
@@ -1994,6 +2014,7 @@ class _SettingsWindow:
         self._reload_manifest_editor()
         self._flip_var.set(bool(_nested_get(cfg, ["overlay", "flip_horizontal"], False)))
         self._legacy_body_motion_var.set(bool(_nested_get(cfg, ["overlay", "character", "effects", "legacy_body_motion"], False)))
+        self._load_renderer_choices(cfg)
 
         height = _nested_get(cfg, ["overlay", "char_height_ratio"], 0.125)
         self._char_height_var.set(float(height))
@@ -2542,6 +2563,8 @@ class _SettingsWindow:
                     self._on_saved()
                 except Exception:
                     pass
+            if getattr(self, "_renderer_restart_required", False):
+                self._renderer_status_var.set("외부 오버레이 선택 또는 모드가 저장되었습니다. 오버레이를 재시작해야 적용됩니다.")
             if self._persona_load_ok:
                 self._update_persona_banner()
                 self._show_toast(f"저장되었습니다. 슬라이더 고정 {pinned_count}/4, 나머지는 adaptive로 유지됩니다.")
@@ -2558,6 +2581,42 @@ class _SettingsWindow:
                 )
         except Exception as e:
             messagebox.showerror("저장 실패", str(e), parent=self.window)
+
+    def _load_renderer_choices(self, cfg: dict) -> None:
+        renderers, diagnostics = discover_renderers()
+        self._renderers = {"기본 오버레이 사용": None}
+        for renderer in renderers:
+            self._renderers[f"{renderer.name} ({renderer.id})"] = renderer
+        self._renderer_combo["values"] = tuple(self._renderers)
+        ext = _nested_get(cfg, ["overlay", "external_renderer"], {})
+        selected = None
+        if isinstance(ext, dict) and isinstance(ext.get("command"), list):
+            for label, renderer in self._renderers.items():
+                if renderer is not None and list(renderer.command) == ext["command"]:
+                    selected = label
+                    self._renderer_mode_var.set(str(ext.get("mode", "observer")).lower())
+                    break
+        # The shipped default contains an empty external_renderer mapping; it is
+        # equivalent to Built-in, not an unverified previous selection.
+        self._renderer_existing_invalid = bool(isinstance(ext, dict) and ext.get("command")) and selected is None
+        if self._renderer_existing_invalid:
+            label = "현재 설정 (설치 또는 manifest 검증 필요)"
+            self._renderer_combo["values"] = (*self._renderer_combo["values"], label)
+            self._renderer_var.set(label)
+            self._renderer_mode_combo["values"] = ()
+        else:
+            self._renderer_var.set(selected or "기본 오버레이 사용")
+            self._on_renderer_selected()
+        diagnosis = f" · 사용 불가 {len(diagnostics)}개 ({diagnostics[0].reason})" if diagnostics else ""
+        self._renderer_status_var.set(f"설치된 외부 오버레이 {len(renderers)}개{diagnosis}. 변경 사항은 오버레이 재시작 후 적용됩니다.")
+
+    def _on_renderer_selected(self, _event=None) -> None:
+        renderer = self._renderers.get(self._renderer_var.get())
+        self._renderer_existing_invalid = False
+        modes = renderer.supported_modes if renderer is not None else ("observer",)
+        self._renderer_mode_combo["values"] = modes
+        if self._renderer_mode_var.get() not in modes:
+            self._renderer_mode_var.set(modes[0])
 
     def _do_save(self):
         # Validate the active source before loading/mutating/saving the user YAML.  _save()
@@ -2582,6 +2641,14 @@ class _SettingsWindow:
 
         # 기존 user.yaml을 베이스로 사용 (기존 설정 보존)
         user = _safe_load_yaml(_USER_CONFIG_PATH)
+        previous_renderer = _nested_get(user, ["overlay", "external_renderer"], None)
+
+        if self._renderer_existing_invalid:
+            raise ValueError("현재 외부 오버레이 설정을 검증할 수 없습니다. 기본 오버레이 사용 또는 설치된 외부 오버레이를 명시적으로 선택하세요.")
+        renderer = self._renderers.get(self._renderer_var.get())
+        if not apply_renderer_selection(user, renderer, self._renderer_mode_var.get()):
+            raise ValueError("선택한 외부 오버레이 모드는 manifest에서 지원되지 않습니다.")
+        self._renderer_restart_required = previous_renderer != _nested_get(user, ["overlay", "external_renderer"], None)
 
         # ── 오버레이 탭 ──
         char_path = self._char_path_var.get().strip()

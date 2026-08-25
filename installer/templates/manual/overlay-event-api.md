@@ -12,6 +12,20 @@ category: Reference
 
 # 커스텀 오버레이 Event API v1
 
+## 설치와 선택
+
+렌더러 manifest 위치는 `%USERPROFILE%/.engram/overlays/<id>/manifest.yaml`이다. Settings > 오버레이에서 **기본 오버레이 사용** 또는 설치된 외부 오버레이를 선택하고 manifest가 지원하는 모드만 선택한다. 저장 후에는 **오버레이 재시작**이 필요하며, 임의 command 또는 renderer별 설정 실행 기능은 없다.
+
+```yaml
+schema_version: 1
+id: vendor-demo
+name: Vendor Demo
+command: ["renderer.exe", "--engram-jsonl"]
+supported_modes: [observer, replace] # 생략 시 observer
+```
+
+`id`는 디렉터리명과 같아야 하고 `command`는 빈 값 없는 argv 문자열 배열이다. 상대 실행 파일은 manifest 디렉터리 안에만 있어야 한다. schema/id/name/command/mode/실행 파일이 유효하지 않으면 선택 목록에서 제외되고 상태·로그에 원인이 표시된다.
+
 ## 커스텀 오버레이 → Engram — 보내야 하는 메시지
 
 커스텀 오버레이의 **stdout은 Engram으로 가는 JSONL**이다. 시작 직후 첫 줄은 반드시 `overlay.hello`여야 한다. 디버그 로그는 stderr로 보낸다.
@@ -29,7 +43,7 @@ category: Reference
 {"schema_version":1,"type":"pointer.action","payload":{"action":"drag_move","screen_x":240,"screen_y":160}}
 ```
 
-`observer`에서는 geometry와 입력을 보내지 않아도 된다. `replace`에서는 geometry를 반드시 보내야 Engram이 말풍선·입력창·기록 창 위치를 맞춘다. `left_click`은 채팅을 열거나 닫고, `right_click`은 Engram 공통 메뉴를 연다. `drag_move`와 `drag_end`는 Engram이 소유하는 위치를 갱신한다.
+`observer`에서는 geometry와 입력을 보내지 않아도 된다. `replace`에서는 geometry를 반드시 보내야 Engram이 말풍선·입력창·기록 창 위치를 맞춘다. `left_click`은 채팅을 열거나 닫고, `right_click`은 Engram 공통 메뉴를 연다. `drag_move`와 `drag_end`는 Engram이 소유하는 위치를 갱신한다. handshake/JSONL/자식 종료 실패 시에는 번들 렌더러로 복구되며 API는 metadata-only라 대화·thinking·도구 payload와 파일 경로를 노출하지 않는다.
 
 ```mermaid
 flowchart LR
