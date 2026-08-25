@@ -9,6 +9,7 @@ from unittest.mock import Mock, patch
 from overlay.character import CharacterOverlay
 from overlay.event_api import DISPLAY_HINTS, OverlayEventPublisher, event_for_bubble, tool_category
 from overlay.main import OverlayApp
+from overlay.bubble.bubble_manager import BubbleManager
 from overlay.settings_window import OVERLAY_EVENT_API_MANUAL_URL, open_overlay_event_api_manual
 
 
@@ -224,6 +225,91 @@ class OverlayEventApiTests(unittest.TestCase):
         self.assertEqual(app._bubble_anchor, "observer")
         self.assertEqual(app._get_bubble_anchor_rect(), (100, 200, 300, 400))
         app.character.external_activate.assert_called_once()
+
+    def test_active_observer_geometry_reflows_all_shared_surfaces(self):
+        app = object.__new__(OverlayApp)
+        app._overlay_events = Mock(mode="observer")
+        app.character = Mock()
+        app._bubble_manager = Mock()
+        app._bubble_input = Mock()
+        app._bubble_history = Mock()
+        app._observer_rect = (100, 200, 30, 40)
+        app._bubble_anchor = "observer"
+
+        app._handle_external_renderer_message({
+            "schema_version": 1, "type": "overlay.geometry_changed",
+            "payload": {"x": 500, "y": 600, "width": 50, "height": 60},
+        })
+        self.assertEqual(app._observer_rect, (500, 600, 50, 60))
+        app._bubble_manager.refresh_positions.assert_called_once()
+        app._bubble_input.refresh_position.assert_called_once()
+        app._bubble_history.refresh_position.assert_called_once()
+
+    def test_renderer_failure_drops_observer_anchor_even_when_restore_raises(self):
+        app = object.__new__(OverlayApp)
+        app.character = Mock()
+        app.character.restore_bundled_renderer.side_effect = RuntimeError("gone")
+        app._bubble_manager = Mock()
+        app._bubble_input = Mock()
+        app._bubble_history = Mock()
+        app._observer_rect = (100, 200, 30, 40)
+        app._bubble_anchor = "observer"
+
+        app._restore_bundled_renderer()
+        self.assertIsNone(app._observer_rect)
+        self.assertEqual(app._bubble_anchor, "bundled")
+        app._bubble_manager.refresh_positions.assert_called_once()
+        app._bubble_input.refresh_position.assert_called_once()
+        app._bubble_history.refresh_position.assert_called_once()
+
+    def test_replace_geometry_still_persists_and_acknowledges_position(self):
+        app = object.__new__(OverlayApp)
+        app._overlay_events = Mock(mode="replace")
+        app.character = Mock()
+        app.character.apply_external_geometry.return_value = (50, 60, 70, 80)
+        app._observer_rect = None
+        app._bubble_anchor = "bundled"
+
+        app._handle_external_renderer_message({
+            "schema_version": 1, "type": "overlay.geometry_changed",
+            "payload": {"x": 50, "y": 60, "width": 70, "height": 80},
+        })
+        app.character.apply_external_geometry.assert_called_once_with(50, 60, 70, 80)
+        app._overlay_events.publish.assert_called_once_with(
+            "overlay.set_position", "idle", {"x": 50, "y": 60}
+        )
+
+    def test_echo_refresh_uses_anchor_relative_input_position(self):
+        manager = object.__new__(BubbleManager)
+        manager._echo_text = "hello"
+        manager._echo_rect = (110, 220, 120, 50, "left")
+        manager._echo_anchor_offset = (100, 200)
+        manager._get_char_rect = lambda: (1000, 2000, 30, 40)
+        manager._echo = Mock()
+        manager._echo.ensure.return_value = Mock()
+        manager._font_family = lambda: "Arial"
+        manager._font_size = lambda: 12
+        manager._theme = {"speech_fg": "#fff", "input_bg": "#000", "input_outline": "#111"}
+        with (
+            patch("overlay.bubble.bubble_manager.shapes.draw_speech_bubble", return_value=(120, 40)),
+            patch("overlay.bubble.bubble_manager.geometry.clamp_rect", side_effect=lambda x, y, w, h, _m: (x, y)),
+            patch("overlay.bubble.bubble_manager.geometry.get_monitor_work_rect", return_value=(0, 0, 3000, 3000)),
+            patch("overlay.bubble.bubble_manager.geometry.get_monitor_rect", return_value=(0, 0, 3000, 3000)),
+            patch("overlay.bubble.bubble_manager.geometry.monitor_bottom_center_pixel", return_value=(1500, 3000)),
+            patch("overlay.bubble.bubble_manager.geometry.angle_to_point", return_value=0),
+        ):
+            manager._render_echo()
+        # Original input (110,220) was relative to (10,20), so reflow uses
+        # (1100,2200) rather than stale absolute coordinates.
+        manager._echo.place.assert_called_once_with(1100, 2210, 120, 40)
+
+    def test_refresh_positions_reanchors_visible_echo(self):
+        manager = object.__new__(BubbleManager)
+        manager._render_thought = Mock()
+        manager._render_echo = Mock()
+        manager.refresh_positions()
+        manager._render_thought.assert_called_once()
+        manager._render_echo.assert_called_once()
 
     def test_observer_click_without_geometry_does_not_activate(self):
         app = object.__new__(OverlayApp)

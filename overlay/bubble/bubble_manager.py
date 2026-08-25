@@ -134,6 +134,10 @@ class BubbleManager:
         self._echo.set_on_click(self._on_echo_click)
         self._echo_text = ""
         self._echo_rect: "tuple[int, int, int, int, str] | None" = None  # (x, y, w, h, tail_side)
+        # _echo_rect is the input's original absolute rectangle, retained for
+        # compatibility/replay only.  The offset is the source of truth when a
+        # shared overlay anchor changes, so we never re-use stale screen coords.
+        self._echo_anchor_offset: "tuple[int, int] | None" = None
 
         # 도구 상태 줄 — id 순서를 유지하는 리스트 + 내용을 담는 dict.
         self._tool_order: list[str] = []
@@ -221,6 +225,8 @@ class BubbleManager:
             return
         self._echo_text = text
         self._echo_rect = input_rect
+        char_x, char_y = self._get_char_rect()[:2]
+        self._echo_anchor_offset = (input_rect[0] - char_x, input_rect[1] - char_y)
         self._render_echo()
         # echo_fade가 꺼져 있으면 다음 입력이 올 때까지 유지(자동 페이드 안 함).
         if self._cfg.get("echo_fade", True):
@@ -238,6 +244,11 @@ class BubbleManager:
             return
         x, y, w0, h0, _tail_side = self._echo_rect
         char_x, char_y, char_w, char_h = self._get_char_rect()
+        if self._echo_anchor_offset is not None:
+            # Keep the submitted input shell's relation to its clicked overlay
+            # source, then rebuild the echo from that local anchor.
+            x = char_x + self._echo_anchor_offset[0]
+            y = char_y + self._echo_anchor_offset[1]
         canvas = self._echo.ensure()
         # 입력창과 같은 폭/색을 써서 "방금 그 입력창이 굳어 남은" 느낌 — 응답(speech)
         # 색과 구분되게 input 팔레트를 쓴다.
@@ -269,6 +280,7 @@ class BubbleManager:
         입력창을 열 때마다 호출해서 캐릭터를 따라가게 한다 — 자동 배치든 사용자가
         드래그해서 옮긴 위치든(캐릭터 기준 오프셋이라) 그대로 다시 적용된다."""
         self._render_thought()  # 내부에서 _render_speech()까지 호출(버튼 행 포함)
+        self._render_echo()
 
     def replay_last(self) -> None:
         """캐릭터를 클릭했을 때 마지막 교환을 되살린다 — 풍선이 페이드로 사라졌어도
@@ -390,6 +402,7 @@ class BubbleManager:
         self._echo.hide()
         self._echo_text = ""
         self._echo_rect = None
+        self._echo_anchor_offset = None
         self._tool_order.clear()
         self._tool_info.clear()
         for win in self._approval_windows:
@@ -433,6 +446,7 @@ class BubbleManager:
         self._last_was_nudge = True
         self._echo_text = ""
         self._echo_rect = None
+        self._echo_anchor_offset = None
         self._echo.hide()
         self._render_speech()  # 버튼 행은 _render_speech 가 풍선과 함께 그린다
         dwell = int(dwell_ms if dwell_ms is not None else self._cfg.get("speech_dwell_ms", 20000))

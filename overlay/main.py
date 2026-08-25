@@ -1345,12 +1345,14 @@ class OverlayApp:
         """Replacement failure must always return control to the bundled window."""
         try:
             self.character.restore_bundled_renderer()
-            self._observer_rect = None
-            self._select_bubble_anchor("bundled")
         except Exception:
             log.debug("[overlay-api] bundled renderer restore skipped", exc_info=True)
         finally:
             self._replace_startup_geometry_pending = False
+            # The child may have exited after showing a bubble.  Its geometry
+            # must not survive a failed restore attempt as a stale anchor.
+            self._observer_rect = None
+            self._select_bubble_anchor("bundled")
 
     def _on_bundled_pointer_event(self, action: str, payload: dict) -> None:
         """Expose host-owned pointer semantics to observer renderers."""
@@ -1396,7 +1398,7 @@ class OverlayApp:
                     x, y = int(payload["x"]), int(payload["y"])
                     self._observer_rect = (x, y, width, height)
                     if self._bubble_anchor == "observer":
-                        self._bubble_manager.refresh_positions()
+                        self._select_bubble_anchor("observer")
                 else:
                     startup_geometry = getattr(self, "_replace_startup_geometry_pending", False)
                     rect = self.character.apply_external_geometry(
