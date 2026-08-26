@@ -364,6 +364,7 @@ class OverlayApp:
             log.warning("[overlay] app icon load failed: %s", e)
         self.root.withdraw()
         self._renderer_inbound: queue.Queue[dict] = queue.Queue()
+        self._replace_startup_geometry_pending = False
 
         self.chat = ChatTerminal(provider=self._cli_provider)
         self.character = CharacterOverlay(
@@ -387,6 +388,10 @@ class OverlayApp:
             on_message=self._renderer_inbound.put,
         )
         if self._overlay_events.start() and self._overlay_events.mode == "replace":
+            # The first renderer geometry describes its bootstrap window, not a
+            # user move.  The restored Engram position wins and is acknowledged
+            # back through overlay.set_position.
+            self._replace_startup_geometry_pending = True
             self.character.hide_for_external_renderer()
             rect = self.character.get_phys_rect()
             self._overlay_events.publish("overlay.set_position", "idle", {"x": rect[0], "y": rect[1]})
@@ -1306,6 +1311,8 @@ class OverlayApp:
             self.character.restore_bundled_renderer()
         except Exception:
             log.debug("[overlay-api] bundled renderer restore skipped", exc_info=True)
+        finally:
+            self._replace_startup_geometry_pending = False
 
     def _on_bundled_pointer_event(self, action: str, payload: dict) -> None:
         """Expose host-owned pointer semantics to observer renderers."""
@@ -1344,9 +1351,12 @@ class OverlayApp:
         kind = message.get("type")
         try:
             if kind == "overlay.geometry_changed":
+                startup_geometry = getattr(self, "_replace_startup_geometry_pending", False)
                 rect = self.character.apply_external_geometry(
-                    payload["x"], payload["y"], payload["width"], payload["height"]
+                    payload["x"], payload["y"], payload["width"], payload["height"],
+                    preserve_position=startup_geometry,
                 )
+                self._replace_startup_geometry_pending = False
                 self._overlay_events.publish(
                     "overlay.set_position", "idle", {"x": rect[0], "y": rect[1]}
                 )
