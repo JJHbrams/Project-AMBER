@@ -41,7 +41,7 @@ flowchart LR
 
 ## Engram → 커스텀 오버레이 — 받는 메시지
 
-Engram은 **커스텀 오버레이 프로세스의 stdin에 JSONL을 쓴다**. hello가 성공하면 먼저 `engram.welcome`과 `state.snapshot`을 받고, replace 모드에서는 현재 위치를 `overlay.set_position`으로 받는다. 이후 의미 기반 이벤트 envelope을 계속 받는다.
+Engram은 **커스텀 오버레이 프로세스의 stdin에 JSONL을 쓴다**. hello가 성공하면 먼저 `engram.welcome`과 `state.snapshot`을 받고, replace 모드에서는 현재 위치를 `overlay.set_position`으로 받는다. replace의 첫 `overlay.geometry_changed`는 renderer bootstrap 보고다. Engram에 저장된 x/y가 authoritative이므로 renderer는 받은 초기 `overlay.set_position`을 최종 위치로 적용해야 한다. 첫 geometry의 width/height만 채택할 수 있고, 이후 사용자 이동 geometry만 저장 위치를 갱신한다. 이후 의미 기반 이벤트 envelope을 계속 받는다.
 
 |메시지|필드|시점·동작|
 |---|---|---|

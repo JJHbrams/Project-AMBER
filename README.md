@@ -446,6 +446,10 @@ Markdown 파일로 위키 노트를 작성하면 자동으로 KG에 반영되어
 > AI가 생성한 노트와 직접 작성한 노트가 동일한 KG 위에서 통합됩니다.
 > Obsidian에서 링크를 추가하면 다음 동기화 시 engram의 시맨틱 검색 범위도 함께 넓어집니다.
 
+## 외부 오버레이 빠른 설정
+
+[engram-overlay](https://github.com/JJHbrams/engram-overlay)는 예제와 reference implementation을 제공한다. 해당 manifest 패키지를 `%USERPROFILE%/.engram/overlays/<id>/`에 설치한 뒤 **Settings GUI > 오버레이**에서 선택한다. `observer`는 번들 캐릭터를 유지하고, `replace`는 번들을 대체한다. 선택 후에는 **오버레이 재시작**이 필요하며, renderer 실패 시 번들 캐릭터로 자동 복구된다. 규약은 [외부 오버레이 Event API](docs/overlay-event-api-v1.md)를 참고한다.
+
 ## 문서
 
 - 사용자 개요: 이 README

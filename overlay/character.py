@@ -946,11 +946,17 @@ class CharacterOverlay:
         self.root.deiconify()
         self.root.attributes("-topmost", True)
 
-    def apply_external_geometry(self, x: int, y: int, width: int, height: int) -> tuple[int, int, int, int]:
-        """Keep Engram-owned anchor/state in sync while the bundled image is hidden."""
+    def apply_external_geometry(
+        self, x: int, y: int, width: int, height: int, *, preserve_position: bool = False
+    ) -> tuple[int, int, int, int]:
+        """Sync replacement geometry while retaining the saved startup x/y."""
         width, height = max(1, int(width)), max(1, int(height))
+        if preserve_position and self._external_rect is not None:
+            x, y = self._external_rect[:2]
         x, y = clamp_overlay_position(int(x), int(y), width, height)
         self._external_rect = (x, y, width, height)
+        if preserve_position:
+            return self._external_rect
         work = bubble_geometry.get_monitor_work_rect(x + width // 2, y + height // 2)
 
         def update(state: dict) -> None:
