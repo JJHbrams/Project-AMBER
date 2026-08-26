@@ -221,6 +221,18 @@ class OverlayEventApiTests(unittest.TestCase):
         self.assertIn('text="?", width=3', settings)
         self.assertIn("커스텀 오버레이 적용 방법", settings)
         self.assertIn("for line in sys.stdin", manual)
+        readme = (root / "README.md").read_text(encoding="utf-8")
+        for expected in (
+            "https://github.com/JJHbrams/engram-overlay",
+            "%USERPROFILE%/.engram/overlays/<id>/",
+            "Settings GUI > 오버레이",
+            "`observer`는 번들 캐릭터를 유지",
+            "`replace`는 번들을 대체",
+            "오버레이 재시작",
+            "renderer 실패 시 번들 캐릭터로 자동 복구",
+            "docs/overlay-event-api-v1.md",
+        ):
+            self.assertIn(expected, readme)
 
     def test_persona_shortcut_is_tab_scoped_not_a_cli_control(self):
         source = (Path(__file__).resolve().parents[1] / "overlay/settings_window.py").read_text(encoding="utf-8")
