@@ -68,7 +68,7 @@ session:
             encoding="utf-8-sig"
         )
 
-        self.assertEqual(base_version, "1.5.5")
+        self.assertEqual(base_version, "1.5.6")
         self.assertIn("#ifndef AppVersion", iss)
         self.assertIn('#define AppVersion "0.0.0.0"', iss)
         self.assertIn(
