@@ -13,7 +13,7 @@ class RuntimeContractTests(unittest.TestCase):
 
         self.assertEqual(result["contract_version"], 1)
         self.assertEqual(result["runtime"], "source")
-        self.assertRegex(result["version"], r"^1\.5\.5\.\d+$")
+        self.assertRegex(result["version"], r"^1\.5\.6\.\d+$")
         self.assertIn(
             result["version_build_source"],
             {"git", "fallback", "SEMVER4_BUILD", "GITHUB_RUN_NUMBER", "CI_PIPELINE_IID", "BUILD_NUMBER"},
