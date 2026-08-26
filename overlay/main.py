@@ -391,15 +391,16 @@ class OverlayApp:
         # geometry remains owned by CharacterOverlay and is persisted there.
         self._observer_rect: tuple[int, int, int, int] | None = None
         self._bubble_anchor = "bundled"
+        self._replace_startup_geometry_pending = False
         self._overlay_events = OverlayEventPublisher(
             cfg,
             on_failure=lambda: self._renderer_inbound.put({"type": "_renderer.failure"}),
             on_message=self._renderer_inbound.put,
         )
         if self._overlay_events.start() and self._overlay_events.mode == "replace":
-            # The first renderer geometry describes its bootstrap window, not a
-            # user move.  The restored Engram position wins and is acknowledged
-            # back through overlay.set_position.
+            # The next geometry is renderer bootstrap data.  Keep the restored
+            # bundled/state x/y authoritative, then acknowledge it back to the
+            # child; later geometry is a real user movement and persists.
             self._replace_startup_geometry_pending = True
             self.character.hide_for_external_renderer()
             rect = self.character.get_phys_rect()
@@ -1352,6 +1353,7 @@ class OverlayApp:
             # The child may have exited after showing a bubble.  Its geometry
             # must not survive a failed restore attempt as a stale anchor.
             self._observer_rect = None
+            self._replace_startup_geometry_pending = False
             self._select_bubble_anchor("bundled")
 
     def _on_bundled_pointer_event(self, action: str, payload: dict) -> None:

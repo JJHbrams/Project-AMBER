@@ -198,6 +198,7 @@ class OverlayEventApiTests(unittest.TestCase):
         overlay._img_w = 30
         overlay._img_h = 40
         overlay._external_rect = (500, 600, 30, 40)
+        saved = {}
         with (
             patch("overlay.character.clamp_overlay_position", side_effect=lambda x, y, width, height: (x, y)),
             patch("overlay.character.update_overlay_state") as update_state,
@@ -207,34 +208,7 @@ class OverlayEventApiTests(unittest.TestCase):
                 (500, 600, 300, 400),
             )
         update_state.assert_not_called()
-
-    def test_first_replace_geometry_acknowledges_saved_position_then_later_move_persists(self):
-        app = object.__new__(OverlayApp)
-        app._overlay_events = Mock(mode="replace")
-        app.character = Mock()
-        app.character.apply_external_geometry.side_effect = [(500, 600, 70, 80), (700, 800, 70, 80)]
-        app._replace_startup_geometry_pending = True
-
-        app._handle_external_renderer_message({
-            "schema_version": 1, "type": "overlay.geometry_changed",
-            "payload": {"x": 50, "y": 60, "width": 70, "height": 80},
-        })
-        app._handle_external_renderer_message({
-            "schema_version": 1, "type": "overlay.geometry_changed",
-            "payload": {"x": 700, "y": 800, "width": 70, "height": 80},
-        })
-
-        self.assertEqual(
-            app.character.apply_external_geometry.call_args_list[0].args,
-            (50, 60, 70, 80),
-        )
-        self.assertTrue(app.character.apply_external_geometry.call_args_list[0].kwargs["preserve_position"])
-        self.assertFalse(app.character.apply_external_geometry.call_args_list[1].kwargs["preserve_position"])
-        self.assertFalse(app._replace_startup_geometry_pending)
-        self.assertEqual(
-            app._overlay_events.publish.call_args_list[-1].args,
-            ("overlay.set_position", "idle", {"x": 700, "y": 800}),
-        )
+        self.assertEqual(saved, {})
 
     def test_observer_geometry_is_transient_and_click_selects_shared_anchor(self):
         app = object.__new__(OverlayApp)
@@ -303,14 +277,34 @@ class OverlayEventApiTests(unittest.TestCase):
         app.character.apply_external_geometry.return_value = (50, 60, 70, 80)
         app._observer_rect = None
         app._bubble_anchor = "bundled"
+        app._replace_startup_geometry_pending = False
 
         app._handle_external_renderer_message({
             "schema_version": 1, "type": "overlay.geometry_changed",
             "payload": {"x": 50, "y": 60, "width": 70, "height": 80},
         })
-        app.character.apply_external_geometry.assert_called_once_with(50, 60, 70, 80)
+        app.character.apply_external_geometry.assert_called_once_with(50, 60, 70, 80, preserve_position=False)
         app._overlay_events.publish.assert_called_once_with(
             "overlay.set_position", "idle", {"x": 50, "y": 60}
+        )
+
+    def test_first_replace_geometry_adopts_size_but_acknowledges_saved_position(self):
+        app = object.__new__(OverlayApp)
+        app._overlay_events = Mock(mode="replace")
+        app.character = Mock()
+        app.character.apply_external_geometry.return_value = (500, 600, 70, 80)
+        app._observer_rect = None
+        app._bubble_anchor = "bundled"
+        app._replace_startup_geometry_pending = True
+
+        app._handle_external_renderer_message({
+            "schema_version": 1, "type": "overlay.geometry_changed",
+            "payload": {"x": 50, "y": 60, "width": 70, "height": 80},
+        })
+        app.character.apply_external_geometry.assert_called_once_with(50, 60, 70, 80, preserve_position=True)
+        self.assertFalse(app._replace_startup_geometry_pending)
+        app._overlay_events.publish.assert_called_once_with(
+            "overlay.set_position", "idle", {"x": 500, "y": 600}
         )
 
     def test_echo_refresh_uses_anchor_relative_input_position(self):

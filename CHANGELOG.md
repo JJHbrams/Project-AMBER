@@ -18,8 +18,9 @@ All notable changes to this project are documented in this file.
 
 ### Fixed
 
-- replace 외부 오버레이의 초기 위치는 Engram이 저장한 위치를 우선하도록 릴리즈
-  메타데이터를 1.5.6으로 갱신했다.
+- replace 외부 오버레이가 시작 직후 보내는 bootstrap geometry가 저장된 Engram 위치를
+  덮어쓰지 않게 했다. 저장된 x/y를 초기 `overlay.set_position`의 authoritative 위치로
+  사용하고, 이후 사용자 드래그만 정상적으로 저장한다.
 - 원격 로그인 셸이 zsh 인 호스트에서 `setup-remote.ps1` 의 OS 판별이 실패했다.
   프로브 스크립트를 명령줄이 아니라 stdin 으로 `sh -s` 에 넘겨, 로그인 셸의 방언과
   무관하게 동작하도록 고쳤다.

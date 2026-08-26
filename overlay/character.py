@@ -949,7 +949,12 @@ class CharacterOverlay:
     def apply_external_geometry(
         self, x: int, y: int, width: int, height: int, *, preserve_position: bool = False
     ) -> tuple[int, int, int, int]:
-        """Sync replacement geometry while retaining the saved startup x/y."""
+        """Sync replacement geometry while keeping persisted startup x/y authoritative.
+
+        The renderer's very first geometry is its own window bootstrap, not a
+        user move.  In that one case Engram adopts its dimensions but retains
+        the bundled/persisted position and does not rewrite overlay.state.yaml.
+        """
         width, height = max(1, int(width)), max(1, int(height))
         if preserve_position and self._external_rect is not None:
             x, y = self._external_rect[:2]
