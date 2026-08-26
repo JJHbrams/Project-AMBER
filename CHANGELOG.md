@@ -4,6 +4,13 @@ All notable changes to this project are documented in this file.
 
 ## Unreleased
 
+## [1.5.6] — 2026-08-26
+
+### Fixed
+
+- replace 외부 오버레이의 초기 위치는 Engram이 저장한 위치를 우선하도록 릴리즈
+  메타데이터를 1.5.6으로 갱신했다.
+
 ## [1.5.5] — 2026-08-19
 
 ### Added

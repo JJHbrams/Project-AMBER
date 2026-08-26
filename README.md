@@ -449,6 +449,7 @@ Markdown 파일로 위키 노트를 작성하면 자동으로 KG에 반영되어
 ## 문서
 
 - 사용자 개요: 이 README
+- 외부 오버레이 예제와 개발 도구: [engram-overlay](https://github.com/JJHbrams/engram-overlay)
 - 오버레이 커스텀 팩: [docs/character-packs.md](docs/character-packs.md)
 - 기술 문서: [docs/dev/system-technical-reference.md](docs/dev/system-technical-reference.md)
 - 보조 문서: [docs/architecture.md](docs/architecture.md), [docs/memory-tiering.md](docs/memory-tiering.md)
