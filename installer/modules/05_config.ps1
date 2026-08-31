@@ -1,6 +1,6 @@
 ﻿#
 # 05_config.ps1 — Runtime config, User config, MCP config (모든 클라이언트)
-#   Copilot CLI / Claude Code / Gemini CLI / VSCode workspace / VSCode global / project .mcp.json
+#   Copilot CLI / Claude Code / Antigravity / VSCode workspace / VSCode global / project .mcp.json
 #
 
 # 4b. Runtime config (model/options)
@@ -200,27 +200,18 @@ if ($claudeHardeningResult -like "*ok*") {
     Write-Warn "Claude project MCP hardening failed: $claudeHardeningResult"
 }
 
-# 5bb. MCP config (Gemini CLI) — overlay 수명 공유 HTTP
-Write-Step "MCP config (Gemini CLI)..."
-$geminiCmd = $GeminiCmdDetected
-if ($geminiCmd) {
-    & gemini mcp remove --scope user engram *> $null
-    $geminiMcpOut = & gemini mcp add --scope user --transport http engram "http://127.0.0.1:$MCP_HTTP_PORT/mcp" 2>&1
+# 5bb. MCP config (Antigravity / AGY) — overlay 수명 공유 HTTP
+Write-Step "MCP config (Antigravity)..."
+if ($AntigravityCmdDetected) {
+    $antigravityMcpOut = & agy mcp add engram "http://127.0.0.1:$MCP_HTTP_PORT/mcp" 2>&1
     if ($LASTEXITCODE -eq 0) {
-        Write-Ok "Gemini user MCP server registered: engram (HTTP)"
+        Write-Ok "Antigravity user MCP server registered: engram (HTTP)"
     } else {
-        Write-Warn "Gemini MCP HTTP 등록 실패 — stdio 폴백 시도"
-        & gemini mcp remove --scope user engram *> $null
-        $geminiMcpOut2 = & gemini mcp add --scope user --transport stdio -e "ENGRAM_DB_DIR=$DbDir" engram $PythonExe $McpServerScript 2>&1
-        if ($LASTEXITCODE -eq 0) {
-            Write-Ok "Gemini MCP (stdio 폴백) 등록됨"
-        } else {
-            Write-Warn "Gemini MCP 등록 실패: $geminiMcpOut2"
-            Write-Warn "수동 등록: gemini mcp add --scope user --transport http engram `"http://127.0.0.1:$MCP_HTTP_PORT/mcp`""
-        }
+        Write-Warn "Antigravity MCP 등록 실패: $antigravityMcpOut"
+        Write-Warn "수동 등록: agy mcp add engram `"http://127.0.0.1:$MCP_HTTP_PORT/mcp`""
     }
 } else {
-    Write-Warn "Gemini CLI not found — skipping Gemini MCP setup"
+    Write-Warn "Antigravity (agy) not found — skipping MCP setup"
 }
 
 # 5bc. MCP config (Codex CLI) — 기존 사용자 정의 engram 항목은 보존

@@ -68,17 +68,46 @@ session:
             encoding="utf-8-sig"
         )
 
-        self.assertEqual(base_version, "1.5.6")
+        self.assertEqual(base_version, "1.5.7")
         self.assertIn("#ifndef AppVersion", iss)
         self.assertIn('#define AppVersion "0.0.0.0"', iss)
         self.assertIn(
-            'OutputBaseFilename=EngramOverlay_{#AppVersion}{#BuildOutputSuffix}_x64-setup',
+            'OutputBaseFilename=AMBER_{#AppVersion}{#BuildOutputSuffix}_x64-setup',
             iss,
         )
         self.assertIn("$frozenManifest.version.version", build_installer)
         self.assertIn("Frozen build version is not Major.Minor.Patch.Build", build_installer)
         self.assertIn('$versionDefine = "/DAppVersion=$AppVersion"', build_installer)
         self.assertNotIn('/DAppVersion=`"$AppVersion`"', build_installer)
+
+    def test_installer_and_shortcuts_use_amber_product_branding_with_legacy_cleanup(self):
+        iss = (ROOT / "installer" / "engram-overlay.iss").read_text(encoding="utf-8-sig")
+        build_installer = (ROOT / "installer" / "build-installer.ps1").read_text(encoding="utf-8-sig")
+        configure = (ROOT / "installer" / "configure.ps1").read_text(encoding="utf-8-sig")
+        source_install = (ROOT / "installer" / "install.ps1").read_text(encoding="utf-8-sig")
+        shortcuts = (ROOT / "installer" / "modules" / "10_shortcuts.ps1").read_text(encoding="utf-8-sig")
+        interactive = (ROOT / "installer" / "modules" / "02_interactive.ps1").read_text(encoding="utf-8-sig")
+        settings = (ROOT / "overlay" / "settings_window.py").read_text(encoding="utf-8")
+
+        self.assertIn('#define AppName "AMBER (ENGRAM)"', iss)
+        self.assertIn('OutputBaseFilename=AMBER_{#AppVersion}{#BuildOutputSuffix}_x64-setup', iss)
+        self.assertIn('"AMBER_${version}${outputSuffix}_x64-setup.exe"', build_installer)
+        self.assertIn('AppId={{A7E3C1D2-9B4F-4E6A-8C11-5D2F1A0B3E64}', iss)
+        self.assertIn('DefaultDirName={autopf}\\EngramOverlay', iss)
+        self.assertIn('#define AppExeName "engram-overlay.exe"', iss)
+
+        self.assertIn('AMBER (ENGRAM) — Configure', configure)
+        for script in (configure, source_install, shortcuts, interactive):
+            self.assertIn('AMBER (ENGRAM).lnk', script)
+            self.assertIn('engram-overlay.lnk', script)
+        self.assertIn('Engram Overlay.lnk', configure)
+        self.assertIn('Engram Overlay.lnk', source_install)
+        self.assertIn('Engram Overlay.lnk', shortcuts)
+        self.assertIn('"AMBER (ENGRAM)"', shortcuts)
+        self.assertIn('"AMBER (ENGRAM) — Auto Start"', shortcuts)
+        self.assertIn('_STARTUP_LINK = _STARTUP_DIR / "AMBER (ENGRAM).lnk"', settings)
+        self.assertIn('_LEGACY_STARTUP_LINK = _STARTUP_DIR / "engram-overlay.lnk"', settings)
+        self.assertIn("AMBER (ENGRAM) \\u2014 Auto Start", settings)
 
     def test_configure_waits_for_every_frozen_installer_role_exit_code(self):
         configure = (ROOT / "installer" / "configure.ps1").read_text(encoding="utf-8-sig")
@@ -110,6 +139,38 @@ session:
         self.assertIn('-Role "install-bootstrap"', bootstrap_block)
         self.assertIn("$installBootstrapExitCode -ne 0", bootstrap_block)
         self.assertNotIn("$LASTEXITCODE", user_block + bootstrap_block)
+
+    def test_upgrade_bootstraps_manuals_before_fallible_config_and_mcp_steps(self):
+        configure = (ROOT / "installer" / "configure.ps1").read_text(encoding="utf-8-sig")
+
+        bootstrap = configure.index('$installBootstrapArgs = @(')
+        user_config = configure.index('Write-Step "user.config.yaml"')
+        overlay_config = configure.index('Write-Step "overlay.user.yaml"')
+        mcp_config = configure.index('Write-Step "MCP 설정 (HTTP)"')
+        self.assertLess(bootstrap, user_config)
+        self.assertLess(bootstrap, overlay_config)
+        self.assertLess(bootstrap, mcp_config)
+        self.assertIn('Start-Transcript -Path $ConfigureLog -Force', configure)
+        self.assertIn('Join-Path $ShimDir "logs"', configure)
+        self.assertIn("function Stop-ConfigureTranscriptSafely", configure)
+        self.assertIn("function Exit-Configure([int]$Code)", configure)
+        self.assertIn("} finally {\n    Stop-ConfigureTranscriptSafely\n}", configure)
+        self.assertNotRegex(configure, r"(?m)^\s*exit\s+[01]\s*$")
+        self.assertGreaterEqual(configure.count("Exit-Configure 1"), 4)
+        self.assertGreaterEqual(configure.count("Exit-Configure 0"), 2)
+
+    def test_inno_propagates_single_configure_run_exit_code(self):
+        iss = (ROOT / "installer" / "engram-overlay.iss").read_text(encoding="utf-8-sig")
+
+        self.assertNotIn("\n[Run]\n", iss)
+        code = iss.split("[Code]", 1)[1]
+        run_configure = code[code.index("procedure RunConfigure;") : code.index("function PrepareToInstall")]
+        self.assertEqual(code.count("procedure RunConfigure;"), 1)
+        self.assertIn("ewWaitUntilTerminated", run_configure)
+        self.assertIn("if ResultCode <> 0 then", run_configure)
+        self.assertIn("RaiseException", run_configure)
+        self.assertIn("if CurStep = ssPostInstall then", run_configure)
+        self.assertEqual(run_configure.count("RunConfigure;"), 2)  # declaration plus one invocation
 
     def test_installer_stops_only_the_target_artifact_before_copying_files(self):
         iss = (ROOT / "installer" / "engram-overlay.iss").read_text(encoding="utf-8-sig")

@@ -17,7 +17,7 @@ param(
     [Parameter(Mandatory)][string]$InstallDir,
     [string]$DbDir = "",
     [string]$WorkDir = "",
-    [ValidateSet("copilot", "gemini", "codex", "claude-code", "claude-code-ollama", "ollama")]
+    [ValidateSet("copilot", "antigravity", "gemini", "codex", "claude-code", "claude-code-ollama", "ollama")]
     [string]$CliProvider = "claude-code",
     [string]$OllamaModel = "",
     [string]$IdentityName = "",
@@ -28,6 +28,13 @@ param(
 
 $ErrorActionPreference = "Stop"
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()
+
+# One-release non-interactive compatibility only; the GUI and docs expose
+# Antigravity exclusively.
+if ($CliProvider -eq "gemini") {
+    Write-Warn "Deprecated -CliProvider gemini mapped to antigravity."
+    $CliProvider = "antigravity"
+}
 
 function Write-Step($m) { Write-Host "  [+] $m" -ForegroundColor Cyan }
 function Write-Ok($m)   { Write-Host "  [OK] $m" -ForegroundColor Green }
@@ -47,6 +54,29 @@ $MCP_HTTP_PORT = 17385
 $Utf8NoBom     = [System.Text.UTF8Encoding]::new($false)
 
 if (-not (Test-Path $ShimDir)) { New-Item $ShimDir -ItemType Directory -Force | Out-Null }
+$ConfigureLogDir = Join-Path $ShimDir "logs"
+if (-not (Test-Path $ConfigureLogDir)) { New-Item $ConfigureLogDir -ItemType Directory -Force | Out-Null }
+$ConfigureLog = Join-Path $ConfigureLogDir ("configure-{0}.log" -f (Get-Date -Format "yyyyMMdd-HHmmss-fff"))
+Start-Transcript -Path $ConfigureLog -Force | Out-Null
+$script:ConfigureTranscriptStarted = $true
+Write-Host "  Configure log: $ConfigureLog" -ForegroundColor DarkGray
+
+function Stop-ConfigureTranscriptSafely {
+    if (-not $script:ConfigureTranscriptStarted) { return }
+    try {
+        Stop-Transcript | Out-Null
+    } catch {
+        # Logging cleanup must never replace the installer's original result.
+        try { Write-Host "  [!] Configure log close failed: $_" -ForegroundColor Yellow } catch {}
+    } finally {
+        $script:ConfigureTranscriptStarted = $false
+    }
+}
+
+function Exit-Configure([int]$Code) {
+    Stop-ConfigureTranscriptSafely
+    exit $Code
+}
 
 function Invoke-EngramFrozenRole {
     param(
@@ -202,13 +232,19 @@ function Remove-EngramManagedCodexHooks {
     Write-Ok "Removed Engram-managed Codex hooks"
 }
 
-# ── Uninstall ───────────────────────────────────────────────
+# ── Uninstall / install ─────────────────────────────────────
+# The finally block also closes the transcript for unexpected terminating
+# errors. Explicit outcomes use Exit-Configure so their original exit code is
+# retained even if transcript cleanup itself fails.
+try {
 if ($Uninstall) {
     Write-Step "Uninstall — 바로가기/환경변수 정리 (DB·config 보존)"
     Get-Process -Name "engram-overlay" -ErrorAction SilentlyContinue | Stop-Process -Force
     Remove-EngramManagedClaudeHooks
     Remove-EngramManagedCodexHooks
     foreach ($lnk in @(
+        (Join-Path ([Environment]::GetFolderPath("Programs")) "AMBER (ENGRAM).lnk"),
+        (Join-Path ([Environment]::GetFolderPath("Startup")) "AMBER (ENGRAM).lnk"),
         (Join-Path ([Environment]::GetFolderPath("Programs")) "Engram Overlay.lnk"),
         (Join-Path ([Environment]::GetFolderPath("Startup")) "engram-overlay.lnk")
     )) { if (Test-Path $lnk) { Remove-Item $lnk -Force; Write-Ok "Removed: $lnk" } }
@@ -219,19 +255,19 @@ if ($Uninstall) {
         [Environment]::SetEnvironmentVariable("COPILOT_CUSTOM_INSTRUCTIONS_DIRS", $null, "User")
     }
     Write-Ok "Done (DB/config preserved at $ShimDir)"
-    exit 0
+    Exit-Configure 0
 }
 
 if (-not (Test-Path $DistExe)) {
     Write-Warn "engram-overlay.exe 없음: $DistExe — 번들 복사가 선행돼야 합니다."
-    exit 1
+    Exit-Configure 1
 }
 if (-not $DbDir)   { $DbDir   = if (Test-Path "D:\") { "D:\intel_engram" } else { "C:\intel_engram" } }
 if (-not $WorkDir) { $WorkDir = $DbDir }
 if (-not (Test-Path $DbDir)) { New-Item $DbDir -ItemType Directory -Force | Out-Null }
 
 Write-Host ""
-Write-Host "  Engram Overlay — Configure" -ForegroundColor Magenta
+Write-Host "  AMBER (ENGRAM) — Configure" -ForegroundColor Magenta
 Write-Host "  InstallDir : $InstallDir" -ForegroundColor DarkGray
 Write-Host "  DB / Work  : $DbDir / $WorkDir" -ForegroundColor DarkGray
 $providerLabel = $CliProvider
@@ -239,7 +275,25 @@ if ($OllamaModel) { $providerLabel = "$CliProvider ($OllamaModel)" }
 Write-Host "  Provider   : $providerLabel" -ForegroundColor DarkGray
 Write-Host ""
 
-# ── 1. user.config.yaml (템플릿, python 불필요) ──────────────
+# ── 1. DB / Wiki / Directives bootstrap ─────────────────────
+# Keep this before config migration and external CLI/MCP registration.  A
+# legacy user may have a valid selected DB/wiki directory but malformed client
+# config; managed manuals must still be repaired before those fallible steps.
+Write-Step "DB / Wiki / Directives 초기화"
+$installBootstrapArgs = @(
+    "--db-dir", ('"{0}"' -f $DbDir),
+    "--templates-dir", ('"{0}"' -f $InstallerTemplates)
+)
+$installBootstrapExitCode = Invoke-EngramFrozenRole `
+    -Role "install-bootstrap" `
+    -ArgumentList $installBootstrapArgs
+if ($installBootstrapExitCode -ne 0) {
+    Write-Warn "초기화 실패 (exit=$installBootstrapExitCode, log=$ConfigureLog)"
+    Exit-Configure 1
+}
+Write-Ok "DB schema, wiki starter files, directives"
+
+# ── 2. user.config.yaml (템플릿, python 불필요) ──────────────
 Write-Step "user.config.yaml"
 if (-not (Test-Path $UserConfig)) {
     $u = @"
@@ -270,12 +324,12 @@ workdir: "$($WorkDir -replace '\\','/')"
         -ArgumentList $installUserConfigArgs
     if ($installUserConfigExitCode -ne 0) {
         Write-Warn "사용자 설정 경로 갱신 실패 (exit=$installUserConfigExitCode)"
-        exit 1
+        Exit-Configure 1
     }
     Write-Ok "Updated: $UserConfig (db.root_dir, workdir)"
 }
 
-# ── 2. overlay.user.yaml (provider/모델/mcp 포트) ────────────
+# ── 3. overlay.user.yaml (provider/모델/mcp 포트) ────────────
 Write-Step "overlay.user.yaml"
 $ollamaLine = if ($OllamaModel) { "  ollama_model: `"$OllamaModel`"`n" } else { "" }
 $o = @"
@@ -292,11 +346,11 @@ if (-not (Test-Path $OverlayConfig)) {
     $overlayConfigArgs = @("--config-path", ('"{0}"' -f $OverlayConfig), "--overlay-provider", $CliProvider, "--overlay-mcp-port", $MCP_HTTP_PORT)
     if ($OllamaModel) { $overlayConfigArgs += @("--overlay-ollama-model", $OllamaModel) }
     $overlayConfigExitCode = Invoke-EngramFrozenRole -Role "install-user-config" -ArgumentList $overlayConfigArgs
-    if ($overlayConfigExitCode -ne 0) { Write-Warn "overlay.user.yaml provider 갱신 실패 (exit=$overlayConfigExitCode)"; exit 1 }
+    if ($overlayConfigExitCode -ne 0) { Write-Warn "overlay.user.yaml provider 갱신 실패 (exit=$overlayConfigExitCode)"; Exit-Configure 1 }
     Write-Ok "Updated: $OverlayConfig (cli.provider, mcp.http_port)"
 }
 
-# ── 3. MCP 설정 (JSON, PowerShell 네이티브) ──────────────────
+# ── 4. MCP 설정 (JSON, PowerShell 네이티브) ──────────────────
 # 모든 클라이언트가 overlay 수명 공유 HTTP 서버(127.0.0.1:$MCP_HTTP_PORT)로 접속.
 Write-Step "MCP 설정 (HTTP)"
 $mcpUrl = "http://127.0.0.1:$MCP_HTTP_PORT/mcp"
@@ -334,11 +388,10 @@ if (Merge-JsonMcp -Path (Join-Path $env:USERPROFILE ".claude.json") -ServersKey 
 [System.IO.File]::WriteAllText((Join-Path $ShimDir "claude-mcp.json"), (@{ mcpServers = @{ engram = $httpEntry } } | ConvertTo-Json -Depth 6), $Utf8NoBom)
 # VSCode global (%APPDATA%/Code/User/mcp.json) : servers
 if (Merge-JsonMcp -Path (Join-Path $env:APPDATA "Code\User\mcp.json") -ServersKey "servers" -Entry $httpEntry) { Write-Ok "VSCode (global)" }
-# Gemini CLI (있을 때만)
-if (Get-Command gemini -ErrorAction SilentlyContinue) {
-    & gemini mcp remove --scope user engram *> $null
-    & gemini mcp add --scope user --transport http engram $mcpUrl *> $null
-    if ($LASTEXITCODE -eq 0) { Write-Ok "Gemini CLI" } else { Write-Warn "Gemini MCP 등록 실패 (수동: gemini mcp add --scope user --transport http engram $mcpUrl)" }
+# Antigravity CLI (official AGY user MCP command)
+if (Get-Command agy -ErrorAction SilentlyContinue) {
+    & agy mcp add engram $mcpUrl *> $null
+    if ($LASTEXITCODE -eq 0) { Write-Ok "Antigravity (agy)" } else { Write-Warn "Antigravity MCP 등록 실패 (수동: agy mcp add engram $mcpUrl)" }
 }
 # Codex CLI (기존 사용자 정의 engram 항목은 보존)
 if (Get-Command codex -ErrorAction SilentlyContinue) {
@@ -351,13 +404,13 @@ if (Get-Command codex -ErrorAction SilentlyContinue) {
     }
 }
 
-# ── 4. .env 템플릿 ───────────────────────────────────────────
+# ── 5. .env 템플릿 ───────────────────────────────────────────
 if (-not (Test-Path $EnvFile)) {
     [System.IO.File]::WriteAllText($EnvFile, "# Engram 환경변수`n# Discord Bot Token (선택)`nDISCORD_BOT_TOKEN=`n", $Utf8NoBom)
     Write-Ok ".env 템플릿 생성"
 }
 
-# ── 5. 환경변수 (User 영구) ──────────────────────────────────
+# ── 6. 환경변수 (User 영구) ──────────────────────────────────
 Write-Step "환경변수 (User)"
 [Environment]::SetEnvironmentVariable("ENGRAM_DB_DIR", $DbDir, "User")
 [Environment]::SetEnvironmentVariable("ENGRAM_WORKDIR", $WorkDir, "User")
@@ -372,21 +425,6 @@ if (Test-Path $CopilotInstructionsSource) {
 } else {
     Write-Warn "Copilot session protocol source 없음: $CopilotInstructionsSource"
 }
-
-# ── 6. DB / Wiki / Directives bootstrap ─────────────────────
-Write-Step "DB / Wiki / Directives 초기화"
-$installBootstrapArgs = @(
-    "--db-dir", ('"{0}"' -f $DbDir),
-    "--templates-dir", ('"{0}"' -f $InstallerTemplates)
-)
-$installBootstrapExitCode = Invoke-EngramFrozenRole `
-    -Role "install-bootstrap" `
-    -ArgumentList $installBootstrapArgs
-if ($installBootstrapExitCode -ne 0) {
-    Write-Warn "초기화 실패 (exit=$installBootstrapExitCode)"
-    exit 1
-}
-Write-Ok "DB schema, wiki starter files, directives"
 
 # ── 7. Copilot / Claude skills ──────────────────────────────
 Write-Step "Engram workflow skills"
@@ -437,15 +475,21 @@ function New-Lnk($path, $desc) {
     $s.IconLocation = "$DistExe,0"
     $s.Save()
 }
-$startMenu = Join-Path ([Environment]::GetFolderPath("Programs")) "Engram Overlay.lnk"
-New-Lnk $startMenu "Engram Overlay"
+$startMenu = Join-Path ([Environment]::GetFolderPath("Programs")) "AMBER (ENGRAM).lnk"
+$legacyStartMenu = Join-Path ([Environment]::GetFolderPath("Programs")) "Engram Overlay.lnk"
+New-Lnk $startMenu "AMBER (ENGRAM)"
+if (Test-Path $legacyStartMenu) { Remove-Item $legacyStartMenu -Force }
 Write-Ok $startMenu
-$startupLnk = Join-Path ([Environment]::GetFolderPath("Startup")) "engram-overlay.lnk"
+$startupLnk = Join-Path ([Environment]::GetFolderPath("Startup")) "AMBER (ENGRAM).lnk"
+$legacyStartupLnk = Join-Path ([Environment]::GetFolderPath("Startup")) "engram-overlay.lnk"
 if ($EnableAutoStart) {
-    New-Lnk $startupLnk "Engram Overlay — Auto Start"
+    New-Lnk $startupLnk "AMBER (ENGRAM) — Auto Start"
+    if (Test-Path $legacyStartupLnk) { Remove-Item $legacyStartupLnk -Force }
     Write-Ok "자동시작 등록: $startupLnk"
-} elseif (Test-Path $startupLnk) {
-    Remove-Item $startupLnk -Force
+} else {
+    foreach ($link in @($startupLnk, $legacyStartupLnk)) {
+        if (Test-Path $link) { Remove-Item $link -Force }
+    }
     Write-Ok "자동시작 해제"
 }
 
@@ -461,4 +505,7 @@ if ($LaunchNow) {
 Write-Host ""
 Write-Host "  Configure 완료." -ForegroundColor Green
 Write-Host ""
-exit 0
+Exit-Configure 0
+} finally {
+    Stop-ConfigureTranscriptSafely
+}

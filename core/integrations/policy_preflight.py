@@ -20,18 +20,18 @@ BLOCKED_EXIT_CODE = 2
 _CLAUDE_HOOK_REQUEST_TYPE = "claude-pretool-hook"
 _CODEX_HOOK_REQUEST_TYPE = "codex-pretool-hook"
 _COPILOT_HOOK_REQUEST_TYPE = "copilot-pretool-hook"
-_GEMINI_HOOK_REQUEST_TYPE = "gemini-pretool-hook"
+_ANTIGRAVITY_HOOK_REQUEST_TYPE = "antigravity-pretool-hook"
 _AGENT_HOOK_REQUEST_TYPES = {
     _CLAUDE_HOOK_REQUEST_TYPE: "claude-code",
     _CODEX_HOOK_REQUEST_TYPE: "codex",
     _COPILOT_HOOK_REQUEST_TYPE: "copilot",
-    _GEMINI_HOOK_REQUEST_TYPE: "gemini",
+    _ANTIGRAVITY_HOOK_REQUEST_TYPE: "antigravity",
 }
 _AGENT_HOOK_PROVIDER_LABELS = {
     "claude-code": "Claude",
     "codex": "Codex",
     "copilot": "Copilot",
-    "gemini": "Gemini",
+    "antigravity": "Antigravity",
 }
 _WRITE_TOOL_NAMES = {"write", "edit", "multiedit", "notebookedit"}
 _COMMAND_TOOL_NAMES = {"bash", "powershell"}
@@ -53,11 +53,15 @@ _TOOL_NAME_ALIASES = {
     "str_replace_editor": "edit",
     "edit_file": "edit",
     "replace": "edit",
+    # Antigravity PreToolUse reports camel-case toolCall names and args.
+    "write_to_file": "write",
+    "replace_file_content": "edit",
+    "multi_replace_file_content": "multiedit",
 }
 _WRITE_TOOL_PATH_FIELDS = {
-    "write": ("file_path", "path", "absolute_path"),
-    "edit": ("file_path", "path", "absolute_path"),
-    "multiedit": ("file_path", "path"),
+    "write": ("file_path", "path", "absolute_path", "TargetFile", "targetFile"),
+    "edit": ("file_path", "path", "absolute_path", "TargetFile", "targetFile"),
+    "multiedit": ("file_path", "path", "TargetFile", "targetFile"),
     "notebookedit": ("notebook_path", "file_path", "path", "notebookPath"),
 }
 _GIT_EXECUTABLE_NAMES = {"git", "git.exe", "git.cmd", "git.bat"}
@@ -304,6 +308,9 @@ def _extract_tool_name(payload: dict[str, Any]) -> str:
         text = _normalize_text(payload.get(key))
         if text:
             return text
+    tool_call = payload.get("toolCall")
+    if isinstance(tool_call, dict):
+        return _normalize_text(tool_call.get("name"))
     return ""
 
 
@@ -322,11 +329,19 @@ def _extract_tool_input(payload: dict[str, Any]) -> dict[str, Any]:
                 return {"command": text}
             if isinstance(parsed, dict):
                 return dict(parsed)
+    tool_call = payload.get("toolCall")
+    if isinstance(tool_call, dict):
+        args = tool_call.get("args")
+        if isinstance(args, dict):
+            return dict(args)
     return {}
 
 
 def _extract_bash_command(payload: dict[str, Any], tool_input: dict[str, Any]) -> str:
-    for candidate in (tool_input.get("command"), tool_input.get("cmd"), payload.get("command"), payload.get("cmd")):
+    for candidate in (
+        tool_input.get("command"), tool_input.get("cmd"), tool_input.get("CommandLine"),
+        payload.get("command"), payload.get("cmd"), payload.get("CommandLine"),
+    ):
         text = _normalize_text(candidate)
         if text:
             return text

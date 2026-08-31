@@ -6,16 +6,14 @@ All notable changes to this project are documented in this file.
 
 ## [1.5.6] — 2026-08-26
 
+### Fixed
+
+- replace 외부 오버레이가 시작 직후 보내는 bootstrap geometry가 저장된 Engram 위치를
+  덮어쓰지 않게 했다. 저장된 x/y를 초기 `overlay.set_position`의 authoritative 위치로
+  사용하고, 이후 사용자 드래그만 정상적으로 저장한다.
+
 ### Added
 
-- Settings GUI에서 검증된 외부 오버레이 manifest를 선택하고 `observer` 또는
-  `replace` 모드로 재시작 적용할 수 있다. 예제와 reference implementation은
-  [engram-overlay](https://github.com/JJHbrams/engram-overlay)를 안내한다.
-- observer 클릭 시 같은 말풍선 세션을 클릭한 외부 창에 앵커링하고, 번들 캐릭터를
-  클릭하면 다시 번들 위치로 전환한다.
-- 루트 `VERSION`과 고정 Build 번호를 합쳐 source, frozen EXE, build manifest,
-  Inno AppVersion, installer 파일명에 동일한 4자리 버전을 적용한다.
-- directive 등록을 preview·명시적 승인·1회용 commit 단계로 분리했다.
 - 원격(SSH 리버스 터널) 세션에 engram skill 과 SessionStart hook 을 배치한다.
   `setup-remote.ps1` 이 MCP 등록에 이어 원격 `~/.claude/skills` 와
   `~/.claude/settings.json` 을 갱신하며, MCP 도구만 쓰는 skill 만 선별해 보낸다.
@@ -26,11 +24,6 @@ All notable changes to this project are documented in this file.
 
 ### Fixed
 
-- 외부 renderer의 예기치 않은 EOF·잘못된 JSONL·handshake 실패 시 번들 캐릭터와
-  말풍선 앵커를 함께 복구한다.
-- replace 외부 오버레이가 시작 직후 보내는 bootstrap geometry가 저장된 Engram 위치를
-  덮어쓰지 않게 했다. 저장된 x/y를 초기 `overlay.set_position`의 authoritative 위치로
-  사용하고, 이후 사용자 드래그만 정상적으로 저장한다.
 - 원격 로그인 셸이 zsh 인 호스트에서 `setup-remote.ps1` 의 OS 판별이 실패했다.
   프로브 스크립트를 명령줄이 아니라 stdin 으로 `sh -s` 에 넘겨, 로그인 셸의 방언과
   무관하게 동작하도록 고쳤다.

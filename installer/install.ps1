@@ -197,10 +197,18 @@ if ($Uninstall) {
         [Environment]::SetEnvironmentVariable("Path", $newPath, "User")
         Write-Ok "Removed from PATH"
     }
-    $StartMenuLink = Join-Path ([Environment]::GetFolderPath("Programs")) "Engram Overlay.lnk"
-    if (Test-Path $StartMenuLink) { Remove-Item $StartMenuLink -Force; Write-Ok "Removed: Start Menu shortcut" }
-    $StartupLink = Join-Path ([Environment]::GetFolderPath("Startup")) "engram-overlay.lnk"
-    if (Test-Path $StartupLink) { Remove-Item $StartupLink -Force; Write-Ok "Removed: Startup shortcut" }
+    foreach ($StartMenuLink in @(
+        (Join-Path ([Environment]::GetFolderPath("Programs")) "AMBER (ENGRAM).lnk"),
+        (Join-Path ([Environment]::GetFolderPath("Programs")) "Engram Overlay.lnk")
+    )) {
+        if (Test-Path $StartMenuLink) { Remove-Item $StartMenuLink -Force; Write-Ok "Removed: Start Menu shortcut" }
+    }
+    foreach ($StartupLink in @(
+        (Join-Path ([Environment]::GetFolderPath("Startup")) "AMBER (ENGRAM).lnk"),
+        (Join-Path ([Environment]::GetFolderPath("Startup")) "engram-overlay.lnk")
+    )) {
+        if (Test-Path $StartupLink) { Remove-Item $StartupLink -Force; Write-Ok "Removed: Startup shortcut" }
+    }
     # legacy VBS 정리 (이제 overlay 자식 프로세스로 관리)
     $WatcherVbsPath = Join-Path ([Environment]::GetFolderPath("Startup")) "engram-kg-watcher.vbs"
     if (Test-Path $WatcherVbsPath) { Remove-Item $WatcherVbsPath -Force; Write-Ok "Removed: $WatcherVbsPath (legacy)" }

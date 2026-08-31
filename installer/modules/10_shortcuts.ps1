@@ -12,15 +12,17 @@ $OverlayCmdPath = Join-Path $ShimDir "engram-overlay.cmd"
 # (.cmd 는 터미널에서 `engram-overlay` 로 호출하는 PATH 용으로만 유지)
 Write-Step "Start Menu shortcut..."
 $StartMenuDir = [Environment]::GetFolderPath("Programs")
-$StartMenuLink = Join-Path $StartMenuDir "Engram Overlay.lnk"
+$StartMenuLink = Join-Path $StartMenuDir "AMBER (ENGRAM).lnk"
+$LegacyStartMenuLink = Join-Path $StartMenuDir "Engram Overlay.lnk"
 if (Test-Path $DistExe) {
     $shell = New-Object -ComObject WScript.Shell
     $shortcut = $shell.CreateShortcut($StartMenuLink)
     $shortcut.TargetPath = $DistExe
     $shortcut.WorkingDirectory = Split-Path $DistExe
-    $shortcut.Description = "Engram Overlay"
+    $shortcut.Description = "AMBER (ENGRAM)"
     $shortcut.IconLocation = "$DistExe,0"
     $shortcut.Save()
+    if (Test-Path $LegacyStartMenuLink) { Remove-Item $LegacyStartMenuLink -Force }
     Write-Ok $StartMenuLink
 } elseif (Test-Path $OverlayCmdPath) {
     # exe 가 아직 없을 때만 .cmd 폴백 (이 경우 작업표시줄 고정 불가)
@@ -28,14 +30,16 @@ if (Test-Path $DistExe) {
     $shortcut = $shell.CreateShortcut($StartMenuLink)
     $shortcut.TargetPath = $OverlayCmdPath
     $shortcut.WorkingDirectory = $ShimDir
-    $shortcut.Description = "Engram Overlay"
+    $shortcut.Description = "AMBER (ENGRAM)"
     $shortcut.Save()
+    if (Test-Path $LegacyStartMenuLink) { Remove-Item $LegacyStartMenuLink -Force }
     Write-Warn "$StartMenuLink (exe 미빌드 — .cmd 폴백, 작업표시줄 고정 불가)"
 } else { Write-Warn "Skipped — launcher/exe not found" }
 
 # 13. Startup shortcut (auto-start on boot)
 $StartupDir = [Environment]::GetFolderPath("Startup")
-$StartupLink = Join-Path $StartupDir "engram-overlay.lnk"
+$StartupLink = Join-Path $StartupDir "AMBER (ENGRAM).lnk"
+$LegacyStartupLink = Join-Path $StartupDir "engram-overlay.lnk"
 if ($EnableAutoStart) {
     Write-Step "Startup registration (자동시작)..."
     if (Test-Path $DistExe) {
@@ -43,9 +47,10 @@ if ($EnableAutoStart) {
         $shortcut = $shell.CreateShortcut($StartupLink)
         $shortcut.TargetPath = $DistExe
         $shortcut.WorkingDirectory = Split-Path $DistExe
-        $shortcut.Description = "Engram Overlay — Auto Start"
+        $shortcut.Description = "AMBER (ENGRAM) — Auto Start"
         $shortcut.IconLocation = "$DistExe,0"
         $shortcut.Save()
+        if (Test-Path $LegacyStartupLink) { Remove-Item $LegacyStartupLink -Force }
         Write-Ok $StartupLink
     } elseif (Test-Path $OverlayCmdPath) {
         # exe 가 아직 없을 때만 .cmd 폴백 (부팅 시 콘솔창 깜빡 + 고정 불가)
@@ -53,16 +58,22 @@ if ($EnableAutoStart) {
         $shortcut = $shell.CreateShortcut($StartupLink)
         $shortcut.TargetPath = $OverlayCmdPath
         $shortcut.WorkingDirectory = $ShimDir
-        $shortcut.Description = "Engram Overlay — Auto Start"
+        $shortcut.Description = "AMBER (ENGRAM) — Auto Start"
         $shortcut.Save()
+        if (Test-Path $LegacyStartupLink) { Remove-Item $LegacyStartupLink -Force }
         Write-Warn "$StartupLink (exe 미빌드 — .cmd 폴백)"
     } else { Write-Warn "Skipped — launcher/exe not found" }
 } else {
     Write-Step "Startup registration (건너뜀 — 사용자 선택)..."
-    if (Test-Path $StartupLink) {
-        Remove-Item $StartupLink -Force
-        Write-Ok "기존 자동시작 등록 제거: $StartupLink"
-    } else {
+    $RemovedStartupLink = $false
+    foreach ($link in @($StartupLink, $LegacyStartupLink)) {
+        if (Test-Path $link) {
+            Remove-Item $link -Force
+            $RemovedStartupLink = $true
+            Write-Ok "기존 자동시작 등록 제거: $link"
+        }
+    }
+    if (-not $RemovedStartupLink) {
         Write-Ok "자동시작 미등록 (수동 실행)"
     }
 }

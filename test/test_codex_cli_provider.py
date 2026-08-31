@@ -5,10 +5,52 @@ from unittest.mock import patch
 
 from overlay.chat_window import _resolve_provider_launch
 from overlay.main import _make_tray_icon
-from overlay.config import get_cli_provider, normalize_cli_provider
+from overlay.config import get_cli_model, get_cli_provider, normalize_cli_provider, set_cli_model, set_cli_provider
 
 
 class CodexCliProviderTests(unittest.TestCase):
+    def test_legacy_gemini_provider_loads_and_saves_as_antigravity(self):
+        self.assertEqual(normalize_cli_provider("gemini"), "antigravity")
+        self.assertEqual(get_cli_provider({"cli": {"provider": "gemini"}}), "antigravity")
+        state: dict = {}
+        with patch("overlay.config.update_overlay_state", side_effect=lambda updater: updater(state)):
+            self.assertEqual(set_cli_provider("gemini"), "antigravity")
+        self.assertEqual(state["cli"]["provider"], "antigravity")
+
+    def test_legacy_gemini_model_is_available_then_saved_as_antigravity_model(self):
+        self.assertEqual(get_cli_model("antigravity", {"cli": {"gemini_model": "legacy-pro"}}), "legacy-pro")
+        state: dict = {"cli": {"gemini_model": "legacy-pro"}}
+        with patch("overlay.config.update_overlay_state", side_effect=lambda updater: updater(state)), patch(
+            "overlay.config._set_user_cli_value"
+        ) as save:
+            self.assertEqual(set_cli_model("antigravity", "new-pro", sync_user=True), "new-pro")
+        self.assertEqual(state["cli"], {"antigravity_model": "new-pro"})
+        save.assert_called_once_with("antigravity_model", "new-pro")
+
+    def test_saving_antigravity_model_retires_only_legacy_model_key(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            user_path = Path(tmp) / "overlay.user.yaml"
+            user_path.write_text("cli:\n  gemini_model: legacy-pro\n  custom: keep\n", encoding="utf-8")
+            with patch("overlay.config._USER_CONFIG_PATH", user_path), patch("overlay.config.update_overlay_state"):
+                set_cli_model("antigravity", "new-pro", sync_user=True)
+            saved = user_path.read_text(encoding="utf-8")
+        self.assertIn("antigravity_model: new-pro", saved)
+        self.assertNotIn("gemini_model", saved)
+        self.assertIn("custom: keep", saved)
+
+    def test_antigravity_launch_uses_agy_when_shim_is_missing(self):
+        missing_shim = Path(tempfile.gettempdir()) / "missing-engram-antigravity.cmd"
+        with patch("overlay.chat_window.ENGRAM_ANTIGRAVITY_CMD", missing_shim):
+            provider, args, label, env, warnings = _resolve_provider_launch(
+                {"cli": {"antigravity_command": "agy", "antigravity_model": "gemini-3.1-pro-preview"}},
+                "antigravity",
+            )
+        self.assertEqual(provider, "antigravity")
+        self.assertEqual(args, ["cmd", "/k", "agy", "--model", "gemini-3.1-pro-preview"])
+        self.assertEqual(label, "agy")
+        self.assertEqual(env, {})
+        self.assertEqual(warnings, [])
+
     def test_codex_is_a_supported_provider(self):
         self.assertEqual(normalize_cli_provider("codex"), "codex")
         self.assertEqual(get_cli_provider({"cli": {"provider": "codex"}}), "codex")

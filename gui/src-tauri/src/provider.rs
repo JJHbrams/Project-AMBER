@@ -52,7 +52,7 @@ fn resolve_command(provider: &str, model: Option<&str>) -> (String, Vec<String>)
         .unwrap_or_default();
     match provider {
         "copilot" => (format!("{}/.engram/engram-copilot.cmd", home), vec![]),
-        "gemini"  => (format!("{}/.engram/engram-gemini.cmd", home), vec![]),
+        "antigravity"  => (format!("{}/.engram/engram-antigravity.cmd", home), vec![]),
         "claude-code" => {
             let cmd_path = format!("{}/.engram/engram-claude.cmd", home);
             if std::path::Path::new(&cmd_path).exists() {

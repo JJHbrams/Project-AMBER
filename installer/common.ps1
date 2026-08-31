@@ -13,7 +13,7 @@ $ShimDir = Join-Path $env:USERPROFILE ".engram"
 $ShimPath = Join-Path $ShimDir "engram-copilot.cmd"
 $EngramDispatcherPath = Join-Path $ShimDir "engram.cmd"
 $LegacyCopilotShimPath = Join-Path $ShimDir "engram.cmd"  # 현재는 dispatcher로 재사용
-$GeminiShimPath = Join-Path $ShimDir "engram-gemini.cmd"
+$AntigravityShimPath = Join-Path $ShimDir "engram-antigravity.cmd"
 $CodexShimPath = Join-Path $ShimDir "engram-codex.cmd"
 $ClaudeShimPath = Join-Path $ShimDir "engram-claude.cmd"
 $GooseShimPath  = Join-Path $ShimDir "engram-goose.cmd"
@@ -43,7 +43,7 @@ $EnvironmentYamlPath = Join-Path $ProjectRoot "environment.yml"
 $ProjectVenvDir = Join-Path $ProjectRoot ".venv"
 $CondaEnv = "intel_engram"
 $McpServerScript = Join-Path $ProjectRoot "mcp_server.py"
-$MCP_HTTP_PORT = 17385  # Copilot/Gemini/Claude CLI용 지속 MCP HTTP 서버 포트
+$MCP_HTTP_PORT = 17385  # Copilot/Antigravity/Claude CLI용 지속 MCP HTTP 서버 포트
 $HasNamedCondaEnv = $false
 
 # ── conda Python 동적 탐지 ──────────────────────────────────
@@ -299,7 +299,8 @@ function Normalize-CliProvider([string]$provider) {
     $value = ("$provider").Trim().ToLower()
     switch ($value) {
         "copilot" { return "copilot" }
-        "gemini" { return "gemini" }
+        "gemini" { return "antigravity" } # persisted legacy value
+        "antigravity" { return "antigravity" }
         "codex" { return "codex" }
         "claude" { return "claude-code" }
         "claude-code" { return "claude-code" }
@@ -310,7 +311,7 @@ function Normalize-CliProvider([string]$provider) {
         "claudecodeollama" { return "claude-code-ollama" }
         "claude-code(ollama)" { return "claude-code-ollama" }
         "ollama" { return "ollama" }
-        default { return "gemini" }
+        default { return "antigravity" }
     }
 }
 
@@ -319,12 +320,12 @@ function Resolve-AvailableCliProvider([string]$preferred, [hashtable]$availabili
     if ($availability.ContainsKey($normalized) -and [bool]$availability[$normalized]) {
         return $normalized
     }
-    foreach ($candidate in @("gemini", "codex", "claude-code", "claude-code-ollama", "ollama", "copilot")) {
+    foreach ($candidate in @("antigravity", "codex", "claude-code", "claude-code-ollama", "ollama", "copilot")) {
         if ($availability.ContainsKey($candidate) -and [bool]$availability[$candidate]) {
             return $candidate
         }
     }
-    return "gemini"
+    return "antigravity"
 }
 
 function Write-DepStatus([string]$name, [bool]$available, [bool]$required, [string]$hint) {

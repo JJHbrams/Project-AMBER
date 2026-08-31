@@ -135,9 +135,6 @@ def _run_git(cwd: str, *args: str, timeout_seconds: float) -> dict[str, Any]:
             errors="replace",
             timeout=timeout_seconds,
             check=False,
-            # 이 guard 는 콘솔이 없는 GUI 프로세스(engram-overlay.exe, agent-policy-hook)
-            # 에서도 돈다. 플래그가 없으면 git 이 새 콘솔 창을 띄워 포커스를 뺏는다.
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
     except FileNotFoundError as exc:
         return {

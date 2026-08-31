@@ -1503,7 +1503,7 @@ def engram_save_memory(content: str, session_id: int = 0, provider: str = "", mo
     """에피소드 기억을 저장합니다.
     핵심 인사이트나 중요한 교환을 요약하여 저장하세요.
     session_id가 0이면 세션 없이 저장됩니다.
-    provider: 사용된 CLI 공급자 (예: 'claude-code', 'copilot', 'gemini')
+    provider: 사용된 CLI 공급자 (예: 'claude-code', 'copilot', 'antigravity')
     model: 사용된 모델명 (예: 'claude-sonnet-4.6')
     project: 관련 프로젝트명 (선택)"""
     save_memory(session_id if session_id > 0 else None, content, provider=provider, model=model, source="save", project=project)

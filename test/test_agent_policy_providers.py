@@ -1,14 +1,15 @@
 """Every CLI provider Engram ships a shim for must receive policy guidance.
 
-`warn` guidance is only useful if it reaches the model. Each supported runtime
-injects `hookSpecificOutput.additionalContext`, so the adapter emits that for all
-providers; only the denial contract differs (Gemini has no `permissionDecision`).
+`warn` guidance is only useful if it reaches the model. Claude-shaped providers
+receive `hookSpecificOutput.additionalContext`; Antigravity requires its own
+top-level allow/deny response.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -48,10 +49,15 @@ class ProviderGuidanceContractTests(unittest.TestCase):
                 stdout, stderr, exit_code = process_provider_hook_input("{}", provider)
             self.assertEqual(exit_code, 0)
             self.assertEqual(stderr, "")
-            hook_output = json.loads(stdout)["hookSpecificOutput"]
-            self.assertEqual(hook_output["hookEventName"], spec["event"])
-            self.assertIn("protected branch", hook_output["additionalContext"])
-            self.assertNotIn("permissionDecision", hook_output)
+            payload = json.loads(stdout)
+            if spec["dialect"] == "antigravity":
+                self.assertEqual(payload["decision"], "allow")
+                self.assertIn("protected branch", payload["reason"])
+            else:
+                hook_output = payload["hookSpecificOutput"]
+                self.assertEqual(hook_output["hookEventName"], spec["event"])
+                self.assertIn("protected branch", hook_output["additionalContext"])
+                self.assertNotIn("permissionDecision", hook_output)
 
     def test_enforcement_uses_each_runtime_denial_contract(self):
         for provider, spec in _PROVIDERS.items():
@@ -63,7 +69,7 @@ class ProviderGuidanceContractTests(unittest.TestCase):
             self.assertEqual(exit_code, 0, "denial must never ride the exit code")
             self.assertEqual(stderr, "")
             payload = json.loads(stdout)
-            if spec["dialect"] == "gemini":
+            if spec["dialect"] == "antigravity":
                 self.assertEqual(payload["decision"], "deny")
                 self.assertIn("protected branch", payload["reason"])
             else:
@@ -77,6 +83,15 @@ class ProviderGuidanceContractTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertEqual(stdout, "")
         self.assertIn("unsupported agent policy provider", stderr)
+
+    def test_legacy_gemini_provider_alias_emits_bounded_deprecation_log(self):
+        with patch("core.integrations.agent_policy_hook.logger.warning") as warning, patch(
+            "core.integrations.agent_policy_hook.process_policy_request",
+            return_value=({"decision": "allow", "guidance_level": "warn"}, 0, ""),
+        ):
+            stdout, _, _ = process_provider_hook_input("{}", "gemini")
+        self.assertEqual(json.loads(stdout)["decision"], "allow")
+        warning.assert_called_once()
 
 
 class ProviderToolAliasTests(unittest.TestCase):
@@ -94,7 +109,7 @@ class ProviderToolAliasTests(unittest.TestCase):
             ("claude-code", "Bash"),
             ("codex", "Bash"),
             ("copilot", "bash"),
-            ("gemini", "run_shell_command"),
+            ("antigravity", "run_command"),
         ):
             with self.subTest(provider=provider, tool=tool_name):
                 result = self._classify(provider, tool_name, "git commit -m x")
@@ -105,29 +120,117 @@ class ProviderToolAliasTests(unittest.TestCase):
                 self.assertEqual(result["hook"]["tool_name"], tool_name)
 
     def test_readonly_tool_is_still_out_of_scope(self):
-        result = self._classify("gemini", "read_file", "")
+        result = self._classify("antigravity", "read_file", "")
         self.assertFalse(result["classified"])
 
 
+class AntigravityNativePayloadTests(unittest.TestCase):
+    """Exercise AGY's native camel-case ``toolCall`` payload end-to-end.
+
+    The policy engine is only stubbed after classification, so every case still
+    traverses the provider adapter, native extractor, path/command classifier,
+    and Antigravity stdout contract.
+    """
+
+    @staticmethod
+    def _payload(name: str, args: dict) -> str:
+        return json.dumps({"toolCall": {"name": name, "args": args}})
+
+    @staticmethod
+    def _init_repo(path: Path, branch: str) -> None:
+        path.mkdir(parents=True)
+        subprocess.run(["git", "init", "-q", "-b", branch, str(path)], check=True, capture_output=True, text=True)
+
+    @staticmethod
+    def _blocked_policy() -> dict:
+        return {
+            "decision": "advisory", "policy_decision": "blocked", "would_block": True,
+            "advisory_only": True, "blocking_guards": [{"content": "protected branch"}],
+        }
+
+    def test_native_agy_write_tools_and_shell_enforce_by_repo(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            protected = Path(tmp) / "protected"
+            feature = Path(tmp) / "feature"
+            for repo, branch in ((protected, "main"), (feature, "feat/native-agy")):
+                self._init_repo(repo, branch)
+                (repo / "note.txt").write_text("before", encoding="utf-8")
+
+            def policy_result(**kwargs):
+                if Path(kwargs["cwd"]).resolve().is_relative_to(protected.resolve()):
+                    return self._blocked_policy()
+                return {"decision": "allow", "reason": ""}
+
+            protected_cases = (
+                ("run_command", {"Cwd": str(protected), "CommandLine": "git commit -m blocked"}),
+                ("write_to_file", {"Cwd": str(protected), "TargetFile": str(protected / "note.txt")}),
+                ("replace_file_content", {"Cwd": str(protected), "TargetFile": str(protected / "note.txt")}),
+                ("multi_replace_file_content", {"Cwd": str(protected), "TargetFile": str(protected / "note.txt")}),
+            )
+            with patch("core.integrations.policy_preflight.get_cfg_value", return_value="enforce_agents"), patch(
+                "core.integrations.policy_preflight.preflight_directives", side_effect=policy_result
+            ):
+                for name, args in protected_cases:
+                    with self.subTest(tool=name):
+                        stdout, stderr, code = process_provider_hook_input(self._payload(name, args), "antigravity")
+                        self.assertEqual((stderr, code), ("", 0))
+                        response = json.loads(stdout)
+                        self.assertEqual(response["decision"], "deny")
+                        self.assertIn("protected branch", response["reason"])
+
+                stdout, _, _ = process_provider_hook_input(
+                    self._payload("write_to_file", {"Cwd": str(feature), "TargetFile": str(feature / "note.txt")}),
+                    "antigravity",
+                )
+                self.assertEqual(json.loads(stdout), {"decision": "allow"})
+
+                stdout, _, _ = process_provider_hook_input(
+                    self._payload("view_file", {"Cwd": str(protected), "TargetFile": str(protected / "note.txt")}),
+                    "antigravity",
+                )
+                self.assertEqual(json.loads(stdout), {"decision": "allow"})
+
+    def test_native_agy_warn_keeps_reason_but_allows(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "protected"
+            self._init_repo(repo, "main")
+            with patch("core.integrations.policy_preflight.get_cfg_value", return_value="warn"), patch(
+                "core.integrations.policy_preflight.preflight_directives",
+                return_value=self._blocked_policy(),
+            ):
+                stdout, stderr, code = process_provider_hook_input(
+                    self._payload("run_command", {"Cwd": str(repo), "CommandLine": "git commit -m x"}),
+                    "antigravity",
+                )
+        self.assertEqual((stderr, code), ("", 0))
+        response = json.loads(stdout)
+        self.assertEqual(response["decision"], "allow")
+        self.assertIn("protected branch", response["reason"])
+
+
 class ProviderHookSyncTests(unittest.TestCase):
-    def test_gemini_sync_is_idempotent_and_preserves_user_hooks(self):
+    def test_legacy_gemini_sync_alias_migrates_to_antigravity(self):
         user_entry = {"hooks": [{"type": "command", "command": "user-tool"}]}
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
             settings_path = home / ".gemini" / "settings.json"
             settings_path.parent.mkdir(parents=True, exist_ok=True)
-            settings_path.write_text(
-                json.dumps({"hooks": {"BeforeTool": [user_entry]}}), encoding="utf-8"
-            )
+            settings_path.write_text(json.dumps({"hooks": {"BeforeTool": [user_entry]}}), encoding="utf-8")
+            hooks_path = home / ".gemini" / "config" / "hooks.json"
             with patch.object(engram_bootstrap, "_GEMINI_SETTINGS_PATH", settings_path), patch.object(
-                engram_bootstrap, "_ENGRAM_DIR", home / ".engram"
+                engram_bootstrap, "_ANTIGRAVITY_HOOKS_PATH", hooks_path
+            ), patch.object(engram_bootstrap, "_ENGRAM_DIR", home / ".engram"
             ), patch.dict(
                 engram_bootstrap._PROVIDER_HOOK_SCRIPT_PATHS,
                 {
                     "gemini": (
                         home / ".engram" / "engram-gemini-pretool-hook.ps1",
                         home / ".engram" / "engram-gemini-pretool-hook.sh",
-                    )
+                    ),
+                    "antigravity": (
+                        home / ".engram" / "engram-antigravity-pretool-hook.ps1",
+                        home / ".engram" / "engram-antigravity-pretool-hook.sh",
+                    ),
                 },
             ):
                 first = engram_bootstrap.sync_gemini_pretool_hook(True)
@@ -139,7 +242,7 @@ class ProviderHookSyncTests(unittest.TestCase):
         self.assertTrue(first["ok"] and first["changed"])
         self.assertTrue(second["ok"])
         self.assertFalse(second["changed"], "second sync must be a no-op")
-        self.assertEqual(len(entries), 2, "the user's own BeforeTool hook must survive")
+        self.assertEqual(len(entries), 1, "only the user's legacy BeforeTool hook must survive")
         self.assertEqual(after, [user_entry])
         self.assertTrue(removed["ok"])
 

@@ -8,7 +8,7 @@
 ;  빌드: build-installer.ps1 (ISCC 컴파일)
 ; ============================================================
 
-#define AppName "Engram Overlay"
+#define AppName "AMBER (ENGRAM)"
 #ifndef AppVersion
   #define AppVersion "0.0.0.0"
 #endif
@@ -35,7 +35,7 @@ DisableProgramGroupPage=yes
 PrivilegesRequired=lowest
 ; drt-notebookLM 처럼 setup.exe 를 프로젝트 루트에 생성 (.iss 기준 상위 = repo 루트)
 OutputDir=..
-OutputBaseFilename=EngramOverlay_{#AppVersion}{#BuildOutputSuffix}_x64-setup
+OutputBaseFilename=AMBER_{#AppVersion}{#BuildOutputSuffix}_x64-setup
 Compression={#BuildCompression}
 SolidCompression={#BuildSolidCompression}
 WizardStyle=modern
@@ -66,12 +66,6 @@ Source: "..\.github\skills\engram-wiki-workflow\SKILL.md"; DestDir: "{app}\.gith
 Source: "..\.github\skills\engram-close-session\SKILL.md"; DestDir: "{app}\.github\skills\engram-close-session"; Flags: ignoreversion
 ; 설치타임 구성기
 Source: "configure.ps1"; DestDir: "{app}\installer"; Flags: ignoreversion
-
-[Run]
-Filename: "powershell.exe"; \
-  Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\installer\configure.ps1"" {code:GetConfigureParams}"; \
-  StatusMsg: "Engram 구성 중 (config · MCP · 바로가기)..."; \
-  Flags: runhidden waituntilterminated
 
 [UninstallRun]
 Filename: "powershell.exe"; \
@@ -157,7 +151,7 @@ begin
 
   { 1) DB / 작업 디렉토리 }
   DirPage := CreateInputDirPage(wpSelectDir,
-    'Engram 데이터 위치', 'DB 와 작업 디렉토리를 선택하세요',
+    'AMBER (ENGRAM) 데이터 위치', 'DB 와 작업 디렉토리를 선택하세요',
     'engram 의 지식 그래프 DB 와 위키가 저장될 위치입니다.', False, '');
   DirPage.Add('DB / 위키 디렉토리');
   DirPage.Add('작업 디렉토리 (engram 실행 시 기준 경로)');
@@ -169,7 +163,7 @@ begin
     '기본 CLI 공급자', '오버레이가 기본으로 사용할 AI 공급자를 선택하세요',
     '나중에 트레이 메뉴에서 변경할 수 있습니다.', True, False);
   ProviderPage.Add('Copilot CLI');
-  ProviderPage.Add('Gemini CLI');
+  ProviderPage.Add('Antigravity (agy)');
   ProviderPage.Add('Codex CLI');
   ProviderPage.Add('Claude Code (직접)');
   ProviderPage.Add('Claude Code (Ollama 라우팅)');
@@ -188,7 +182,7 @@ function ProviderCode(): String;
 begin
   case ProviderPage.SelectedValueIndex of
     0: Result := 'copilot';
-    1: Result := 'gemini';
+    1: Result := 'antigravity';
     2: Result := 'codex';
     3: Result := 'claude-code';
     4: Result := 'claude-code-ollama';
@@ -218,6 +212,29 @@ begin
   Result := R;
 end;
 
+procedure RunConfigure;
+var
+  ResultCode: Integer;
+  Params: String;
+begin
+  WizardForm.StatusLabel.Caption := 'AMBER (ENGRAM) 구성 중 (config · MCP · 바로가기)...';
+  Params := '-NoProfile -ExecutionPolicy Bypass -File "' +
+    ExpandConstant('{app}\installer\configure.ps1') + '" ' + GetConfigureParams('');
+  if not Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'), Params,
+    ExpandConstant('{app}'), SW_HIDE, ewWaitUntilTerminated, ResultCode) then
+    RaiseException('AMBER (ENGRAM) 구성기를 실행하지 못했습니다.');
+  if ResultCode <> 0 then
+    RaiseException('AMBER (ENGRAM) 구성에 실패했습니다. 로그: ' +
+      ExpandConstant('{%USERPROFILE}\.engram\logs') +
+      ' (exit=' + IntToStr(ResultCode) + ')');
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+begin
+  if CurStep = ssPostInstall then
+    RunConfigure;
+end;
+
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 var
   ResultCode: Integer;
@@ -231,9 +248,9 @@ begin
   if (not Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'), Params,
     '', SW_HIDE, ewWaitUntilTerminated, ResultCode)) then
   begin
-    Result := '실행 중인 Engram 프로세스를 종료하지 못했습니다.';
+    Result := '실행 중인 AMBER (ENGRAM) 프로세스를 종료하지 못했습니다.';
     Exit;
   end;
   if ResultCode <> 0 then
-    Result := '실행 중인 Engram 프로세스를 종료하지 못했습니다. (exit=' + IntToStr(ResultCode) + ')';
+    Result := '실행 중인 AMBER (ENGRAM) 프로세스를 종료하지 못했습니다. (exit=' + IntToStr(ResultCode) + ')';
 end;

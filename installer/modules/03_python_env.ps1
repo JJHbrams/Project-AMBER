@@ -9,7 +9,7 @@ Write-Step "CLI providers..."
 if ($CopilotCmdDetected) { Write-Ok "Copilot CLI: $(& copilot --version 2>&1 | Select-Object -First 1)" } else { Write-Warn "Copilot CLI not found (선택적 — 유료 구독 필요)" }
 
 Write-Step "Optional CLI providers..."
-if ($GeminiCmdDetected) { Write-Ok "Gemini CLI: $($GeminiCmdDetected.Source)" } else { Write-Warn "Gemini CLI not found — engram-gemini 사용 시 설치 필요" }
+if ($AntigravityCmdDetected) { Write-Ok "Antigravity (agy): $($AntigravityCmdDetected.Source)" } else { Write-Warn "Antigravity not found — engram-antigravity 사용 시 설치 필요" }
 if ($CodexCmdDetected) { Write-Ok "Codex CLI: $($CodexCmdDetected.Source)" } else { Write-Warn "Codex CLI not found — engram-codex 사용 시 설치 필요" }
 if ($ClaudeCliCmdDetected) { Write-Ok "Claude Code CLI: $($ClaudeCliCmdDetected.Source)" } else { Write-Warn "Claude Code CLI not found — engram-claude 사용 시 설치 필요" }
 if ($OllamaCmdDetected) { Write-Ok "Ollama CLI: $($OllamaCmdDetected.Source)" } else { Write-Warn "Ollama CLI not found — provider=ollama 사용 시 설치 필요" }

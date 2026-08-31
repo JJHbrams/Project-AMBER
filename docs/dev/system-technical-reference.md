@@ -10,8 +10,8 @@
 - `~/.engram/engram-copilot.cmd`
   - Copilot CLI 진입점
   - `--overlay`, `--overlay-stop` 파싱
-- `~/.engram/engram-gemini.cmd`
-  - Gemini CLI 진입점
+- `~/.engram/engram-antigravity.cmd`
+  - Antigravity (agy) 진입점
 - `~/.engram/engram-codex.cmd`
   - Codex CLI 진입점
 - `~/.engram/engram-claude.cmd`
@@ -94,7 +94,7 @@
 | claude-code | `~/.claude/settings.json` | `PreToolUse` | `hookSpecificOutput.permissionDecision: deny` |
 | codex | `~/.codex/hooks.json` | `PreToolUse` | 동일 |
 | copilot | `~/.copilot/hooks/engram.json` (Engram 전용 파일) | `PreToolUse` | 동일 |
-| gemini | `~/.gemini/settings.json` | `BeforeTool` | 최상위 `{"decision":"deny","reason":...}` |
+| antigravity | `~/.gemini/config/hooks.json` | `PreToolUse` | 최상위 `{"decision":"allow|deny","reason":...}` |
 | goose | 없음 — hook 런타임 미제공 | — | 세션 bootstrap instructions만 적용 |
 
 - Claude Code managed hooks
@@ -106,10 +106,11 @@
   - `~/.codex/hooks.json`의 Engram 관리 `PreToolUse` handler만 멱등 동기화
   - `Bash`와 `apply_patch` repo-write를 공통 policy preflight로 평가
   - user hook은 Codex `/hooks`에서 최초 및 내용 변경 시 신뢰 승인이 필요
-- Copilot / Gemini managed hooks
-  - `~/.engram/engram-copilot-pretool-hook.ps1`, `~/.engram/engram-gemini-pretool-hook.ps1`
+- Copilot / Antigravity managed hooks
+  - `~/.engram/engram-copilot-pretool-hook.ps1`, `~/.engram/engram-antigravity-pretool-hook.ps1`
   - Copilot은 `~/.copilot/hooks/engram.json`을 Engram이 통째로 소유하고, guidance OFF 시 삭제한다.
-  - Gemini는 `settings.json`의 `hooks.BeforeTool`에 Engram 항목만 병합하고 사용자 항목은 보존한다.
+  - Antigravity는 `~/.gemini/config/hooks.json`의 named `PreToolUse` 항목만 병합하고 사용자 항목은 보존한다. 이전 `settings.json`의 Engram `BeforeTool` 항목만 제거한다.
+  - MCP 연결은 policy guidance와 독립적으로 `~/.gemini/config/mcp_config.json`의 `mcpServers.engram = {"disabled":false,"serverUrl":"http://127.0.0.1:17385/mcp"}`만 병합한다. 다른 서버와 최상위 필드는 보존한다.
 - Repository managed Git advisor
   - `engram_get_context_once` 세션 bootstrap은 cwd가 Git 저장소이고 정책 가이드가 켜져
     있으면 공용 Git 디렉터리의 managed advisor를 멱등 설치한다.
@@ -132,7 +133,7 @@
 - Wiki vault 초기화
   - `<db.root_dir>/docs/` 하위 디렉토리 + HOME + templates + guide
 - CLI shim 생성 (`~/.engram/*.cmd`)
-  - engram-copilot, engram-gemini, engram-claude, engram-goose, engram-overlay
+  - engram-copilot, engram-antigravity, engram-claude, engram-goose, engram-overlay
 - Copilot skill 배포
   - `.github/skills/engram/SKILL.md` → `~/.copilot/skills/engram/SKILL.md`
 - 오버레이 빌드 시도
@@ -410,7 +411,7 @@ Python 및 package 버전과 source/config/resource SHA-256을 검증해 빌드 
 
 - DB `directives` 테이블에서 `active=true` 항목 로드
 - 정체성, 페르소나, 기억 요약, 궁금증 항목과 함께 조립
-- overlay 경유 클라이언트(Copilot CLI, Gemini)는 이 레이어만 적용됨
+- overlay 경유 클라이언트(Copilot CLI, Antigravity)는 이 레이어만 적용됨
 
 ### 9.5 `config/clients/` 파일 수정 시
 

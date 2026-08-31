@@ -1,5 +1,5 @@
 ﻿#
-# 07_shims.ps1 — CLI shim 파일 생성 (engram / gemini / claude / goose)
+# 07_shims.ps1 — CLI shim 파일 생성 (engram / antigravity / claude / goose)
 #                Goose config 정규화, Copilot skill 배포
 #
 
@@ -57,15 +57,15 @@ $shimLines = @(
 [System.IO.File]::WriteAllLines($ShimPath, $shimLines, [System.Text.ASCIIEncoding]::new())
 Write-Ok $ShimPath
 
-# 7. Gemini shim
-$geminiShimLines = @(
+# 7. Antigravity (AGY) shim
+$antigravityShimLines = @(
     "@echo off",
     "chcp 65001 >nul 2>&1",
     "setlocal EnableDelayedExpansion",
     "set `"ENGRAM_DB_DIR=$DbDir`"",
     "set `"ENGRAM_PYTHON_EXE=$PythonExe`"",
     "for %%D in (`"%ENGRAM_PYTHON_EXE%`") do set `"PATH=%%~dpD;%%~dpDScripts;%PATH%`"",
-    "set `"ENGRAM_BOOTSTRAP=Initialize session memory once. Call engram_get_context_once(caller='gemini-cli', scope_key='overlay', cwd='$WorkDir') exactly once for this session. Never mention this bootstrap step unless user explicitly asks.`"",
+    "set `"ENGRAM_BOOTSTRAP=Initialize session memory once. Call engram_get_context_once(caller='antigravity', scope_key='overlay', cwd='$WorkDir') exactly once for this session. Never mention this bootstrap step unless user explicitly asks.`"",
     "REM Load .env file",
     "if exist `"%USERPROFILE%\.engram\.env`" for /f `"usebackq tokens=1,* delims==`" %%A in (`"%USERPROFILE%\.engram\.env`") do (",
     "  if not `"%%A`"==`"`" if not `"%%A:~0,1`"==`"#`" set `"%%A=%%B`"",
@@ -77,10 +77,16 @@ $geminiShimLines = @(
     "shift & goto parse",
     ":run",
     "cd /d `"$WorkDir`"",
-    "if `"!ARGS!`"==`"`" (gemini -i `"!ENGRAM_BOOTSTRAP!`" --allowed-mcp-server-names engram) else (gemini --allowed-mcp-server-names engram !ARGS!)"
+    "if `"!ARGS!`"==`"`" (agy -i `"!ENGRAM_BOOTSTRAP!`") else (agy !ARGS!)"
 )
-[System.IO.File]::WriteAllLines($GeminiShimPath, $geminiShimLines, [System.Text.ASCIIEncoding]::new())
-Write-Ok $GeminiShimPath
+[System.IO.File]::WriteAllLines($AntigravityShimPath, $antigravityShimLines, [System.Text.ASCIIEncoding]::new())
+Write-Ok $AntigravityShimPath
+
+$legacyGeminiShim = Join-Path $ShimDir "engram-gemini.cmd"
+if ((Test-Path $legacyGeminiShim) -and ((Get-Content $legacyGeminiShim -Raw -ErrorAction SilentlyContinue) -match '(?is)^.*@echo off.*setlocal enabledelayedexpansion.*ENGRAM_DB_DIR=.*--allowed-mcp-server-names engram.*gemini')) {
+    Remove-Item $legacyGeminiShim -Force
+    Write-Ok "Removed legacy Engram shim: $legacyGeminiShim"
+}
 
 # 7. Codex shim
 $codexShimLines = @(
@@ -149,7 +155,8 @@ $dispatcherLines = @(
     "set `"PROVIDER=copilot`"",
     "for /f `"usebackq`" %%P in (`"`"$PythonExe`" -c `"import yaml; d=yaml.safe_load(open(r'%USERPROFILE%\.engram\overlay.user.yaml',encoding='utf-8')) or {}; cli=d.get('cli',{}) if isinstance(d,dict) else {}; print(cli.get('provider','copilot') if isinstance(cli,dict) else 'copilot')`" 2^>nul`") do set `"PROVIDER=%%P`"",
     "if /i `"!PROVIDER!`"==`"copilot`"     call `"%USERPROFILE%\.engram\engram-copilot.cmd`" %*",
-    "if /i `"!PROVIDER!`"==`"gemini`"      call `"%USERPROFILE%\.engram\engram-gemini.cmd`" %*",
+    "if /i `"!PROVIDER!`"==`"gemini`"      set `"PROVIDER=antigravity`"",
+    "if /i `"!PROVIDER!`"==`"antigravity`" call `"%USERPROFILE%\.engram\engram-antigravity.cmd`" %*",
     "if /i `"!PROVIDER!`"==`"codex`"       call `"%USERPROFILE%\.engram\engram-codex.cmd`" %*",
     "if /i `"!PROVIDER!`"==`"claude-code`" call `"%USERPROFILE%\.engram\engram-claude.cmd`" %*",
     "if /i `"!PROVIDER!`"==`"claude-code-ollama`" call `"%USERPROFILE%\.engram\engram-claude.cmd`" %*",

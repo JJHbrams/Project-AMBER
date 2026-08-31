@@ -2,17 +2,19 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import sys
 from typing import Any, TextIO
 
 from core.integrations.policy_preflight import process_policy_request
 
+logger = logging.getLogger(__name__)
+
 
 # Every CLI provider Engram ships a shim for and whose runtime exposes a pre-tool hook.
 # ``event`` is the provider's hook event name; ``dialect`` selects the denial payload shape.
-# ``warn`` guidance always uses ``hookSpecificOutput.additionalContext`` — every supported
-# runtime injects that string back into the model context.
+# Antigravity's current contract requires a top-level decision for every response.
 _PROVIDERS: dict[str, dict[str, str]] = {
     "claude-code": {
         "request_type": "claude-pretool-hook",
@@ -29,10 +31,10 @@ _PROVIDERS: dict[str, dict[str, str]] = {
         "event": "PreToolUse",
         "dialect": "claude",
     },
-    "gemini": {
-        "request_type": "gemini-pretool-hook",
-        "event": "BeforeTool",
-        "dialect": "gemini",
+    "antigravity": {
+        "request_type": "antigravity-pretool-hook",
+        "event": "PreToolUse",
+        "dialect": "antigravity",
     },
 }
 
@@ -54,6 +56,14 @@ def _payload_cwd(raw_text: str, fallback: str) -> str:
         value = str(payload.get(key) or "").strip()
         if value:
             return value
+    tool_call = payload.get("toolCall")
+    if isinstance(tool_call, dict):
+        args = tool_call.get("args")
+        if isinstance(args, dict):
+            for key in ("Cwd", "cwd", "workingDirectory", "WorkspaceRoot"):
+                value = str(args.get(key) or "").strip()
+                if value:
+                    return value
     return fallback
 
 
@@ -94,6 +104,10 @@ def process_provider_hook_input(
 ) -> tuple[str, str, int]:
     """Convert a provider PreToolUse payload into warning or agent-only denial output."""
     normalized_provider = str(provider or "").strip().lower()
+    # Hidden compatibility for an already-installed legacy wrapper only.
+    if normalized_provider == "gemini":
+        logger.warning("Deprecated provider alias 'gemini' mapped to 'antigravity'; reinstall the managed hook.")
+        normalized_provider = "antigravity"
     spec = _PROVIDERS.get(normalized_provider)
     if spec is None:
         reason = f"unsupported agent policy provider '{normalized_provider or provider}'"
@@ -113,23 +127,29 @@ def process_provider_hook_input(
         reason = str(exc).strip() or "policy guidance adapter error"
         enforce = False
 
+    # Antigravity only accepts top-level decision/reason.  It cannot use the
+    # Claude-shaped additionalContext object, so emit its required neutral allow
+    # decision when there is no policy message.
+    if spec["dialect"] == "antigravity":
+        message = f"Engram policy {'enforcement' if enforce else 'guidance'}: {reason}" if reason else ""
+        response: dict[str, Any] = {"decision": "deny" if enforce else "allow"}
+        if message:
+            response["reason"] = message
+        return _compact_json(response), "", 0
+
     if not reason:
         return "", "", 0
 
     message = f"Engram policy {'enforcement' if enforce else 'guidance'}: {reason}"
     event = spec["event"]
     if enforce:
-        if spec["dialect"] == "gemini":
-            # Gemini CLI has no permissionDecision; it blocks on a top-level decision/reason.
-            response: dict[str, Any] = {"decision": "deny", "reason": message}
-        else:
-            response = {
-                "hookSpecificOutput": {
-                    "hookEventName": event,
-                    "permissionDecision": "deny",
-                    "permissionDecisionReason": message,
-                }
+        response = {
+            "hookSpecificOutput": {
+                "hookEventName": event,
+                "permissionDecision": "deny",
+                "permissionDecisionReason": message,
             }
+        }
         return _compact_json(response), "", 0
     # warn: every supported runtime injects additionalContext back into the model context.
     response = {
@@ -163,10 +183,10 @@ def provider_hook_main(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run advisory-only Engram agent policy guidance")
-    parser.add_argument("--provider", required=True, choices=sorted(_PROVIDERS))
+    parser.add_argument("--provider", required=True, choices=sorted(_PROVIDERS) + ["gemini"])
     parser.add_argument("--cwd", default="")
     args = parser.parse_args(argv)
-    return provider_hook_main(args.provider, cwd=args.cwd)
+    return provider_hook_main("antigravity" if args.provider == "gemini" else args.provider, cwd=args.cwd)
 
 
 if __name__ == "__main__":

@@ -47,16 +47,22 @@ _PRETOOL_HOOK_POSIX_PATH = _ENGRAM_DIR / "engram-claude-pretool-hook.sh"
 _PRETOOL_HOOK_MARKER = "engram-claude-pretool-hook"
 _CODEX_PRETOOL_HOOK_MARKER = "engram-codex-pretool-hook"
 _GEMINI_SETTINGS_PATH = Path.home() / ".gemini" / "settings.json"
+_ANTIGRAVITY_HOOKS_PATH = Path.home() / ".gemini" / "config" / "hooks.json"
+_ANTIGRAVITY_MCP_CONFIG_PATH = Path.home() / ".gemini" / "config" / "mcp_config.json"
 _COPILOT_HOOKS_PATH = Path.home() / ".copilot" / "hooks" / "engram.json"
 _GEMINI_PRETOOL_HOOK_MARKER = "engram-gemini-pretool-hook"
 _COPILOT_PRETOOL_HOOK_MARKER = "engram-copilot-pretool-hook"
 _GEMINI_PRETOOL_HOOK_SCRIPT_PATH = _ENGRAM_DIR / "engram-gemini-pretool-hook.ps1"
 _GEMINI_PRETOOL_HOOK_POSIX_PATH = _ENGRAM_DIR / "engram-gemini-pretool-hook.sh"
+_ANTIGRAVITY_PRETOOL_HOOK_MARKER = "engram-antigravity-pretool-hook"
+_ANTIGRAVITY_PRETOOL_HOOK_SCRIPT_PATH = _ENGRAM_DIR / "engram-antigravity-pretool-hook.ps1"
+_ANTIGRAVITY_PRETOOL_HOOK_POSIX_PATH = _ENGRAM_DIR / "engram-antigravity-pretool-hook.sh"
 _COPILOT_PRETOOL_HOOK_SCRIPT_PATH = _ENGRAM_DIR / "engram-copilot-pretool-hook.ps1"
 _COPILOT_PRETOOL_HOOK_POSIX_PATH = _ENGRAM_DIR / "engram-copilot-pretool-hook.sh"
 # provider -> (windows script, posix script)
 _PROVIDER_HOOK_SCRIPT_PATHS = {
     "gemini": (_GEMINI_PRETOOL_HOOK_SCRIPT_PATH, _GEMINI_PRETOOL_HOOK_POSIX_PATH),
+    "antigravity": (_ANTIGRAVITY_PRETOOL_HOOK_SCRIPT_PATH, _ANTIGRAVITY_PRETOOL_HOOK_POSIX_PATH),
     "copilot": (_COPILOT_PRETOOL_HOOK_SCRIPT_PATH, _COPILOT_PRETOOL_HOOK_POSIX_PATH),
 }
 
@@ -219,6 +225,21 @@ def _hook_command(script_path: Path) -> str:
     if script_path.suffix.lower() == ".sh":
         return f'/bin/sh "{script_path}"'
     return f'powershell -NoProfile -ExecutionPolicy Bypass -File "{script_path}"'
+
+
+def _antigravity_hook_command(script_path: Path) -> str:
+    """Render for AGY's Windows ``cmd /c`` hook runner without nested quotes.
+
+    Antigravity runs hooks with the directory containing ``hooks.json`` as its
+    cwd.  The managed script and config both live below the same home directory,
+    so a relative path is stable and contains no user-profile segment that may
+    require quoting.  AGY 1.1.22 otherwise passes quotes around an absolute
+    ``-File`` value through to PowerShell as literal path characters.
+    """
+    relative = os.path.relpath(script_path, _ANTIGRAVITY_HOOKS_PATH.parent)
+    if script_path.suffix.lower() == ".sh":
+        return f"/bin/sh {relative}"
+    return f"powershell -NoProfile -ExecutionPolicy Bypass -File {relative}"
 
 
 def _codex_hook_handler() -> dict[str, Any]:
@@ -407,7 +428,17 @@ def _write_provider_hook_script(
             )
             _ENGRAM_DIR.mkdir(parents=True, exist_ok=True)
             if not script_path.exists() or script_path.read_text(encoding="utf-8") != content:
-                script_path.write_text(content, encoding="utf-8")
+                # Do not leave a partially rendered executable hook if a host
+                # loses power or a writer fails midway through an update.
+                fd, tmp_name = tempfile.mkstemp(prefix=f".{script_path.name}.", suffix=".tmp", dir=str(script_path.parent))
+                tmp_path = Path(tmp_name)
+                try:
+                    with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as stream:
+                        stream.write(content)
+                    os.replace(tmp_path, script_path)
+                except Exception:
+                    tmp_path.unlink(missing_ok=True)
+                    raise
             if not windows:
                 script_path.chmod(0o755)
         else:
@@ -418,56 +449,151 @@ def _write_provider_hook_script(
     return script_path, None
 
 
-def sync_gemini_pretool_hook(enabled: bool) -> dict[str, Any]:
-    """Merge only the Engram BeforeTool handler into ~/.gemini/settings.json."""
-    script_path, error = _write_provider_hook_script("gemini", enabled=enabled)
-    if error is not None:
-        return error
+def sync_antigravity_pretool_hook(enabled: bool) -> dict[str, Any]:
+    """Migrate only Engram's legacy Gemini hook to Antigravity's named hook.
+
+    `.gemini` is Antigravity's official storage location; the old
+    settings.json remains user-owned and only the marked BeforeTool command is
+    removed. Every existing JSON file is backed up before its first mutation.
+    """
     try:
-        if _GEMINI_SETTINGS_PATH.exists():
-            raw = json.loads(_GEMINI_SETTINGS_PATH.read_text(encoding="utf-8"))
-            if not isinstance(raw, dict):
-                return {"ok": False, "changed": False, "error": "Gemini settings.json is not an object"}
-            settings: dict[str, Any] = raw
-        elif not enabled:
-            return {"ok": True, "changed": False, "enabled": enabled}
-        else:
-            settings = {}
-        before = json.dumps(settings, sort_keys=True)
-        hooks = settings.get("hooks")
-        if not isinstance(hooks, dict):
-            hooks = {}
-        entries = hooks.get("BeforeTool")
-        if not isinstance(entries, list):
-            entries = []
-        entries = _strip_engram_entries(entries, _GEMINI_PRETOOL_HOOK_MARKER)
+        def load(path: Path) -> tuple[dict[str, Any] | None, bytes | None]:
+            if not path.exists(): return {}, None
+            raw = path.read_bytes()
+            try: value = json.loads(raw.decode("utf-8"))
+            except Exception: return None, raw
+            if not isinstance(value, dict): return None, raw
+            backup = path.with_name(path.name + ".engram-bak")
+            if not backup.exists(): backup.write_bytes(raw)
+            return value, raw
+        legacy, _ = load(_GEMINI_SETTINGS_PATH)
+        hooks_json, _ = load(_ANTIGRAVITY_HOOKS_PATH)
+        if legacy is None or hooks_json is None:
+            return {"ok": False, "changed": False, "enabled": enabled, "error": "Antigravity settings could not be parsed"}
+        # Validate and back up user state before creating or replacing any script.
+        script_path, error = _write_provider_hook_script("antigravity", enabled=enabled)
+        if error is not None:
+            return error
+        changed = False
+        hooks = legacy.get("hooks") if isinstance(legacy.get("hooks"), dict) else {}
+        entries = hooks.get("BeforeTool") if isinstance(hooks.get("BeforeTool"), list) else []
+        cleaned = _strip_engram_entries(entries, _GEMINI_PRETOOL_HOOK_MARKER)
+        if cleaned != entries:
+            changed = True
+            if cleaned: hooks["BeforeTool"] = cleaned
+            else: hooks.pop("BeforeTool", None)
+            if hooks: legacy["hooks"] = hooks
+            else: legacy.pop("hooks", None)
+        if _GEMINI_SETTINGS_PATH.exists() and changed:
+            _write_json_atomic(_GEMINI_SETTINGS_PATH, legacy)
+        before = json.dumps(hooks_json, sort_keys=True)
+        hooks_json.pop(_ANTIGRAVITY_PRETOOL_HOOK_MARKER, None)
         if enabled:
-            entries.append(
-                {
-                    "hooks": [
-                        {
-                            "type": "command",
-                            "command": _hook_command(script_path),
-                            "timeout": 30000,
-                        }
-                    ]
-                }
-            )
-        if entries:
-            hooks["BeforeTool"] = entries
-        else:
-            hooks.pop("BeforeTool", None)
-        if hooks:
-            settings["hooks"] = hooks
-        else:
-            settings.pop("hooks", None)
-        changed = before != json.dumps(settings, sort_keys=True)
-        if changed:
-            _write_json_atomic(_GEMINI_SETTINGS_PATH, settings)
+            hooks_json[_ANTIGRAVITY_PRETOOL_HOOK_MARKER] = {
+                "PreToolUse": [{
+                    "matcher": "run_command|write_to_file|replace_file_content|multi_replace_file_content",
+                    "hooks": [{"type": "command", "command": _antigravity_hook_command(script_path), "timeout": 30}],
+                }]
+            }
+        if before != json.dumps(hooks_json, sort_keys=True):
+            _write_json_atomic(_ANTIGRAVITY_HOOKS_PATH, hooks_json)
+            changed = True
+        # Once its only managed settings entry is gone, the old wrapper is no
+        # longer needed.  Keep arbitrary user scripts untouched.
+        for path in (_GEMINI_PRETOOL_HOOK_SCRIPT_PATH, _GEMINI_PRETOOL_HOOK_POSIX_PATH):
+            path.unlink(missing_ok=True)
+        legacy_shim = _ENGRAM_DIR / "engram-gemini.cmd"
+        if legacy_shim.exists() and _is_managed_legacy_gemini_shim_text(legacy_shim.read_text(encoding="utf-8", errors="ignore")):
+            legacy_shim.unlink()
         return {"ok": True, "changed": changed, "enabled": enabled}
     except Exception as exc:
-        logger.exception("[engram-bootstrap] Gemini BeforeTool hook 동기화 실패")
+        logger.exception("[engram-bootstrap] Antigravity PreToolUse hook sync failed")
         return {"ok": False, "changed": False, "enabled": enabled, "error": str(exc)}
+
+
+def sync_gemini_pretool_hook(enabled: bool) -> dict[str, Any]:
+    """Deprecated compatibility alias for a previously installed local wrapper.
+
+    New UI, installer, and configuration code never installs the former Gemini
+    contract.  Calling this old function migrates to the active Antigravity one.
+    """
+    return sync_antigravity_pretool_hook(enabled)
+
+
+def _is_recognized_legacy_engram_mcp(entry: Any) -> bool:
+    """Return true only for the pre-migration localhost/stdio Engram entry."""
+    if not isinstance(entry, dict):
+        return False
+    url = str(entry.get("url") or "").strip().lower()
+    if url in {"http://127.0.0.1:17385/mcp", "http://127.0.0.1:17385/sse", "http://localhost:17385/mcp", "http://localhost:17385/sse"}:
+        return True
+    command = str(entry.get("command") or "").lower()
+    args = " ".join(str(item) for item in entry.get("args", [])).lower() if isinstance(entry.get("args"), list) else ""
+    return ("python" in command or command.endswith(".exe")) and "mcp_server.py" in args
+
+
+def _is_managed_legacy_gemini_shim_text(text: str) -> bool:
+    normalized = text.lower()
+    return (
+        "@echo off" in normalized
+        and "setlocal enabledelayedexpansion" in normalized
+        and "engram_db_dir=" in normalized
+        and "--allowed-mcp-server-names engram" in normalized
+        and "gemini" in normalized
+    )
+
+
+def sync_antigravity_mcp_config() -> dict[str, Any]:
+    """Safely install Engram's current AGY MCP HTTP entry, independently of policy hooks."""
+    try:
+        def load(path: Path) -> dict[str, Any] | None:
+            if not path.exists():
+                return {}
+            raw = path.read_bytes()
+            # AGY can leave a zero-byte placeholder before its first `mcp add`.
+            # It carries no user state, so treat it as an empty document while
+            # still preserving the original bytes in the migration backup.
+            if not raw.strip():
+                backup = path.with_name(path.name + ".engram-bak")
+                if not backup.exists():
+                    backup.write_bytes(raw)
+                return {}
+            try:
+                value = json.loads(raw.decode("utf-8"))
+            except Exception:
+                return None
+            if not isinstance(value, dict):
+                return None
+            backup = path.with_name(path.name + ".engram-bak")
+            if not backup.exists():
+                backup.write_bytes(raw)
+            return value
+
+        config = load(_ANTIGRAVITY_MCP_CONFIG_PATH)
+        legacy = load(_GEMINI_SETTINGS_PATH)
+        if config is None or legacy is None:
+            return {"ok": False, "changed": False, "error": "Antigravity MCP settings could not be parsed"}
+        changed = False
+        servers = config.get("mcpServers") if isinstance(config.get("mcpServers"), dict) else {}
+        expected = {"disabled": False, "serverUrl": "http://127.0.0.1:17385/mcp"}
+        if servers.get("engram") != expected:
+            servers["engram"] = expected
+            config["mcpServers"] = servers
+            _write_json_atomic(_ANTIGRAVITY_MCP_CONFIG_PATH, config)
+            changed = True
+        legacy_servers = legacy.get("mcpServers") if isinstance(legacy.get("mcpServers"), dict) else {}
+        if _is_recognized_legacy_engram_mcp(legacy_servers.get("engram")):
+            legacy_servers.pop("engram", None)
+            if legacy_servers:
+                legacy["mcpServers"] = legacy_servers
+            else:
+                legacy.pop("mcpServers", None)
+            _write_json_atomic(_GEMINI_SETTINGS_PATH, legacy)
+            changed = True
+        return {"ok": True, "changed": changed}
+    except Exception as exc:
+        logger.exception("[engram-bootstrap] Antigravity MCP config sync failed")
+        return {"ok": False, "changed": False, "error": str(exc)}
 
 
 def sync_copilot_pretool_hook(enabled: bool) -> dict[str, Any]:

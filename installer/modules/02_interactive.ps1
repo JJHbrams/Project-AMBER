@@ -33,7 +33,7 @@ if ((Test-Path $OverlayUserConfigPath) -and $PythonExe) {
 # 태우지 않고 조용히 재사용한다. -Reconfigure를 주면 항상 TUI를 다시 띄운다.
 $ProviderAvailability = @{
     "copilot" = ($null -ne $CopilotCmdDetected)
-    "gemini" = ($null -ne $GeminiCmdDetected)
+    "antigravity" = ($null -ne $AntigravityCmdDetected)
     "codex" = ($null -ne $CodexCmdDetected)
     "claude-code" = ($null -ne $ClaudeCliCmdDetected)
     "claude-code-ollama" = (($null -ne $ClaudeCliCmdDetected) -and ($null -ne $OllamaCmdDetected))
@@ -50,8 +50,12 @@ if ($_hasCompleteExisting -and -not $Reconfigure) {
     $SelectedCliProvider = $ExistingCliProvider
     $SelectedOllamaModel = $ExistingOllamaModel
     $DefaultCliProvider = Resolve-AvailableCliProvider $SelectedCliProvider $ProviderAvailability
-    $_existingStartupLink = Join-Path ([Environment]::GetFolderPath("Startup")) "engram-overlay.lnk"
-    $EnableAutoStart = Test-Path $_existingStartupLink
+    $_startupDir = [Environment]::GetFolderPath("Startup")
+    $_existingStartupLinks = @(
+        (Join-Path $_startupDir "AMBER (ENGRAM).lnk"),
+        (Join-Path $_startupDir "engram-overlay.lnk")
+    )
+    $EnableAutoStart = [bool]($_existingStartupLinks | Where-Object { Test-Path $_ } | Select-Object -First 1)
 
     Write-Host "  [설정] 기존 설정 재사용 (재설정하려면 .\install.ps1 -Reconfigure)" -ForegroundColor DarkCyan
     $_summary = $DefaultCliProvider
@@ -112,10 +116,10 @@ Write-Host "         Python 환경 구성 결과에 따라 자동으로 설정�
 $CliProviderDefault = Resolve-AvailableCliProvider $ExistingCliProvider $ProviderAvailability
 Write-Host ""
 Write-Host "  [설정] 기본 CLI 서비스 — 오버레이에서 기본으로 사용할 provider" -ForegroundColor White
-$_providerItems  = @("copilot", "gemini", "codex", "claude-code", "claude-code(ollama)", "ollama")
+$_providerItems  = @("copilot", "antigravity", "codex", "claude-code", "claude-code(ollama)", "ollama")
 $_providerBadges = @(
     $(if ($ProviderAvailability['copilot'])     { 'installed' } else { 'missing' }),
-    $(if ($ProviderAvailability['gemini'])      { 'installed' } else { 'missing' }),
+    $(if ($ProviderAvailability['antigravity']) { 'installed' } else { 'missing' }),
     $(if ($ProviderAvailability['codex'])       { 'installed' } else { 'missing' }),
     $(if ($ProviderAvailability['claude-code']) { 'installed' } else { 'missing' }),
     $(if ($ProviderAvailability['claude-code-ollama']) { 'installed' } else { 'missing' }),
@@ -212,8 +216,12 @@ if ($SelectedOllamaModel) { $_providerSummary += " (ollama: $SelectedOllamaModel
 Write-Ok "기본 CLI provider: $_providerSummary"
 
 # ── 자동시작 설정 ─────────────────────────────────────────
-$_existingStartupLink = Join-Path ([Environment]::GetFolderPath("Startup")) "engram-overlay.lnk"
-$_autoStartDefault = if (Test-Path $_existingStartupLink) { 0 } else { 1 }
+$_startupDir = [Environment]::GetFolderPath("Startup")
+$_existingStartupLinks = @(
+    (Join-Path $_startupDir "AMBER (ENGRAM).lnk"),
+    (Join-Path $_startupDir "engram-overlay.lnk")
+)
+$_autoStartDefault = if ($_existingStartupLinks | Where-Object { Test-Path $_ } | Select-Object -First 1) { 0 } else { 1 }
 Write-Host ""
 Write-Host "  [설정] Windows 시작 시 자동실행 — 재부팅 후 overlay가 자동으로 켜집니다" -ForegroundColor White
 $_autoStartChoice = Select-WithArrowKeys `

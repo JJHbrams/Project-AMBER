@@ -186,17 +186,12 @@ class MemoryEventSourceTests(unittest.TestCase):
             sources=[source],
         )
         event = {"kind": "tool_use", "tool_name": "mcp__engram__kg_search"}
-        # The source state starts at monotonic zero.  Pin time beyond the
-        # configured cooldown so this test is independent of host uptime
-        # (notably immediately after a reboot).
-        with patch("overlay.bubble.initiative.time.monotonic", return_value=10_000.0):
-            engine.feed_event(event)
-            first = engine._select_nudge()
-            self.assertIsNotNone(first)
-            engine._speak(first)
-        with patch("overlay.bubble.initiative.time.monotonic", return_value=10_001.0):
-            engine.feed_event(event)
-            self.assertIsNone(engine._select_nudge())
+        engine.feed_event(event)
+        first = engine._select_nudge()
+        self.assertIsNotNone(first)
+        engine._speak(first)
+        engine.feed_event(event)
+        self.assertIsNone(engine._select_nudge())
 
 
 class GuardTests(unittest.TestCase):

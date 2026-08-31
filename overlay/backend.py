@@ -54,8 +54,6 @@ class EngramBackend:
                 encoding="utf-8",
                 timeout=120,
                 env=child_env,
-                # overlay 는 콘솔 없는 GUI 프로세스라 cmd 가 새 콘솔 창을 띄운다.
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
             response = result.stdout.strip() or result.stderr.strip() or "(응답 없음)"
         except FileNotFoundError:

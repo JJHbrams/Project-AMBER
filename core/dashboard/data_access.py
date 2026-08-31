@@ -6,20 +6,28 @@ from pathlib import Path
 
 import streamlit as st
 
+from core.config.runtime_config import get_db_root_dir
 from core.dashboard.semantic_api import sg_graph
 
-DB_PATH = "D:/intel_engram/engram.db"
+
+def get_db_path() -> Path:
+    """Return the database selected by the shared runtime configuration."""
+    return Path(get_db_root_dir()) / "engram.db"
 
 
 @st.cache_resource
-def get_db() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+def get_db(db_path: str) -> sqlite3.Connection:
+    # db_path is deliberately part of the cache key.  Existing installations
+    # can change db.root_dir during an upgrade or in Settings, and reusing a
+    # connection cached for the previous directory would keep showing stale DB
+    # errors until the whole dashboard process is restarted.
+    conn = sqlite3.connect(db_path, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     return conn
 
 
 def query(sql: str, params=()) -> list[dict]:
-    rows = get_db().execute(sql, params).fetchall()
+    rows = get_db(str(get_db_path())).execute(sql, params).fetchall()
     return [dict(r) for r in rows]
 
 

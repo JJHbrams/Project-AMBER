@@ -5,13 +5,83 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 import json
+import hashlib
 
-from core.install.bootstrap import bootstrap_install
+from core.install.bootstrap import TEMPLATE_TARGETS, bootstrap_install
 from core.context.directives import update_directive
-from core.storage.db import get_connection
+from core.storage.db import get_connection, initialize_db
 
 
 class InstallBootstrapTest(unittest.TestCase):
+    def test_legacy_database_without_docs_receives_current_managed_manual(self):
+        templates = Path(__file__).resolve().parents[1] / "installer" / "templates"
+        with tempfile.TemporaryDirectory() as tmp:
+            db_dir = Path(tmp)
+            # A v1.2 installation could already have a usable DB while never
+            # having received the docs/manual payload from its installer.
+            initialize_db(db_dir)
+            conn = get_connection(db_dir)
+            user_note = db_dir / "docs" / "notes" / "legacy-user-note.md"
+            user_note.parent.mkdir(parents=True)
+            user_note.write_text("legacy user wiki content", encoding="utf-8")
+            user_note_hash = hashlib.sha256(user_note.read_bytes()).hexdigest()
+            with conn:
+                conn.execute(
+                    "UPDATE identity SET name='legacy-name', narrative='legacy-narrative' WHERE id=1"
+                )
+                session_id = conn.execute(
+                    "INSERT INTO sessions (scope_key, summary) VALUES ('legacy-scope', 'legacy-summary')"
+                ).lastrowid
+                conn.execute(
+                    "INSERT INTO messages (session_id, role, content) VALUES (?, 'user', 'legacy-message')",
+                    (session_id,),
+                )
+                conn.execute(
+                    "INSERT INTO memories (session_id, content, keywords) VALUES (?, 'legacy-memory', 'legacy')",
+                    (session_id,),
+                )
+                conn.execute(
+                    "INSERT INTO directives (key, content, source) VALUES ('legacy-user-rule', 'preserve-rule', 'user')"
+                )
+            sentinel_queries = {
+                "identity": "SELECT id, name, narrative FROM identity WHERE id=1",
+                "sessions": "SELECT id, scope_key, summary FROM sessions WHERE id=1",
+                "messages": "SELECT id, session_id, role, content FROM messages WHERE id=1",
+                "memories": "SELECT id, session_id, content, keywords FROM memories WHERE id=1",
+                "directives": "SELECT key, content, source FROM directives WHERE key='legacy-user-rule'",
+            }
+            before = {
+                name: tuple(conn.execute(sql).fetchone())
+                for name, sql in sentinel_queries.items()
+            }
+            conn.close()
+            self.assertFalse((db_dir / "docs" / "guides" / "engram-manual").exists())
+
+            with patch.dict(
+                os.environ,
+                {"ENGRAM_DB_DIR": str(db_dir), "ENGRAM_SMOKE_DB_DIR": str(db_dir)},
+            ):
+                result = bootstrap_install(db_dir, templates)
+
+            manual_root = db_dir / "docs" / "guides" / "engram-manual"
+            manifest = json.loads((templates / "manual" / "manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(result["manual_files_created"], len(manifest["files"]))
+            self.assertTrue((manual_root / ".install-manifest.json").is_file())
+            for relative in manifest["files"]:
+                self.assertTrue((manual_root / relative).is_file(), relative)
+            for _source_relative, target_relative in TEMPLATE_TARGETS:
+                self.assertTrue((db_dir / "docs" / target_relative).is_file(), target_relative)
+            after_conn = get_connection(db_dir)
+            try:
+                after = {
+                    name: tuple(after_conn.execute(sql).fetchone())
+                    for name, sql in sentinel_queries.items()
+                }
+            finally:
+                after_conn.close()
+            self.assertEqual(after, before)
+            self.assertEqual(hashlib.sha256(user_note.read_bytes()).hexdigest(), user_note_hash)
+
     def test_creates_wiki_starters_and_seeds_directives_without_overwrite(self):
         templates = Path(__file__).resolve().parents[1] / "installer" / "templates"
         with tempfile.TemporaryDirectory() as tmp:

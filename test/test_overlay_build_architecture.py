@@ -266,7 +266,7 @@ class OverlayBuildArchitectureTests(unittest.TestCase):
         self.assertIn('$versionDefine = "/DAppVersion=$AppVersion"', release)
         self.assertNotIn('/DAppVersion=`"$AppVersion`"', release)
         self.assertIn("#ifndef AppVersion", iss)
-        self.assertIn("OutputBaseFilename=EngramOverlay_{#AppVersion}", iss)
+        self.assertIn("OutputBaseFilename=AMBER_{#AppVersion}", iss)
 
     def test_mcp_check_requires_fastmcp_import(self):
         requirements = (ROOT / "requirements.txt").read_text(encoding="utf-8")

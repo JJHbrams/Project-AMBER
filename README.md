@@ -27,7 +27,7 @@
 
 ![python](https://img.shields.io/badge/python-3.11-3776AB?logo=python&logoColor=white)
 ![Copilot](https://img.shields.io/badge/GitHub_Copilot-CLI-000000?logo=github&logoColor=white)
-![Gemini](https://img.shields.io/badge/Gemini-CLI-4285F4?logo=google&logoColor=white)
+![Antigravity](https://img.shields.io/badge/Antigravity-agy-4285F4?logo=google&logoColor=white)
 ![Claude](https://img.shields.io/badge/Claude_Code-CLI-d97706?logo=anthropic&logoColor=white)
 ![Ollama](https://img.shields.io/badge/Ollama-local-ffffff?logo=ollama&logoColor=black)
 ![Goose](https://img.shields.io/badge/Goose-MCP_agent-111827)
@@ -39,7 +39,7 @@
 
 <br />
 
-`Copilot CLI` · `Gemini CLI` · `Codex CLI` · `Claude Code` · `Ollama` · `Goose` · `Desktop Overlay` · `Discord`
+`Copilot CLI` · `Antigravity (agy)` · `Codex CLI` · `Claude Code` · `Ollama` · `Goose` · `Desktop Overlay` · `Discord`
 
 여덟 개의 인터페이스, 하나의 연속적 존재
 
@@ -54,7 +54,7 @@
 - 대화 맥락과 기억을 내 PC에 저장하고, 다음 대화에서 이어받습니다.
 - 오버레이·Discord 등 여러 창구에서 항상 같은 기억을 씁니다.
 - 내 PC의 지식 저장소를 바탕으로 관련 내용을 자동으로 찾아 대화에 활용합니다.
-- 오버레이가 켜져 있는 동안 연결된 모든 AI 도구(Copilot·Gemini·Claude·Goose·VS Code 등)가 같은 기억에 접근할 수 있습니다.
+- 오버레이가 켜져 있는 동안 연결된 모든 AI 도구(Copilot·Antigravity·Claude·Goose·VS Code 등)가 같은 기억에 접근할 수 있습니다.
 
 </td><td valign="top" align="right" width="320">
 
@@ -76,7 +76,7 @@
 
 | AI 도구                                                                    | 비용                           | 설치                                      |
 | -------------------------------------------------------------------------- | ------------------------------ | ----------------------------------------- |
-| [Gemini CLI](https://ai.google.dev/gemini-api/docs/cli) ⭐ 추천            | 무료 (Google 계정만 있으면 됨) | `npm i -g @google/gemini-cli`             |
+| [Antigravity (agy)](https://antigravity.google) ⭐ 추천                  | Google 계정                  | `agy` 설치 후 첫 실행에서 인증            |
 | [Codex CLI](https://developers.openai.com/codex/cli)                     | OpenAI 계정/구독                | `npm i -g @openai/codex`                  |
 | [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code)          | API 키 (무료 크레딧 포함)      | `npm i -g @anthropic-ai/claude-code`      |
 | [GitHub Copilot CLI](https://docs.github.com/copilot/how-tos/copilot-cli)  | 유료 구독 필요                 | `npm i -g @githubnext/github-copilot-cli` |
@@ -110,7 +110,7 @@ powershell -ExecutionPolicy Bypass -File ./INSTALL.ps1
 **① 의존성 상태 표시**
 
 설치된 AI 도구를 자동 감지해 설치됨 / 미설치 상태를 표시합니다.
-Python/Conda가 없으면 설치가 중단됩니다. AI 도구가 하나도 없으면 Gemini CLI 설치 방법을 안내합니다.
+Python/Conda가 없으면 설치가 중단됩니다. AI 도구가 하나도 없으면 Antigravity 설치 방법을 안내합니다.
 
 **② DB 경로**
 
@@ -138,7 +138,7 @@ engram 실행 시 터미널이 자동으로 이동할 디렉토리입니다.
 ```
 [설정] 기본 AI 대화 도구 — 오버레이에서 기본으로 사용할 도구
   > copilot     [설치됨]
-    gemini      [미설치]
+    antigravity [미설치]
     codex       [설치됨]
     claude-code [설치됨]
     ollama      [설치됨]
@@ -221,7 +221,7 @@ VS Code Copilot Chat → Agent 모드 → engram_get_context 등 MCP 도구 자�
 ```powershell
 engram               # 오버레이 설정에서 지정한 기본 AI 도구로 자동 실행
 engram-copilot       # GitHub Copilot CLI
-engram-gemini        # Gemini CLI
+engram-antigravity   # Antigravity (agy)
 engram-codex         # Codex CLI
 engram-claude        # Claude Code
 engram-goose         # Goose
@@ -241,14 +241,14 @@ engram --continue       # 이전 대화 이어서
 
 | 항목               | 내용                                                                                                                                           |
 | ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------- |
-| 실행 명령          | `engram`, `engram-copilot`, `engram-gemini`, `engram-codex`, `engram-claude`, `engram-goose`, `engram-overlay`                                |
+| 실행 명령          | `engram`, `engram-copilot`, `engram-antigravity`, `engram-codex`, `engram-claude`, `engram-goose`, `engram-overlay`                          |
 | AI 도구 연동       | 설치된 모든 AI 도구에 engram 연결이 자동으로 설정됨                                                                                            |
 | 설정 파일 위치     | `~/.engram/` 폴더 아래에 모든 사용자 설정이 저장됨                                                                                             |
 | 기억·지식 저장소   | 설치 시 지정한 경로에 생성됨 (기본값: `D:\intel_engram\`)                                                                                      |
 | 시작프로그램       | 오버레이 바로가기 + 지식 저장소 자동 동기화 등록                                                                                               |
 
 > **주의**: 오버레이가 켜져 있어야 다른 AI 도구들이 engram 기억에 접근할 수 있습니다.
-> 오버레이를 먼저 켠 뒤 Copilot·Codex·Claude Code·Gemini·Goose 등을 열면 자동으로 연결됩니다.
+> 오버레이를 먼저 켠 뒤 Copilot·Codex·Claude Code·Antigravity·Goose 등을 열면 자동으로 연결됩니다.
 
 설정 GUI의 `저장소 정책 수준`은 다음 세 단계입니다.
 
@@ -281,7 +281,7 @@ discord:
   ├── VS Code Copilot Chat  → 자동 연결
   ├── Claude Code           → 자동 연결
   ├── Codex CLI             → 자동 연결
-  ├── Gemini CLI            → 자동 연결
+  ├── Antigravity (agy)     → 자동 연결
   └── Goose                 → 자동 연결
 ```
 
@@ -303,7 +303,7 @@ Claude Code 또는 Goose에서 Ollama 로컬 모델을 백엔드로 사용할 �
 > - 기억 로드를 건너뛰거나 엉뚱한 응답을 출력함
 > - 지시를 무시하고 자기 방식대로 동작함
 >
-> **PC 사양이 부족하다면 Claude API / GitHub Copilot / Gemini CLI 사용을 권장합니다.**
+> **PC 사양이 부족하다면 Claude API / GitHub Copilot / Antigravity 사용을 권장합니다.**
 
 ## 지식 그래프 대시보드
 
@@ -453,7 +453,6 @@ Markdown 파일로 위키 노트를 작성하면 자동으로 KG에 반영되어
 ## 문서
 
 - 사용자 개요: 이 README
-- 외부 오버레이 예제와 개발 도구: [engram-overlay](https://github.com/JJHbrams/engram-overlay)
 - 오버레이 커스텀 팩: [docs/character-packs.md](docs/character-packs.md)
 - 기술 문서: [docs/dev/system-technical-reference.md](docs/dev/system-technical-reference.md)
 - 보조 문서: [docs/architecture.md](docs/architecture.md), [docs/memory-tiering.md](docs/memory-tiering.md)

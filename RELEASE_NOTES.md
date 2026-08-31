@@ -1,5 +1,51 @@
 # Release Notes
 
+## 2026-08-31 - v1.5.7: AMBER Branding and Reliable Legacy Upgrades
+
+> Patch release. The Windows package is now presented as **AMBER (ENGRAM)** while
+> retaining the existing executable, command, installation identity, settings, and
+> in-place upgrade compatibility.
+
+### Highlights
+
+- **The installer and shortcuts now use the AMBER product name.** Windows Setup,
+  Apps & Features, Start Menu, auto-start links, and release assets show
+  `AMBER (ENGRAM)` / `AMBER_1.5.7.548_x64-setup.exe`.
+- **Existing command and installation contracts remain compatible.**
+  `engram-overlay.exe`, the `engram-overlay` command, AppId, dist paths, and config
+  keys are unchanged. Legacy shortcut names are detected and cleaned up safely.
+- **Older installations receive missing Wiki guides and manuals.** Installer
+  bootstrap runs before later configuration steps and installs every managed manual
+  declared by the packaged manifest without overwriting user-authored Wiki files.
+- **The Streamlit dashboard follows the selected DB directory.** All dashboard data
+  access uses the configured runtime DB root, including a custom Wiki directory, and
+  cache entries are isolated by DB path.
+- **Active provider support is aligned with Antigravity.** Installer, Settings, hooks,
+  MCP configuration, and documentation use Antigravity (`agy`) while preserving the
+  legacy Gemini migration alias.
+
+### Validation
+
+- Development source: `63d9eb01544226340211cdcfd22d287b4dc32d06`.
+- Release version: `1.5.7.548` (`SEMVER4_BUILD=548`).
+- Release-relevant installer/bootstrap/dashboard/build tests: 38 passed.
+- Fresh frozen runtime contract, embedding validation, role smoke, dashboard smoke,
+  and Inno Setup 6.7.3 release compile passed.
+- Custom DB frozen smoke: invalid path failed, isolated bootstrap passed, dashboard
+  AppTest passed, HTTP health became ready, and all 12 managed manual pages existed.
+- Installer: `AMBER_1.5.7.548_x64-setup.exe` (419,607,786 bytes).
+- SHA-256: `7D09488A29CD7943D922E14900A59E122A89B78E4AD8AE85ABDADC62EAA1B065`.
+
+### Upgrade Notes
+
+- Existing `Engram Overlay` installations are upgraded in place because the Inno
+  AppId and internal executable paths are unchanged.
+- The old `Engram Overlay.lnk` and `engram-overlay.lnk` names are migrated to
+  `AMBER (ENGRAM).lnk`.
+- A disposable Windows VM was not available for a literal v1.2-to-v1.5.7 GUI upgrade
+  run. The frozen bootstrap/dashboard path and focused preservation tests passed;
+  the full historical Inno upgrade remains a post-release field verification item.
+
 ## 2026-08-20 - v1.5.5: Safe Session Checkpoints and Project Daily Snapshots
 
 > Patch release. Engram now separates non-terminal memory checkpoints from irreversible session

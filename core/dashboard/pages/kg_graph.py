@@ -7,7 +7,7 @@ import streamlit as st
 
 from core.graph.knowledge import get_kg
 from core.storage.db import initialize_db
-from core.dashboard.data_access import DB_PATH, memory_nodes_edges
+from core.dashboard.data_access import get_db_path, memory_nodes_edges
 from core.dashboard.graph_render import MEMORY_NODE_COLORS, NODE_COLORS_FALLBACK, build_visjs_html
 from core.dashboard.semantic_api import sg_graph
 
@@ -59,7 +59,7 @@ def render_kg_graph() -> None:
                     st.error(f"노드 없음: {focus_input}")
                     st.stop()
 
-                raw_conn = sqlite3.connect(DB_PATH)
+                raw_conn = sqlite3.connect(get_db_path())
                 raw_conn.row_factory = sqlite3.Row
                 visited = {focus_node["id"]}
                 bfs = deque([(focus_node["id"], 0)])

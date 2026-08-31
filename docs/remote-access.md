@@ -1,5 +1,16 @@
 # 원격에서 engram 쓰기 — 사용 매뉴얼
 
+## 원격 agent 보호 hook
+
+원격 배치는 Claude Code, Codex, Antigravity의 `PreToolUse` hook을 함께 설치한다. hook은 원격
+파일시스템에서 git root와 branch를 직접 확인해 `main`·`master`·`dev` 또는 detached/unresolved
+상태의 변경 도구를 거부하고, feature branch와 확실히 읽기 전용인 작업은 허용한다. 보호
+브랜치의 모르는 shell/wrapper/redirection은 deny-by-default이며, `git -C`와 파일 대상 경로도
+실제 대상 저장소 기준으로 판별한다. Antigravity 설정은
+`~/.gemini/config/hooks.json`의 `engram-remote-agent-policy-hook-v1` 항목이며, 지원 matcher는
+`run_command`, `write_to_file`, `replace_file_content`, `multi_replace_file_content`다. 기존 설정은
+marker 기준으로만 병합하고 백업·atomic replace·readback을 거친다. 배치 실패는 터널 상태를 바꾸지 않는다.
+
 > engram 은 **Windows 로컬 머신 한 대**에서만 돌아간다. 원격 서버에서 쓴다는 건
 > 원격에 engram 을 설치하는 게 아니라, 원격의 에이전트가 **SSH 터널을 통해 로컬 engram 에
 > 붙는다**는 뜻이다. 기억·위키는 언제나 로컬 한 곳에만 있다.
@@ -465,7 +476,7 @@ stdout 이 그대로 세션 컨텍스트에 붙는 동작을 쓴다. **백엔드
 |---|---|
 | 한 번도 `setup-remote.ps1` 을 안 돌린 호스트 | **아무것도 하지 않는다** |
 | 배치 내용이 그대로 | ssh 를 **띄우지 않는다** (지문 비교만) |
-| skill 이나 지시문이 바뀜 | `BatchMode=yes` 로 ssh 1회, 갱신 후 지문 기록 |
+| skill·지시문·policy hook/provider config가 바뀜 | `BatchMode=yes` 로 ssh 1회, 갱신 후 지문 기록 |
 | 갱신 실패 | 경고 로그만. 터널 상태에 영향 없음. 지문을 갱신하지 않아 다음 연결에 재시도 |
 
 기록은 `~/.engram/remote-provisioned.json` — 호스트별 지문·원격 파이썬 경로·원격 OS 다.
@@ -477,20 +488,21 @@ stdout 이 그대로 세션 컨텍스트에 붙는 동작을 쓴다. **백엔드
 
 강제로 다시 밀어넣고 싶으면 `setup-remote.ps1` 을 그냥 다시 돌리면 된다.
 
-### PreToolUse 정책 hook 은 아직 없다
+### PreToolUse 정책 hook
 
-repo-write 정책 안내는 원격에 배치하지 않는다. 분류기
-(`classify_agent_pretool_payload`)가 **서버 파일시스템에서 git worktree root 를 찾는**
-구조라, 원격 경로로는 모든 분류 경로가 `classified: False` 로 떨어진다.
+원격 배치는 Claude Code, Codex, Antigravity에 self-contained `PreToolUse` hook을 설치한다.
+이 hook은 서버의 `classify_agent_pretool_payload`나 경로 매핑을 호출하지 않는다. 원격
+파일시스템에서 대상 파일 또는 `git -C` 대상의 git root와 현재 branch를 직접 확인한다.
+`main`·`master`·`dev`, detached/unresolved 상태의 변경은 거부하고, feature branch와 확실히
+읽기 전용인 명령은 허용한다. 보호 branch의 모르는 shell/wrapper/pipeline/redirection은
+deny-by-default다. Antigravity는 `~/.gemini/config/hooks.json`의 관리형 named entry를 사용한다.
 
-- write 계열 → `_find_git_worktree_root(resolved_path)` 가 빈 값 → `"target path is not inside a git worktree"`
-- bash/powershell → `_extract_git_command_context` 가 `None` → `"out of scope for repo-write enforcement"`
+배치한 hook·provider config는 payload fingerprint에 포함된다. 따라서 이미 등록된 호스트는
+다음 터널 UP 전이 때 변경분만 갱신한다. 새 hook을 읽으려면 원격 CLI/IDE 세션을 새로 시작해야
+한다. 설정 병합 또는 hook 갱신 실패는 경고로 격리되며 TunnelStatus를 바꾸지 않는다.
 
-즉 지금 구조로 원격 hook 을 붙이면 **언제나 "가이드 없음"만 돌려주는 no-op** 이다.
-경로 해석을 먼저 풀어야 한다(원격이 자기 worktree root 를 payload 에 실어 보내거나,
-로컬에 경로 매핑을 두거나). 정책 판정을 원격으로 뺄 때도 새 REST 라우트를 만들면 안 된다 —
-원격 리스너는 MCP 경로 허용 목록으로 뒤집혀 있고(7절), 라우트를 늘리면 도구 계층을
-우회하는 그 구멍이 되살아난다. **MCP 도구로 노출하는 것이 유일한 경로다.**
+원격 hook은 사용자 실수를 빠르게 막는 첫 관문일 뿐이다. 서버 측 branch protection과
+repository policy는 최종 backstop으로 계속 적용된다.
 
 ---
 

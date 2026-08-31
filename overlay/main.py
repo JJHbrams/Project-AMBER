@@ -57,7 +57,8 @@ from core.integrations.engram_bootstrap import (
     sync_claude_pretool_hook,
     sync_codex_pretool_hook,
     sync_copilot_pretool_hook,
-    sync_gemini_pretool_hook,
+    sync_antigravity_mcp_config,
+    sync_antigravity_pretool_hook,
     sync_sessionstart_hook,
 )
 from core.integrations.policy_guidance_state import sync_policy_guidance_disabled_marker
@@ -287,9 +288,9 @@ def _make_tray_icon(app: "OverlayApp"):
                     checked=lambda _: app.get_cli_provider() == "copilot",
                 ),
                 pystray.MenuItem(
-                    "Gemini CLI",
-                    pystray.Menu(lambda: _build_provider_items("gemini", "Gemini CLI")),
-                    checked=lambda _: app.get_cli_provider() == "gemini",
+                    "Antigravity",
+                    pystray.Menu(lambda: _build_provider_items("antigravity", "Antigravity")),
+                    checked=lambda _: app.get_cli_provider() == "antigravity",
                 ),
                 pystray.MenuItem(
                     "Codex CLI",
@@ -369,7 +370,6 @@ class OverlayApp:
             log.warning("[overlay] app icon load failed: %s", e)
         self.root.withdraw()
         self._renderer_inbound: queue.Queue[dict] = queue.Queue()
-        self._replace_startup_geometry_pending = False
 
         self.chat = ChatTerminal(provider=self._cli_provider)
         self.character = CharacterOverlay(
@@ -886,7 +886,7 @@ class OverlayApp:
                 sleep_left -= 0.5
 
     def _start_mcp_http_server(self) -> "subprocess.Popen | None":
-        """Copilot/Gemini CLI를 위한 지속 MCP HTTP(SSE) 서버를 overlay 수명에 맞춰 시작한다."""
+        """CLI용 지속 MCP HTTP(SSE + Streamable HTTP) 서버를 overlay 수명에 맞춰 시작한다."""
         cfg = load_cfg()
         mcp_cfg = cfg.get("mcp") or {}
         port = int(mcp_cfg.get("http_port", MCP_HTTP_PORT))
@@ -978,11 +978,12 @@ class OverlayApp:
             log.exception("[overlay] SessionStart hook 동기화 실패")
         guidance_enabled = is_policy_guidance_enabled()
         for name, result in (
+            ("Antigravity MCP", sync_antigravity_mcp_config()),
             ("policy marker", sync_policy_guidance_disabled_marker(guidance_enabled)),
             ("Claude PreToolUse", sync_claude_pretool_hook(guidance_enabled)),
             ("Codex PreToolUse", sync_codex_pretool_hook(guidance_enabled)),
             ("Copilot PreToolUse", sync_copilot_pretool_hook(guidance_enabled)),
-            ("Gemini BeforeTool", sync_gemini_pretool_hook(guidance_enabled)),
+            ("Antigravity PreToolUse", sync_antigravity_pretool_hook(guidance_enabled)),
         ):
             if not result.get("ok"):
                 log.error("[overlay] %s 동기화 실패: %s", name, result.get("error", "unknown error"))
@@ -1022,6 +1023,7 @@ class OverlayApp:
     def _start_dashboard(self) -> "subprocess.Popen | None":
         """Streamlit dashboard를 시작한다."""
         import subprocess as _sp
+        from core.config.runtime_config import get_db_root_dir
 
         cfg = load_cfg()
         dashboard_cfg = cfg.get("dashboard") if isinstance(cfg, dict) else None
@@ -1051,10 +1053,13 @@ class OverlayApp:
             cwd = str(script.parent.parent)
 
         try:
+            env = os.environ.copy()
+            env["ENGRAM_DB_DIR"] = get_db_root_dir()
             log_path = Path.home() / ".engram" / "dashboard.log"
             log_fh = open(str(log_path), "a", encoding="utf-8")
             proc = _sp.Popen(
                 cmd,
+                env=env,
                 cwd=cwd,
                 stdout=log_fh,
                 stderr=log_fh,
@@ -1349,7 +1354,6 @@ class OverlayApp:
         except Exception:
             log.debug("[overlay-api] bundled renderer restore skipped", exc_info=True)
         finally:
-            self._replace_startup_geometry_pending = False
             # The child may have exited after showing a bubble.  Its geometry
             # must not survive a failed restore attempt as a stale anchor.
             self._observer_rect = None
@@ -1438,11 +1442,19 @@ class OverlayApp:
                         return
                     rect = self.character.get_phys_rect()
                     rect = self.character.apply_external_geometry(
-                        int(payload["screen_x"]), int(payload["screen_y"]), rect[2], rect[3]
+                        int(payload["screen_x"]),
+                        int(payload["screen_y"]),
+                        rect[2],
+                        rect[3],
+                        persist_position=action == "drag_end",
                     )
-                    self._overlay_events.publish(
-                        "overlay.set_position", "idle", {"x": rect[0], "y": rect[1]}
-                    )
+                    # The renderer already moves its own window synchronously.
+                    # Echoing queued drag_move positions makes a fast drag jump
+                    # backwards. Persist and acknowledge only the final point.
+                    if action == "drag_end":
+                        self._overlay_events.publish(
+                            "overlay.set_position", "idle", {"x": rect[0], "y": rect[1]}
+                        )
             elif kind == "overlay.heartbeat":
                 return
         except (KeyError, TypeError, ValueError):

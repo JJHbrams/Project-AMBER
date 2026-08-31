@@ -38,7 +38,7 @@ log = logging.getLogger(__name__)
 _ENV_PATH = Path.home() / ".engram" / ".env"
 _LOG_PATH = Path.home() / ".engram" / "overlay.log"
 ENGRAM_CMD = Path.home() / ".engram" / "engram-copilot.cmd"
-ENGRAM_GEMINI_CMD = Path.home() / ".engram" / "engram-gemini.cmd"
+ENGRAM_ANTIGRAVITY_CMD = Path.home() / ".engram" / "engram-antigravity.cmd"
 ENGRAM_CLAUDE_CMD = Path.home() / ".engram" / "engram-claude.cmd"
 CLAUDE_MCP_CONFIG = Path.home() / ".engram" / "claude-mcp.json"
 DISCORD_SCOPE_PREFIX = get_discord_scope_prefix()
@@ -116,8 +116,8 @@ def _provider_caller_name(provider: str) -> str:
     normalized = normalize_cli_provider(provider)
     if normalized in {"claude-code", "claude-code-ollama"}:
         return "claude-code"
-    if normalized == "gemini":
-        return "gemini-cli"
+    if normalized == "antigravity":
+        return "antigravity"
     if normalized == "ollama":
         return "ollama-cli"
     return "copilot-cli"
@@ -450,13 +450,12 @@ def _build_claude_command(prompt: str, session_name: str, use_resume: bool, cli_
     return _build_exec_command(claude_command, claude_opts)
 
 
-def _build_gemini_command(prompt: str, cli_cfg: dict) -> list[str]:
-    if ENGRAM_GEMINI_CMD.exists():
-        return _build_exec_command(str(ENGRAM_GEMINI_CMD), ["-p", prompt])
+def _build_antigravity_command(prompt: str, cli_cfg: dict) -> list[str]:
+    if ENGRAM_ANTIGRAVITY_CMD.exists():
+        return _build_exec_command(str(ENGRAM_ANTIGRAVITY_CMD), ["-p", prompt])
 
-    gemini_command = str(cli_cfg.get("gemini_command") or "gemini").strip() or "gemini"
-    gemini_opts: list[str] = ["--allowed-mcp-server-names", "engram", "-p", prompt]
-    return _build_exec_command(gemini_command, gemini_opts)
+    command = str(cli_cfg.get("antigravity_command") or "agy").strip() or "agy"
+    return _build_exec_command(command, ["-p", prompt])
 
 
 def _build_ollama_command(prompt: str, cli_cfg: dict) -> list[str]:
@@ -484,8 +483,8 @@ def _build_provider_command(
         if configured_model and not _looks_like_claude_model(configured_model):
             return _build_ollama_command(prompt, cli_cfg=cli_cfg), False
         return _build_claude_command(prompt, session_name, use_resume=use_resume, cli_cfg=cli_cfg), use_resume
-    if normalized == "gemini":
-        return _build_gemini_command(prompt, cli_cfg=cli_cfg), False
+    if normalized == "antigravity":
+        return _build_antigravity_command(prompt, cli_cfg=cli_cfg), False
     if normalized == "ollama":
         return _build_ollama_command(prompt, cli_cfg=cli_cfg), False
     return _build_copilot_command(prompt, session_name, use_resume=use_resume), use_resume
@@ -946,7 +945,7 @@ class EngramDiscordBot:
     def _clear_provider_ready_for_session(self, session_id: int | None) -> None:
         if session_id is None:
             return
-        for provider in ("copilot", "claude-code", "claude-code-ollama", "gemini", "ollama"):
+        for provider in ("copilot", "claude-code", "claude-code-ollama", "antigravity", "ollama"):
             self._provider_ready_session_keys.discard(self._provider_session_key(provider, int(session_id)))
 
     def build_cli_session_name(self, provider: str, channel_id: str, session_id: int) -> str:

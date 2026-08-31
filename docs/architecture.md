@@ -308,7 +308,7 @@ overlay.exe 시작
 ## MCP 서버 수명 모델
 
 `mcp_server.py`는 overlay.exe가 시작할 때 **지속 subprocess**로 시작되며,
-overlay 종료 시 함께 종료됩니다. 모든 MCP 클라이언트(Copilot/Gemini/Claude Code/Goose/VS Code)는
+overlay 종료 시 함께 종료됩니다. 모든 MCP 클라이언트(Copilot/Antigravity/Claude Code/Goose/VS Code)는
 SSE 트랜스포트로 동일 인스턴스에 연결합니다.
 
 ### 전체 런타임 흐름
@@ -325,9 +325,9 @@ overlay.exe (항상 실행)
   │     └── KG 파일 워처 데몬
   └── 캐릭터 클릭 → wt 창 열기 (ENGRAM_SCOPE_KEY=overlay 주입)
 
-MCP 클라이언트들 (모두 SSE http://127.0.0.1:17385/sse):
+MCP 클라이언트들 (Antigravity는 Streamable HTTP `/mcp`, 나머지는 SSE `/sse`):
   ├── Copilot CLI  → ~/.copilot/mcp-config.json  { type: sse }
-  ├── Gemini CLI   → gemini mcp list              { type: sse }
+  ├── Antigravity  → ~/.gemini/config/mcp_config.json { disabled: false, serverUrl: .../mcp }
   ├── Claude Code  → ~/.claude.json               { type: sse }
   ├── Goose        → ~/.config/goose/config.yaml  { type: sse }
   ├── VS Code ws   → .vscode/mcp.json             { type: sse }
@@ -373,9 +373,9 @@ overlay.exe (항상 실행)
   │     └── KG 파일 워처 데몬
   └── 캐릭터 클릭 → wt 창 열기 (ENGRAM_SCOPE_KEY=overlay 주입)
 
-MCP 클라이언트들 (모두 SSE http://127.0.0.1:17385/sse):
+MCP 클라이언트들 (Antigravity는 Streamable HTTP `/mcp`, 나머지는 SSE `/sse`):
   ├── Copilot CLI  → ~/.copilot/mcp-config.json  { type: sse }
-  ├── Gemini CLI   → gemini mcp list              { type: sse }
+  ├── Antigravity  → ~/.gemini/config/mcp_config.json { disabled: false, serverUrl: .../mcp }
   ├── Claude Code  → ~/.claude.json               { type: sse }
   ├── Goose        → ~/.config/goose/config.yaml  { type: sse }
   ├── VS Code ws   → .vscode/mcp.json             { type: sse }

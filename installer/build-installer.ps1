@@ -142,7 +142,7 @@ if ($version -notmatch '^\d+\.\d+\.\d+\.\d+$') {
     Write-Err "Frozen build version is not Major.Minor.Patch.Build: $version"
 }
 $outputSuffix = if ($Release) { "" } else { "-dev" }
-$OutputPath = Join-Path $Root "EngramOverlay_${version}${outputSuffix}_x64-setup.exe"
+$OutputPath = Join-Path $Root "AMBER_${version}${outputSuffix}_x64-setup.exe"
 $BuildProfile = if ($Release) { "release-lzma2-solid" } else { "development-zip" }
 $CachePath = Join-Path $Root "build\installer-cache\EngramOverlay_${version}_${BuildProfile}.json"
 $installerCacheHit = Test-EngramInstallerCache $Root $DistDir $BuildProfile $OutputPath $CachePath

@@ -38,6 +38,25 @@ class ClaudeRootLauncherTests(unittest.TestCase):
     def _connection(self):
         return self.raw_connection(self.root)
 
+    def test_attach_parent_console_only_when_not_already_attached(self):
+        kernel32 = MagicMock()
+        kernel32.GetConsoleCP.return_value = 0
+        with patch.object(claude_root_launcher.os, "name", "nt"), patch.object(
+            claude_root_launcher.ctypes, "windll", MagicMock(kernel32=kernel32), create=True
+        ):
+            claude_root_launcher._attach_parent_console()
+
+        kernel32.AttachConsole.assert_called_once_with(0xFFFFFFFF)
+
+        kernel32.reset_mock()
+        kernel32.GetConsoleCP.return_value = 65001
+        with patch.object(claude_root_launcher.os, "name", "nt"), patch.object(
+            claude_root_launcher.ctypes, "windll", MagicMock(kernel32=kernel32), create=True
+        ):
+            claude_root_launcher._attach_parent_console()
+
+        kernel32.AttachConsole.assert_not_called()
+
     def test_rewrites_actual_prompt_and_closes_only_exact_bound_session(self):
         child = MagicMock(pid=919)
         child.wait.return_value = 0
@@ -102,6 +121,15 @@ class ClaudeRootLauncherTests(unittest.TestCase):
         self.assertIn("ENGRAM_ROOT_LAUNCHER=$ProjectRoot\\dist\\engram-overlay\\engram-overlay.exe", claude)
         self.assertIn("--role claude-root-launcher claude", claude)
         self.assertIn("frozen launcher missing", claude)
+
+    def test_main_attaches_to_invoking_terminal_before_launch(self):
+        with patch.object(claude_root_launcher, "_attach_parent_console") as attach, patch.object(
+            claude_root_launcher, "launch_root_claude", return_value=0
+        ) as launch:
+            self.assertEqual(claude_root_launcher.main(["claude"]), 0)
+
+        attach.assert_called_once_with()
+        launch.assert_called_once()
 
     def test_overlay_never_starts_global_claude_process_scanner(self):
         source = (ROOT / "overlay" / "main.py").read_text(encoding="utf-8")

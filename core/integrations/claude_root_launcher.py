@@ -18,6 +18,17 @@ from typing import Sequence
 from core.storage.db import get_connection
 
 
+def _attach_parent_console() -> None:
+    """Attach the windowed frozen launcher to its invoking terminal on Windows."""
+    if os.name != "nt":
+        return
+    kernel32 = ctypes.windll.kernel32
+    if kernel32.GetConsoleCP():
+        return
+    attach_parent_process = ctypes.c_uint32(-1).value
+    kernel32.AttachConsole(attach_parent_process)
+
+
 def _process_creation_identity(pid: int) -> str:
     if os.name != "nt":
         return f"pid:{pid}:started:{time.time_ns()}"
@@ -170,6 +181,7 @@ def launch_root_claude(argv: Sequence[str], *, cwd: str, bootstrap: str) -> int:
 def main(argv: Sequence[str]) -> int:
     if not argv:
         return 2
+    _attach_parent_console()
     cwd = os.getcwd()
     bootstrap = os.environ.get("ENGRAM_BOOTSTRAP", "")
     return launch_root_claude(argv, cwd=cwd, bootstrap=bootstrap)

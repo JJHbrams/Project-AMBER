@@ -18,9 +18,9 @@ PowerShell(`scripts/setup-remote.ps1`) 은 바이트를 옮기는 역할만 한�
   stdout 이 그대로 세션 컨텍스트에 붙는 동작을 쓴다. 백엔드 호출이 없으므로
   원격에 런타임 의존성이 생기지 않는다(sh 만 있으면 된다).
 
-PreToolUse 정책 hook 은 여기서 다루지 않는다. 분류기가 서버 파일시스템에서
-git worktree root 를 찾는 구조라(``classify_agent_pretool_payload``) 원격 경로로는
-언제나 ``classified: False`` 로 떨어진다. 경로 해석 문제를 먼저 풀어야 한다.
+PreToolUse 정책 hook은 원격에도 배치한다. 다만 서버의
+``classify_agent_pretool_payload``를 호출하지 않는다. 렌더된 표준 라이브러리 hook이
+원격 파일시스템에서 git root와 현재 branch를 직접 판별한다.
 """
 from __future__ import annotations
 
@@ -38,6 +38,7 @@ from core.integrations.engram_bootstrap import (
     build_bootstrap_directive,
     render_session_start_powershell_script,
 )
+from core.integrations.remote_agent_policy import policy_payload
 
 # MCP 도구만 사용하는 skill — 원격에서 그대로 동작한다.
 #
@@ -159,6 +160,9 @@ def build_remote_payload(
             remote_os=remote_os, caller=caller, scope_key=scope_key
         ),
         "skills": collect_remote_skills(repo_root),
+        # Remote policy is self-contained: it resolves the remote git root and
+        # never calls the local/server classifier with unusable remote paths.
+        "policy_hooks": policy_payload(remote_os),
     }
 
 
@@ -418,6 +422,72 @@ registered = sum(
     if isinstance(h, dict) and marker in str(h.get("command", ""))
 )
 results.append("SETTINGS=%s registered=%d" % (settings_path, registered))
+
+# 4) Remote-local PreToolUse policy hooks.  These scripts deliberately make
+# their git decision on this machine; do not route them through Engram's local
+# classifier.  Each independently-owned user config is backup-first, marker
+# deduped, atomically replaced, and read back before success is reported.
+def atomic_json(path, value):
+    tmp = path.with_name(path.name + ".engram-tmp")
+    tmp.write_text(json.dumps(value, indent=2, ensure_ascii=False) + "\n", encoding="utf-8", newline="\n")
+    os.replace(str(tmp), str(path))
+    back = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(back, dict): raise ValueError("readback is not object")
+    return back
+def load_backup(path):
+    if path.exists():
+        backup=path.with_name(path.name + ".engram-bak")
+        if not backup.exists():
+            try: backup.write_bytes(path.read_bytes())
+            except Exception as exc: raise RuntimeError("BACKUP=FAIL %s" % exc)
+        try: value=json.loads(path.read_text(encoding="utf-8"))
+        except Exception: raise RuntimeError("SETTINGS=PARSE_FAIL")
+        if not isinstance(value, dict): raise RuntimeError("SETTINGS=NOT_OBJECT")
+        return value
+    return {}
+def managed_command(spec): return spec["command"]
+def merge_pretool(path, provider, spec):
+    value=load_backup(path)
+    hooks=value.get("hooks")
+    if not isinstance(hooks, dict): hooks={}
+    entries=hooks.get("PreToolUse")
+    if not isinstance(entries, list): entries=[]
+    kept=[]
+    for entry in entries:
+        if not isinstance(entry, dict): kept.append(entry); continue
+        inner=entry.get("hooks")
+        if not isinstance(inner, list): kept.append(entry); continue
+        clean=[h for h in inner if not (isinstance(h, dict) and spec["marker"] in str(h.get("command", "")))]
+        if clean:
+            copy=dict(entry); copy["hooks"]=clean; kept.append(copy)
+    kept.append({"matcher":"*", "hooks":[{"type":"command","command":managed_command(spec),"timeout":15}]})
+    hooks["PreToolUse"]=kept; value["hooks"]=hooks
+    path.parent.mkdir(parents=True, exist_ok=True); atomic_json(path, value)
+def merge_antigravity(path, spec):
+    value=load_backup(path)
+    value.pop(spec["marker"], None)
+    value[spec["marker"]]={"PreToolUse":[{"matcher":"run_command|write_to_file|replace_file_content|multi_replace_file_content","hooks":[{"type":"command","command":managed_command(spec),"timeout":15}]}]}
+    path.parent.mkdir(parents=True, exist_ok=True); atomic_json(path, value)
+for provider, spec in sorted((payload.get("policy_hooks") or {}).items()):
+    hook=home / spec["relpath"]
+    hook.parent.mkdir(parents=True, exist_ok=True)
+    temp=hook.with_name(hook.name + ".engram-tmp")
+    temp.write_text(spec["body"], encoding="utf-8", newline="\n"); os.replace(str(temp), str(hook))
+    # The enrolled interpreter can be /opt/conda/bin/python and Windows often
+    # has no PATH python.  Persist exactly the interpreter and absolute script
+    # selected on the remote host, never a relative .engram command.
+    spec=dict(spec)
+    spec["command"]='"%s" "%s" --provider %s' % (sys.executable, hook, provider)
+    try: hook.chmod(0o700)
+    except Exception: pass
+    try:
+        if provider == "claude-code": merge_pretool(home / ".claude" / "settings.json", provider, spec)
+        elif provider == "codex": merge_pretool(home / ".codex" / "hooks.json", provider, spec)
+        elif provider == "antigravity": merge_antigravity(home / ".gemini" / "config" / "hooks.json", spec)
+        else: raise RuntimeError("unknown policy provider")
+    except Exception as exc:
+        print("POLICY=%s FAIL %s" % (provider, exc)); raise SystemExit(1)
+    results.append("POLICY=%s" % provider)
 print("\n".join(results))
 print("PROVISIONED")
 '''

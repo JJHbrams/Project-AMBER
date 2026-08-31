@@ -210,6 +210,57 @@ class OverlayEventApiTests(unittest.TestCase):
         update_state.assert_not_called()
         self.assertEqual(saved, {})
 
+    def test_external_drag_move_updates_anchor_without_writing_state(self):
+        overlay = object.__new__(CharacterOverlay)
+        overlay._external_rect = (10, 20, 30, 40)
+        with (
+            patch("overlay.character.clamp_overlay_position", side_effect=lambda x, y, width, height: (x, y)),
+            patch("overlay.character.update_overlay_state") as update_state,
+        ):
+            self.assertEqual(
+                overlay.apply_external_geometry(100, 200, 300, 400, persist_position=False),
+                (100, 200, 300, 400),
+            )
+        update_state.assert_not_called()
+
+    def test_replace_drag_move_updates_rect_without_persisting_or_acknowledging(self):
+        app = object.__new__(OverlayApp)
+        app._overlay_events = Mock(mode="replace")
+        app.character = Mock()
+        app.character.get_phys_rect.return_value = (10, 20, 70, 80)
+        app.character.apply_external_geometry.return_value = (50, 60, 70, 80)
+
+        app._handle_external_renderer_message({
+            "schema_version": 1,
+            "type": "pointer.action",
+            "payload": {"action": "drag_move", "screen_x": 50, "screen_y": 60},
+        })
+
+        app.character.apply_external_geometry.assert_called_once_with(
+            50, 60, 70, 80, persist_position=False
+        )
+        app._overlay_events.publish.assert_not_called()
+
+    def test_replace_drag_end_persists_and_acknowledges_final_position(self):
+        app = object.__new__(OverlayApp)
+        app._overlay_events = Mock(mode="replace")
+        app.character = Mock()
+        app.character.get_phys_rect.return_value = (10, 20, 70, 80)
+        app.character.apply_external_geometry.return_value = (50, 60, 70, 80)
+
+        app._handle_external_renderer_message({
+            "schema_version": 1,
+            "type": "pointer.action",
+            "payload": {"action": "drag_end", "screen_x": 50, "screen_y": 60},
+        })
+
+        app.character.apply_external_geometry.assert_called_once_with(
+            50, 60, 70, 80, persist_position=True
+        )
+        app._overlay_events.publish.assert_called_once_with(
+            "overlay.set_position", "idle", {"x": 50, "y": 60}
+        )
+
     def test_observer_geometry_is_transient_and_click_selects_shared_anchor(self):
         app = object.__new__(OverlayApp)
         app._overlay_events = Mock(mode="observer")

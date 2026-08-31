@@ -93,10 +93,11 @@ _USER_CONFIG_PATH = Path.home() / ".engram" / "overlay.user.yaml"
 _STATE_PATH = Path.home() / ".engram" / "overlay.state.yaml"
 _STATE_LOCK = threading.RLock()
 _ENGRAM_USER_CONFIG_PATH = Path.home() / ".engram" / "user.config.yaml"
-_SUPPORTED_CLI_PROVIDERS = {"copilot", "gemini", "codex", "claude-code", "claude-code-ollama", "ollama"}
+_SUPPORTED_CLI_PROVIDERS = {"copilot", "antigravity", "codex", "claude-code", "claude-code-ollama", "ollama"}
 _SUPPORTED_CHAT_MODES = {"tui", "bubble"}
 _SUPPORTED_PERMISSION_LEVELS = {"auto", "confirm_risky", "confirm_always"}
 _CLI_PROVIDER_ALIASES = {
+    "gemini": "antigravity",  # persisted pre-migration value
     "claude": "claude-code",
     "claude_code": "claude-code",
     "claudecode": "claude-code",
@@ -170,9 +171,9 @@ _USER_TEMPLATE = """\
 #   height_ratio: 0.60
 
 # cli:
-#   provider: "copilot"   # copilot | gemini | codex | claude-code | claude-code-ollama | ollama
-#   # gemini/codex/claude-code는 ~/.engram 전용 shim을 우선 사용
-#   gemini_command: "gemini"
+#   provider: "copilot"   # copilot | antigravity | codex | claude-code | claude-code-ollama | ollama
+#   # antigravity/codex/claude-code는 ~/.engram 전용 shim을 우선 사용
+#   antigravity_command: "agy"
 #   codex_command: "codex"
 #   # claude-code-ollama: 선택된 ollama_model을 Claude Code 백엔드 모델로 사용
 #   # claude-code + ollama_model: claude --model <ollama_model>
@@ -194,7 +195,7 @@ _USER_TEMPLATE = """\
 #   channel_ids: []
 #   allowed_user_ids: []
 #   channel_cli_overrides:
-#     "123456789012345678": "gemini"
+#     "123456789012345678": "antigravity"
 #   guild_cli_overrides:
 #     "987654321098765432": "ollama"
 #   # scope_key 우선순위:
@@ -316,6 +317,10 @@ def _set_user_cli_value(key: str, value: str) -> None:
         cli_cfg[key] = value
     else:
         cli_cfg.pop(key, None)
+    # The old executable is not compatible, but its selected model is.  Once
+    # the user saves an Antigravity model, retire only that legacy model key.
+    if key == "antigravity_model":
+        cli_cfg.pop("gemini_model", None)
 
     if cli_cfg:
         user["cli"] = cli_cfg
@@ -392,16 +397,26 @@ def set_ollama_model(model: str, sync_user: bool = False) -> str:
 def get_cli_model(provider: str, cfg: dict | None = None) -> str:
     if cfg is None: cfg = load_cfg()
     cli = cfg.get("cli", {}) if isinstance(cfg, dict) else {}
-    keys = {"copilot": "copilot_model", "gemini": "gemini_model", "codex": "codex_model", "claude-code": "claude_model", "claude-code-ollama": "ollama_model", "ollama": "ollama_model"}
-    return str(cli.get(keys.get(normalize_cli_provider(provider), "")) or "").strip() if isinstance(cli, dict) else ""
+    keys = {"copilot": "copilot_model", "antigravity": "antigravity_model", "codex": "codex_model", "claude-code": "claude_model", "claude-code-ollama": "ollama_model", "ollama": "ollama_model"}
+    if not isinstance(cli, dict):
+        return ""
+    normalized = normalize_cli_provider(provider)
+    value = cli.get(keys.get(normalized, ""))
+    if normalized == "antigravity" and not value:
+        value = cli.get("gemini_model")
+    return str(value or "").strip()
 
 
 def set_cli_model(provider: str, model: str, sync_user: bool = False) -> str:
     provider, model = normalize_cli_provider(provider), str(model or "").strip()
-    keys = {"copilot": "copilot_model", "gemini": "gemini_model", "codex": "codex_model", "claude-code": "claude_model", "claude-code-ollama": "ollama_model", "ollama": "ollama_model"}
+    keys = {"copilot": "copilot_model", "antigravity": "antigravity_model", "codex": "codex_model", "claude-code": "claude_model", "claude-code-ollama": "ollama_model", "ollama": "ollama_model"}
     key = keys[provider]
     def update(state: dict) -> None:
-        cli = state.get("cli") if isinstance(state.get("cli"), dict) else {}; cli[key] = model; state["cli"] = cli
+        cli = state.get("cli") if isinstance(state.get("cli"), dict) else {}
+        cli[key] = model
+        if provider == "antigravity":
+            cli.pop("gemini_model", None)
+        state["cli"] = cli
     update_overlay_state(update)
     if sync_user: _set_user_cli_value(key, model)
     return model

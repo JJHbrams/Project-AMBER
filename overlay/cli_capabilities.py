@@ -4,13 +4,13 @@ import json
 from pathlib import Path
 
 _COPILOT_MODELS = ["auto", "claude-sonnet-4.6", "gpt-5.4", "claude-haiku-4.5", "gpt-5.3-codex", "gemini-3.1-pro-preview", "gemini-3.5-flash", "gemini-3.6-flash", "mai-code-1-flash"]
-_GEMINI_MODELS = ["auto", "pro", "flash", "flash-lite"]
+_ANTIGRAVITY_MODELS = ["auto", "pro", "flash", "flash-lite"]
 _CLAUDE_MODELS = ["default", "best", "sonnet", "opus", "haiku", "opusplan", "sonnet[1m]", "opus[1m]"]
 _COPILOT_EFFORTS = ["none", "minimal", "low", "medium", "high", "xhigh", "max"]
 _CLAUDE_EFFORTS = ["low", "medium", "high", "xhigh", "max"]
 
 def model_key(provider: str) -> str | None:
-    return {"copilot":"copilot_model", "gemini":"gemini_model", "codex":"codex_model", "claude-code":"claude_model", "claude-code-ollama":"ollama_model", "ollama":"ollama_model"}.get(provider)
+    return {"copilot":"copilot_model", "antigravity":"antigravity_model", "codex":"codex_model", "claude-code":"claude_model", "claude-code-ollama":"ollama_model", "ollama":"ollama_model"}.get(provider)
 def effort_key(provider: str) -> str | None:
     return {"copilot":"copilot_effort", "codex":"codex_reasoning_effort", "claude-code":"claude_effort", "claude-code-ollama":"claude_effort"}.get(provider)
 def _display(values: list[str], current: object) -> list[str]:
@@ -30,7 +30,7 @@ def codex_catalog(cache_path: Path | None = None) -> dict[str, list[str]]:
     return result
 def supported_models(provider: str, ollama_models: list[str] | None = None) -> list[str]:
     if provider == "copilot": return list(_COPILOT_MODELS)
-    if provider == "gemini": return list(_GEMINI_MODELS)
+    if provider == "antigravity": return list(_ANTIGRAVITY_MODELS)
     if provider == "codex": return list(codex_catalog())
     if provider == "claude-code": return list(_CLAUDE_MODELS)
     if provider in {"ollama", "claude-code-ollama"}: return list(ollama_models or [])

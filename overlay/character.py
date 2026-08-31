@@ -947,20 +947,29 @@ class CharacterOverlay:
         self.root.attributes("-topmost", True)
 
     def apply_external_geometry(
-        self, x: int, y: int, width: int, height: int, *, preserve_position: bool = False
+        self,
+        x: int,
+        y: int,
+        width: int,
+        height: int,
+        *,
+        preserve_position: bool = False,
+        persist_position: bool = True,
     ) -> tuple[int, int, int, int]:
         """Sync replacement geometry while keeping persisted startup x/y authoritative.
 
         The renderer's very first geometry is its own window bootstrap, not a
-        user move.  In that one case Engram adopts its dimensions but retains
-        the bundled/persisted position and does not rewrite overlay.state.yaml.
+        user move. In that one case Engram adopts its dimensions but retains
+        the bundled/persisted position. During drag_move, persist_position is
+        false so only the in-memory anchor changes; drag_end writes the final
+        position once.
         """
         width, height = max(1, int(width)), max(1, int(height))
         if preserve_position and self._external_rect is not None:
             x, y = self._external_rect[:2]
         x, y = clamp_overlay_position(int(x), int(y), width, height)
         self._external_rect = (x, y, width, height)
-        if preserve_position:
+        if preserve_position or not persist_position:
             return self._external_rect
         work = bubble_geometry.get_monitor_work_rect(x + width // 2, y + height // 2)
 
@@ -1056,9 +1065,9 @@ class CharacterOverlay:
         self._provider_var.set(current_provider)
         from overlay.cli_capabilities import models as provider_models
         cfg_cli = (load_cfg().get("cli") or {})
-        for provider, label in (("copilot", "Copilot CLI"), ("gemini", "Gemini CLI"), ("codex", "Codex CLI")):
+        for provider, label in (("copilot", "Copilot CLI"), ("antigravity", "Antigravity"), ("codex", "Codex CLI")):
             submenu = tk.Menu(self._provider_menu, tearoff=0)
-            selected = str(cfg_cli.get({"copilot":"copilot_model", "gemini":"gemini_model", "codex":"codex_model"}[provider]) or "")
+            selected = str(cfg_cli.get({"copilot":"copilot_model", "antigravity":"antigravity_model", "codex":"codex_model"}[provider]) or "")
             choices = provider_models(provider, cfg_cli, models)
             if choices:
                 var = tk.StringVar(value=selected if current_provider == provider else "")

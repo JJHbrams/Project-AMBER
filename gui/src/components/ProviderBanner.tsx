@@ -64,7 +64,7 @@ function RightPanel({
       ? `${configuredModel} (session configured)`
       : "N/A";
 
-  const authText = provider.id === "gemini" ? valueOrNA(runtimeInfo?.auth) : "N/A";
+  const authText = provider.id === "antigravity" ? valueOrNA(runtimeInfo?.auth) : "N/A";
 
   const planText = provider.id === "ollama" || provider.id === "claude-code-ollama"
     ? "Local"
@@ -201,7 +201,7 @@ export function ProviderBanner({ provider, sessions = [], runtimeInfo, configure
           icon={CLAUDE_OLLAMA_ART}
         />
       );
-    case "gemini":
+    case "antigravity":
       return (
         <ProviderShell
           p={provider}

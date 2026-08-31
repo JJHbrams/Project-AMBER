@@ -51,7 +51,7 @@ from core.tutorial import complete_tutorial_step, has_user_persona_override, res
 
 _PROVIDER_OPTIONS = [
     "copilot",
-    "gemini",
+    "antigravity",
     "codex",
     "claude-code",
     "claude-code(ollama)",
@@ -59,7 +59,7 @@ _PROVIDER_OPTIONS = [
 ]
 _PROVIDER_DISPLAY_TO_VALUE = {
     "copilot": "copilot",
-    "gemini": "gemini",
+    "antigravity": "antigravity",
     "codex": "codex",
     "claude-code": "claude-code",
     "claude-code(ollama)": "claude-code-ollama",
@@ -67,7 +67,7 @@ _PROVIDER_DISPLAY_TO_VALUE = {
 }
 _PROVIDER_VALUE_TO_DISPLAY = {
     "copilot": "copilot",
-    "gemini": "gemini",
+    "antigravity": "antigravity",
     "codex": "codex",
     "claude-code": "claude-code",
     "claude-code-ollama": "claude-code(ollama)",
@@ -162,7 +162,8 @@ _PERSONA_DEFAULTS = {
 _STARTUP_DIR = (
     Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming")) / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup"
 )
-_STARTUP_LINK = _STARTUP_DIR / "engram-overlay.lnk"
+_STARTUP_LINK = _STARTUP_DIR / "AMBER (ENGRAM).lnk"
+_LEGACY_STARTUP_LINK = _STARTUP_DIR / "engram-overlay.lnk"
 _OVERLAY_CMD = Path.home() / ".engram" / "engram-overlay.cmd"
 _OVERLAY_EXE: Path | None = None  # resolved lazily
 
@@ -181,7 +182,7 @@ def _resolve_overlay_target() -> Path | None:
 
 
 def _is_autostart_enabled() -> bool:
-    return _STARTUP_LINK.exists()
+    return _STARTUP_LINK.exists() or _LEGACY_STARTUP_LINK.exists()
 
 
 def _set_autostart(enabled: bool) -> None:
@@ -189,29 +190,40 @@ def _set_autostart(enabled: bool) -> None:
         # 설치 직후에는 installer가 이미 유효한 바로가기를 만든다. 설정을 저장할
         # 때마다 이를 재생성하면 PATH용 .cmd가 없는 배포 형태에서 불필요하게 실패한다.
         if _STARTUP_LINK.exists():
+            try:
+                _LEGACY_STARTUP_LINK.unlink()
+            except FileNotFoundError:
+                pass
             return
         target = _resolve_overlay_target()
         if target is None:
-            raise RuntimeError("자동 시작에 사용할 Engram Overlay 실행 파일을 찾을 수 없습니다.")
+            raise RuntimeError("자동 시작에 사용할 AMBER (ENGRAM) 실행 파일을 찾을 수 없습니다.")
         _STARTUP_DIR.mkdir(parents=True, exist_ok=True)
         ps = (
             f"$s = New-Object -ComObject WScript.Shell; "
             f"$sc = $s.CreateShortcut('{ _STARTUP_LINK }'); "
             f"$sc.TargetPath = '{ target }'; "
             f"$sc.WorkingDirectory = '{ target.parent }'; "
-            f"$sc.Description = 'Engram Overlay \u2014 Auto Start'; "
+            f"$sc.Description = 'AMBER (ENGRAM) \u2014 Auto Start'; "
             f"$sc.Save()"
         )
-        subprocess.run(
+        completed = subprocess.run(
             ["powershell", "-NoProfile", "-WindowStyle", "Hidden", "-Command", ps],
             capture_output=True,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
-    else:
+        if completed.returncode != 0 or not _STARTUP_LINK.exists():
+            raise RuntimeError("AMBER (ENGRAM) 자동 시작 바로가기를 만들지 못했습니다.")
         try:
-            _STARTUP_LINK.unlink()
+            _LEGACY_STARTUP_LINK.unlink()
         except FileNotFoundError:
             pass
+    else:
+        for link in (_STARTUP_LINK, _LEGACY_STARTUP_LINK):
+            try:
+                link.unlink()
+            except FileNotFoundError:
+                pass
 
 
 _PERSONA_USER_TEMPLATE = """# engram persona 사용자 오버라이드
@@ -1012,10 +1024,10 @@ class _SettingsWindow:
         self._ollama_url_var = tk.StringVar()
         ttk.Entry(f, textvariable=self._ollama_url_var, width=22).grid(row=3, column=1, sticky="ew", **PAD)
 
-        # Gemini 명령어
-        ttk.Label(f, text="Gemini 명령어:").grid(row=4, column=0, sticky="w", **PAD)
-        self._gemini_cmd_var = tk.StringVar()
-        ttk.Entry(f, textvariable=self._gemini_cmd_var, width=22).grid(row=4, column=1, sticky="ew", **PAD)
+        # Antigravity 명령어
+        ttk.Label(f, text="Antigravity 명령어:").grid(row=4, column=0, sticky="w", **PAD)
+        self._antigravity_cmd_var = tk.StringVar()
+        ttk.Entry(f, textvariable=self._antigravity_cmd_var, width=22).grid(row=4, column=1, sticky="ew", **PAD)
 
         ttk.Label(f, text="공급자 모델:").grid(row=5, column=0, sticky="w", **PAD)
         self._provider_model_var = tk.StringVar()
@@ -2059,8 +2071,8 @@ class _SettingsWindow:
         ollama_url = _nested_get(cfg, ["cli", "ollama_base_url"], "http://localhost:11434")
         self._ollama_url_var.set(str(ollama_url or ""))
 
-        gemini_cmd = _nested_get(cfg, ["cli", "gemini_command"], "gemini")
-        self._gemini_cmd_var.set(str(gemini_cmd or "gemini"))
+        antigravity_cmd = _nested_get(cfg, ["cli", "antigravity_command"], "agy")
+        self._antigravity_cmd_var.set(str(antigravity_cmd or "agy"))
         self._update_provider_capability_controls()
 
         # 터미널 탭
@@ -2740,9 +2752,9 @@ class _SettingsWindow:
         if ollama_url and ollama_url != default_url:
             _nested_set(user, ["cli", "ollama_base_url"], ollama_url)
 
-        gemini_cmd = self._gemini_cmd_var.get().strip()
-        if gemini_cmd and gemini_cmd != "gemini":
-            _nested_set(user, ["cli", "gemini_command"], gemini_cmd)
+        antigravity_cmd = self._antigravity_cmd_var.get().strip()
+        if antigravity_cmd and antigravity_cmd != "agy":
+            _nested_set(user, ["cli", "antigravity_command"], antigravity_cmd)
 
         # ── 터미널 탭 ──
         font_size = int(self._font_size_var.get())
@@ -2860,18 +2872,20 @@ class _SettingsWindow:
             sync_claude_pretool_hook,
             sync_codex_pretool_hook,
             sync_copilot_pretool_hook,
-            sync_gemini_pretool_hook,
+            sync_antigravity_mcp_config,
+            sync_antigravity_pretool_hook,
             sync_sessionstart_hook,
         )
         from core.integrations.policy_guidance_state import sync_policy_guidance_disabled_marker
 
         sync_results = {
+            "Antigravity MCP": sync_antigravity_mcp_config(),
             "상태 marker": sync_policy_guidance_disabled_marker(policy_guidance),
             "SessionStart": sync_sessionstart_hook(auto_inject),
             "Claude": sync_claude_pretool_hook(policy_guidance),
             "Codex": sync_codex_pretool_hook(policy_guidance),
             "Copilot": sync_copilot_pretool_hook(policy_guidance),
-            "Gemini": sync_gemini_pretool_hook(policy_guidance),
+            "Antigravity": sync_antigravity_pretool_hook(policy_guidance),
         }
         self._policy_sync_warnings = [
             f"{name}: {result.get('error') or '적용 실패'}"
@@ -2889,7 +2903,7 @@ class _SettingsWindow:
             )
             behavior = "Agent 위반 차단 · 사람 경고" if policy_level == "enforce_agents" else "모두 경고만"
             self._policy_status_var.set(
-                f"{behavior} · Claude·Copilot·Gemini 적용됨 · Codex 설정됨 — {codex_note}"
+                f"{behavior} · Claude·Copilot·Antigravity 적용됨 · Codex 설정됨 — {codex_note}"
             )
         else:
             self._policy_status_var.set("정책 가이드 OFF · Git advisor backend 실행 안 함")

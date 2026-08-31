@@ -5,7 +5,7 @@ import json
 import pandas as pd
 import streamlit as st
 
-from core.dashboard.data_access import get_db, query
+from core.dashboard.data_access import get_db, get_db_path, query
 
 
 def render_identity() -> None:
@@ -137,20 +137,21 @@ def render_identity() -> None:
         if not tables:
             st.warning("테이블 없음")
         else:
+            db = get_db(str(get_db_path()))
             for tname in tables:
-                cols_info = get_db().execute(f"PRAGMA table_info({tname})").fetchall()
-                row_count = get_db().execute(f"SELECT COUNT(*) FROM {tname}").fetchone()[0]
+                cols_info = db.execute(f"PRAGMA table_info({tname})").fetchall()
+                row_count = db.execute(f"SELECT COUNT(*) FROM {tname}").fetchone()[0]
                 with st.expander(f"**{tname}**  ({row_count:,} rows)"):
                     col_df = pd.DataFrame(
                         [{"#": c[0], "name": c[1], "type": c[2], "notnull": bool(c[3]), "default": c[4], "pk": bool(c[5])} for c in cols_info]
                     )
                     st.dataframe(col_df, use_container_width=True, hide_index=True)
 
-                    fks = get_db().execute(f"PRAGMA foreign_key_list({tname})").fetchall()
+                    fks = db.execute(f"PRAGMA foreign_key_list({tname})").fetchall()
                     if fks:
                         st.caption("Foreign keys: " + ", ".join(f"`{fk[3]}` → `{fk[2]}.{fk[4]}`" for fk in fks))
 
-                    idxs = get_db().execute(f"PRAGMA index_list({tname})").fetchall()
+                    idxs = db.execute(f"PRAGMA index_list({tname})").fetchall()
                     if idxs:
                         st.caption("Indexes: " + ", ".join(f"`{idx[1]}`" for idx in idxs))
 

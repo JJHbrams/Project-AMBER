@@ -51,11 +51,11 @@ function extractRuntimePatch(providerId: string, text: string): { patch: Partial
       patch.version = v;
       pushFact(`Claude Code v${v}`);
     }
-  } else if (providerId === "gemini") {
-    const v = capture(/Gemini CLI v([0-9.]+)/i);
+  } else if (providerId === "antigravity") {
+    const v = capture(/(?:Antigravity|agy) v?([0-9.]+)/i);
     if (v) {
       patch.version = v;
-      pushFact(`Gemini CLI v${v}`);
+      pushFact(`Antigravity v${v}`);
     }
   } else if (providerId === "ollama") {
     const v = capture(/ollama version(?: is|:)?\s*([^\s\r\n]+)/i);
@@ -81,7 +81,6 @@ function extractRuntimePatch(providerId: string, text: string): { patch: Partial
     const tier = capture(/\b((?:Free|Pro|Max|Team|Enterprise|Business)\s+Tier)\b/i)
       ?? capture(/\b(API Usage Billing)\b/i)
       ?? capture(/\b(Individual Org)\b/i)
-      ?? capture(/\b(Gemini Code Assist for individuals)\b/i)
       ?? capture(/\b(Pro Plan|Free Plan|Team Plan|Max Plan)\b/i);
     if (tier) patch.plan = tier;
   }
@@ -106,7 +105,7 @@ function fallbackSessionModel(providerId: string, sessionModel?: string) {
     providerId === "claude-code" ||
     providerId === "claude-code-ollama" ||
     providerId === "copilot" ||
-    providerId === "gemini" ||
+    providerId === "antigravity" ||
     providerId === "ollama"
   ) {
     return sessionModel;

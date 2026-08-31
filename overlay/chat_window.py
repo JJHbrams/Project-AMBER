@@ -27,7 +27,7 @@ from overlay.config import get_cli_provider, get_workdir, load_cfg, normalize_cl
 from overlay.cli_capabilities import supported_efforts
 
 ENGRAM_CMD = Path.home() / ".engram" / "engram-copilot.cmd"
-ENGRAM_GEMINI_CMD = Path.home() / ".engram" / "engram-gemini.cmd"
+ENGRAM_ANTIGRAVITY_CMD = Path.home() / ".engram" / "engram-antigravity.cmd"
 ENGRAM_CODEX_CMD = Path.home() / ".engram" / "engram-codex.cmd"
 ENGRAM_CLAUDE_CMD = Path.home() / ".engram" / "engram-claude.cmd"
 ENGRAM_GOOSE_CMD = Path.home() / ".engram" / "engram-goose.cmd"
@@ -433,14 +433,13 @@ def _resolve_provider_launch(cfg: dict, provider: str) -> tuple[str, list[str], 
         env_overrides.update(extra_env)
         return resolved_provider, launch_args, label, env_overrides, warnings
 
-    if normalized == "gemini":
-        model = str(cli_cfg.get("gemini_model") or "").strip()
+    if normalized == "antigravity":
+        model = str(cli_cfg.get("antigravity_model") or "").strip()
         args = ["--model", model] if model and model != "auto" else []
-        if ENGRAM_GEMINI_CMD.exists():
-            return normalized, ["cmd", "/k", str(ENGRAM_GEMINI_CMD), *args], ENGRAM_GEMINI_CMD.name, env_overrides, warnings
-        gemini_command = str(cli_cfg.get("gemini_command") or "gemini").strip() or "gemini"
-        label = "gemini"
-        return normalized, ["cmd", "/k", gemini_command, *args], label, env_overrides, warnings
+        if ENGRAM_ANTIGRAVITY_CMD.exists():
+            return normalized, ["cmd", "/k", str(ENGRAM_ANTIGRAVITY_CMD), *args], ENGRAM_ANTIGRAVITY_CMD.name, env_overrides, warnings
+        command = str(cli_cfg.get("antigravity_command") or "agy").strip() or "agy"
+        return normalized, ["cmd", "/k", command, *args], "agy", env_overrides, warnings
 
     if normalized == "codex":
         model = str(cli_cfg.get("codex_model") or "").strip(); effort = str(cli_cfg.get("codex_reasoning_effort") or "").strip()
@@ -613,7 +612,7 @@ class ChatTerminal:
                 logger.warning("[overlay] %s", warning)
 
         executable = _extract_executable(launch_args[2] if len(launch_args) >= 3 else "")
-        if provider in {"gemini", "claude-code", "ollama"} and executable and not shutil.which(executable):
+        if provider in {"antigravity", "claude-code", "ollama"} and executable and not shutil.which(executable):
             import logging
 
             logging.getLogger(__name__).warning("[overlay] %s CLI를 찾지 못했습니다: %s", provider, executable)
