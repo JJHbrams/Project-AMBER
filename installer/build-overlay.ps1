@@ -111,15 +111,20 @@ function Invoke-OverlayPython {
 function Invoke-OverlayRole {
     param(
         [Parameter(Mandatory)][string]$Executable,
-        [Parameter(Mandatory)][string]$Role
+        [Parameter(Mandatory)][string]$Role,
+        [string]$ModelCacheDir = ""
     )
 
     $smokeLog = Join-Path ([IO.Path]::GetTempPath()) `
         ("engram-smoke-" + [Guid]::NewGuid().ToString("N") + ".log")
     $previousLog = $env:ENGRAM_SMOKE_LOG
     $previousSmokeDb = $env:ENGRAM_SMOKE_DB_DIR
+    $previousModelCache = $env:ENGRAM_MODEL_CACHE_DIR
     $smokeDb = $null
     $env:ENGRAM_SMOKE_LOG = $smokeLog
+    if ($ModelCacheDir) {
+        $env:ENGRAM_MODEL_CACHE_DIR = $ModelCacheDir
+    }
     if ($Role -eq "smoke-check") {
         $smokeDb = Join-Path ([IO.Path]::GetTempPath()) `
             ("engram-smoke-db-" + [Guid]::NewGuid().ToString("N"))
@@ -137,6 +142,7 @@ function Invoke-OverlayRole {
     } finally {
         $env:ENGRAM_SMOKE_LOG = $previousLog
         $env:ENGRAM_SMOKE_DB_DIR = $previousSmokeDb
+        $env:ENGRAM_MODEL_CACHE_DIR = $previousModelCache
         if ($smokeDb) {
             Remove-Item $smokeDb -Recurse -Force -ErrorAction SilentlyContinue
         }
@@ -338,18 +344,17 @@ try {
         exit 1
     }
 
-    Write-OverlayStep "Validating offline embedding model"
+    Write-OverlayStep "Validating canonical embedding model manifest"
     $modelCheck = Invoke-OverlayPython $python @(
         "-m", "core.install.model_manifest",
         "--model-dir", $ModelDir,
         "--model-id", $ModelId,
-        "--ensure",
-        "--allow-download"
+        "--validate-metadata"
     )
     if ($modelCheck.ExitCode -ne 0) {
-        throw "Embedding model validation/export failed: $(Get-LastOutput $modelCheck.Output)"
+        throw "Embedding model manifest validation failed: $(Get-LastOutput $modelCheck.Output)"
     }
-    Write-OverlayOk "Embedding model manifest validated"
+    Write-OverlayOk "Embedding model manifest validated (payload excluded from frozen bundle)"
 
     Write-OverlayStep "Resolving four-part build version"
     $versionResult = Invoke-OverlayPython $python @(
@@ -444,16 +449,23 @@ try {
             )
             if ($manifest.ExitCode -eq 0) {
                 Write-OverlayStep "Running frozen runtime contract and role smoke tests"
-                $runtimeExit = Invoke-OverlayRole (Join-Path $tempArtifact "engram-overlay.exe") "runtime-contract"
-                $embeddingExit = if ($runtimeExit -eq 0) {
-                    Invoke-OverlayRole (Join-Path $tempArtifact "engram-overlay.exe") "embedding-check"
-                } else {
-                    1
-                }
-                $smokeExit = if ($runtimeExit -eq 0 -and $embeddingExit -eq 0) {
-                    Invoke-OverlayRole (Join-Path $tempArtifact "engram-overlay.exe") "smoke-check"
-                } else {
-                    1
+                $smokeModelCache = Join-Path ([IO.Path]::GetTempPath()) `
+                    ("engram-smoke-model-" + [Guid]::NewGuid().ToString("N"))
+                New-Item -ItemType Directory -Path $smokeModelCache -Force | Out-Null
+                try {
+                    $runtimeExit = Invoke-OverlayRole (Join-Path $tempArtifact "engram-overlay.exe") "runtime-contract" $smokeModelCache
+                    $embeddingExit = if ($runtimeExit -eq 0) {
+                        Invoke-OverlayRole (Join-Path $tempArtifact "engram-overlay.exe") "embedding-check" $smokeModelCache
+                    } else {
+                        1
+                    }
+                    $smokeExit = if ($runtimeExit -eq 0 -and $embeddingExit -eq 0) {
+                        Invoke-OverlayRole (Join-Path $tempArtifact "engram-overlay.exe") "smoke-check" $smokeModelCache
+                    } else {
+                        1
+                    }
+                } finally {
+                    Remove-Item $smokeModelCache -Recurse -Force -ErrorAction SilentlyContinue
                 }
                 $dashboardExit = if ($runtimeExit -eq 0 -and $embeddingExit -eq 0 -and $smokeExit -eq 0) {
                     Invoke-DashboardSmoke $tempArtifact

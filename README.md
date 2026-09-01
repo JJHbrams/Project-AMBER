@@ -91,6 +91,13 @@
 
 ### 2) 설치
 
+일반 사용자는 [최신 AMBER Release](https://github.com/JJHbrams/Project-AMBER/releases/latest)에서
+`AMBER_*_x64-setup.exe`를 받아 실행하면 됩니다. 시맨틱 모델은 첫 사용 시 정확한 pinned
+revision으로 자동 설치됩니다. 네트워크가 없는 PC만 같은 Release의 선택적
+`*_FP32_ModelPack.zip`을 함께 받으세요.
+
+아래 소스 설치 방식은 개발 환경을 직접 구성할 때 사용합니다.
+
 ```powershell
 git clone <repo-url>
 ```

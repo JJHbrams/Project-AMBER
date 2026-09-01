@@ -24,7 +24,10 @@ class SemanticEpToKgMetadataTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self._tmpdir = tempfile.TemporaryDirectory()
         self.db_path = str(Path(self._tmpdir.name) / "semantic_graph")
-        self.sg = SemanticGraph(db_path=self.db_path, embedding_model="test-model")
+        self.sg = SemanticGraph(
+            db_path=self.db_path,
+            embedding_model="intfloat/multilingual-e5-small",
+        )
         self.assertTrue(self.sg.enabled)
         self._patcher = patch.object(SemanticGraph, "_compute_embedding", side_effect=_embedding)
         self._patcher.start()
@@ -53,7 +56,7 @@ class SemanticEpToKgMetadataTests(unittest.IsolatedAsyncioTestCase):
         edge = next(row for row in await self._edges("ep") if row["rel_type"] == "semantic")
         self.assertAlmostEqual(edge["score"], edge["weight"])
         self.assertEqual(edge["method"], "semantic")
-        self.assertEqual(edge["model"], "test-model")
+        self.assertEqual(edge["model"], self.sg._embedding_model_stamp)
         self.assertEqual(edge["version"], EP_TO_KG_LINK_VERSION)
         self.assertEqual(edge["keywords"], "")
         self.assertTrue(edge["created_at"])

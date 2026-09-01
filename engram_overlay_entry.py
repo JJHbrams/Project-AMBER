@@ -133,6 +133,10 @@ def _dispatch_backend_role() -> bool:
             from core.install.bootstrap import main as bootstrap_main
             bootstrap_main(rest)
             return True
+        if role == "model-cache":
+            from core.install.model_manifest import _main as model_cache_main
+
+            raise SystemExit(model_cache_main(rest))
         if role == "policy-preflight":
             from core.integrations.policy_preflight import main as policy_preflight_main
 

@@ -126,28 +126,15 @@ def _collect_character_datas() -> list[tuple[str, str]]:
 _character_datas = _collect_character_datas()
 
 
-def _collect_embedding_model() -> list[tuple[str, str]]:
-    """오프라인 임베딩 모델(resource/embedding-model) 을 있으면 번들.
-
-    installer/build-overlay.ps1 이 cache에서 검증·export 한다.
-    없으면 빈 리스트 → 런타임에 HuggingFace Hub 폴백(개발 모드).
-    """
-    root = Path("resource") / "embedding-model"
-    if not root.exists():
-        return []
-    items: list[tuple[str, str]] = []
-    for src in root.rglob("*"):
-        if not src.is_file():
-            continue
-        rel_parent = src.parent.relative_to(root)
-        dest = Path("resource") / "embedding-model"
-        if str(rel_parent) != ".":
-            dest = dest / rel_parent
-        items.append((str(src), str(dest)))
-    return items
+def _collect_embedding_model_manifest() -> list[tuple[str, str]]:
+    """Bundle only the canonical manifest; FP32 payload lives in user cache."""
+    manifest = Path("resource") / "embedding-model" / "manifest.json"
+    if not manifest.is_file():
+        raise RuntimeError(f"canonical embedding manifest missing: {manifest}")
+    return [(str(manifest), str(Path("resource") / "embedding-model"))]
 
 
-_embedding_model_datas = _collect_embedding_model()
+_embedding_model_datas = _collect_embedding_model_manifest()
 _streamlit_datas, _streamlit_binaries, _streamlit_hiddenimports = collect_all("streamlit")
 _mcp_datas, _mcp_binaries, _mcp_hiddenimports = collect_all("mcp")
 
@@ -175,7 +162,7 @@ a = Analysis(
         *_tcl_tk_datas,
         *_tk_python_datas,
     ],
-    hiddenimports=['core.context.context_builder', 'core.storage.db', 'core.identity', 'core.memory', 'core.context.directives', 'core.identity.reflection', 'core.identity.curiosity', 'core.common.sanitizer', 'core.memory.bus', 'core.config.runtime_config', 'core.config.remote_tokens', 'core.graph.semantic', 'core.graph.semantic.stm_promoter', 'core.install.bootstrap', 'core.install.model_manifest', 'core.observability.activity', 'core.context.project_scope', 'core.dashboard.app', 'discord_bot', 'discord_bot.bot', 'tkinterweb', 'tkinterweb_tkhtml', 'mcp_server', 'kg_watcher', 'scripts.kg.kg_lint', *_streamlit_hiddenimports, *_mcp_hiddenimports],
+    hiddenimports=['core.context.context_builder', 'core.storage.db', 'core.identity', 'core.memory', 'core.context.directives', 'core.identity.reflection', 'core.identity.curiosity', 'core.common.sanitizer', 'core.memory.bus', 'core.config.runtime_config', 'core.config.remote_tokens', 'core.graph.semantic', 'core.graph.semantic.stm_promoter', 'core.install.bootstrap', 'core.install.model_manifest', 'core.observability.activity', 'core.context.project_scope', 'core.dashboard.app', 'discord_bot', 'discord_bot.bot', 'tkinterweb', 'tkinterweb_tkhtml', 'mcp_server', 'kg_watcher', 'scripts.kg.kg_lint', 'sentence_transformers', 'transformers', 'torch', 'huggingface_hub', *_streamlit_hiddenimports, *_mcp_hiddenimports],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=['installer\\pyi_rth_engram_tk.py'],

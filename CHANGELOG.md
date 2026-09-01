@@ -4,6 +4,24 @@ All notable changes to this project are documented in this file.
 
 ## Unreleased
 
+## [1.5.8] — 2026-09-01
+
+### Changed
+
+- 메인 installer에서는 470MB FP32 임베딩 payload를 제외하고 canonical manifest만
+  배포한다. 첫 시맨틱 기능 사용 시 pinned revision의 manifest-listed 파일만 사용자
+  캐시에 받아 전체 SHA-256 검증 후 원자적으로 게시한다.
+- semantic vector와 관계의 모델 provenance를 manifest SHA가 포함된 immutable stamp로
+  기록해 다른 snapshot의 vector가 현재 검색 결과에 섞이지 않게 했다.
+- 네트워크가 없는 PC를 위해 동일 manifest로 검증되는 선택적 FP32 model pack asset을
+  별도 제공한다.
+
+### Validation
+
+- 정식 setup 크기 199,836,679 bytes로 v1.5.7 대비 52.4% 감소.
+- FP32 384차원 baseline matrix와 row hash가 모두 기존 결과와 일치.
+- frozen offline model-pack import, embedding, role, dashboard smoke 통과.
+
 ## [1.5.6] — 2026-08-26
 
 ### Fixed

@@ -78,6 +78,13 @@ AMBER is a **local persistent memory runtime** for AI agents. It gives your AI t
 
 ### Install
 
+For normal Windows installation, download and run `AMBER_*_x64-setup.exe` from
+the [latest AMBER Release](https://github.com/JJHbrams/Project-AMBER/releases/latest).
+The exact pinned semantic model is hydrated automatically on first use. Only
+offline PCs need the optional `*_FP32_ModelPack.zip` asset from the same release.
+
+Use the source installation steps below only when setting up a development environment.
+
 ```powershell
 git clone https://github.com/JJHbrams/Project-AMBER.git
 cd Project-AMBER

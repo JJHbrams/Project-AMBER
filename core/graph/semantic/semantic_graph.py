@@ -24,6 +24,7 @@ import json
 import logging
 import os
 import re
+import sys
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
@@ -31,7 +32,12 @@ from typing import Any, Callable, Iterable, TypedDict
 
 from core.config.runtime_config import get_cfg_value, get_db_root_dir
 from core.context.project_scope import resolve_kg_node_id
-from core.install.model_manifest import validate_manifest
+from core.install.model_manifest import (
+    MANIFEST_NAME,
+    bundled_manifest_path,
+    ensure_cached_model,
+    model_stamp_from_manifest,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -319,6 +325,10 @@ class SemanticGraph:
             ).strip()
             or DEFAULT_EMBEDDING_MODEL
         )
+        self._embedding_model_stamp = model_stamp_from_manifest(
+            bundled_manifest_path(),
+            expected_model_id=self._embedding_model_name,
+        )
         self._encoder: Any = None
         self.db: Any = None
         self.async_conn: Any = None
@@ -432,7 +442,7 @@ class SemanticGraph:
                 "MATCH (n:KGNode) "
                 "WHERE n.embedding <> '' AND n.embedding_model = $model "
                 "RETURN n.id, n.title, n.type, n.summary, n.embedding",
-                {"model": self._embedding_model_name},
+                {"model": self._embedding_model_stamp},
             )
             while res.has_next():
                 row = res.get_next()
@@ -478,42 +488,36 @@ class SemanticGraph:
 
             prev = _tr.logging.get_verbosity()
             _tr.logging.set_verbosity_error()
-
-            # frozen 번들(통짜 installer)에 동봉된 오프라인 모델을 최우선으로 사용한다.
-            # → HuggingFace 서버 연결 없이 로드(설치·구동 시 네트워크 불필요).
-            import sys as _sys
-            from pathlib import Path as _Path
-
-            model_ref = self._embedding_model_name
-            if getattr(_sys, "frozen", False):
-                _bundled = _Path(getattr(_sys, "_MEIPASS", "")) / "resource" / "embedding-model"
-                if (_bundled / "config.json").exists():
-                    valid, reason = validate_manifest(
-                        _bundled,
-                        expected_model_id=self._embedding_model_name,
-                    )
-                    if not valid:
-                        raise RuntimeError(f"bundled embedding manifest invalid: {reason}")
-                    model_ref = str(_bundled)
-            else:
-                _source_model = _Path(__file__).resolve().parents[3] / "resource" / "embedding-model"
-                if (_source_model / "config.json").exists():
-                    valid, reason = validate_manifest(
-                        _source_model,
-                        expected_model_id=self._embedding_model_name,
-                    )
-                    if valid:
-                        model_ref = str(_source_model)
-                    else:
-                        logger.warning("source embedding manifest invalid: %s", reason)
-
             try:
-                try:
-                    self._encoder = SentenceTransformer(model_ref, local_files_only=True, device="cpu")
-                    logger.info("임베딩 모델 로컬 로드: %s", model_ref)
-                except Exception:
-                    logger.info("Hub에서 다운로드: %s", self._embedding_model_name)
-                    self._encoder = SentenceTransformer(self._embedding_model_name, device="cpu")
+                # The frozen bundle carries only the canonical manifest. Payload
+                # is resolved into the immutable per-user cache from a verified
+                # legacy bundle or the exact pinned Hub revision. SentenceTransformer
+                # never receives an unpinned Hub model id.
+                if getattr(sys, "frozen", False):
+                    manifest_dir = (
+                        Path(getattr(sys, "_MEIPASS", ""))
+                        / "resource"
+                        / "embedding-model"
+                    )
+                else:
+                    manifest_dir = (
+                        Path(__file__).resolve().parents[3]
+                        / "resource"
+                        / "embedding-model"
+                    )
+
+                model_dir = ensure_cached_model(
+                    manifest_dir / MANIFEST_NAME,
+                    allow_download=True,
+                    migration_sources=[manifest_dir],
+                    expected_model_id=self._embedding_model_name,
+                )
+                self._encoder = SentenceTransformer(
+                    str(model_dir),
+                    local_files_only=True,
+                    device="cpu",
+                )
+                logger.info("임베딩 모델 검증 캐시 로드: %s", model_dir)
             finally:
                 _tr.logging.set_verbosity(prev)
         except Exception as exc:
@@ -587,7 +591,7 @@ class SemanticGraph:
                 title,
                 summary,
                 tags_str,
-                self._embedding_model_name,
+                self._embedding_model_stamp,
             )
 
             # 기존 노드의 hash + embedding 조회
@@ -612,7 +616,7 @@ class SemanticGraph:
             if (
                 force_reembed
                 or old_hash != new_hash
-                or old_model != self._embedding_model_name
+                or old_model != self._embedding_model_stamp
                 or not old_emb
             ):
                 emb = await self.compute_passage_embedding(
@@ -639,7 +643,7 @@ class SemanticGraph:
                         "tags": tags_str,
                         "summary": summary,
                         "emb": emb_str,
-                        "model": self._embedding_model_name,
+                        "model": self._embedding_model_stamp,
                         "hash": new_hash,
                         "now": now,
                     },
@@ -1071,7 +1075,7 @@ class SemanticGraph:
                     "keywords": keywords,
                     "session_id": session_id,
                     "emb": emb_str,
-                    "model": self._embedding_model_name,
+                    "model": self._embedding_model_stamp,
                     "created_at": created_at,
                 },
             )
@@ -1279,7 +1283,7 @@ class SemanticGraph:
                         "eid": episode_id,
                         "kid": hit["id"],
                         "score": float(hit["score"]),
-                        "model": self._embedding_model_name,
+                        "model": self._embedding_model_stamp,
                         "version": EP_TO_KG_LINK_VERSION,
                         "created_at": linked_at,
                     },
@@ -1406,7 +1410,7 @@ class SemanticGraph:
                 "MATCH (e:EpisodeNode) "
                 "WHERE e.embedding <> '' AND e.embedding_model = $model "
                 "RETURN e.id, e.content, e.created_at, e.embedding",
-                {"model": self._embedding_model_name},
+                {"model": self._embedding_model_stamp},
             )
             while res.has_next():
                 row = res.get_next()
@@ -1483,7 +1487,7 @@ class SemanticGraph:
             raise RuntimeError("SemanticGraph is disabled")
         async with self._write_lock:
             counts: dict[str, int | str] = {
-                "model": self._embedding_model_name,
+                "model": self._embedding_model_stamp,
                 "kg_nodes": 0,
                 "episodes": 0,
             }
@@ -1492,7 +1496,7 @@ class SemanticGraph:
                     f"MATCH (n:{label}) "
                     "WHERE n.embedding <> '' AND n.embedding_model <> $model "
                     "RETURN count(n)",
-                    {"model": self._embedding_model_name},
+                    {"model": self._embedding_model_stamp},
                 )
                 if res.has_next():
                     counts[key] = int(res.get_next()[0])

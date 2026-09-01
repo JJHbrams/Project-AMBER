@@ -3,19 +3,30 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import json
 import os
 import shutil
 import sys
 import tempfile
+import threading
+import zipfile
 from pathlib import Path
 from typing import Any
+
+try:
+    import msvcrt as _platform_file_lock
+except ImportError:
+    import fcntl as _platform_file_lock
 
 
 MANIFEST_NAME = "manifest.json"
 MANIFEST_SCHEMA_VERSION = 2
 DEFAULT_MODEL_ID = "intfloat/multilingual-e5-small"
+MODEL_CACHE_ENV = "ENGRAM_MODEL_CACHE_DIR"
+_PROCESS_LOCKS: dict[str, threading.Lock] = {}
+_PROCESS_LOCKS_GUARD = threading.Lock()
 
 
 def _normalise_model_id(value: str) -> str:
@@ -67,6 +78,24 @@ def read_manifest(model_dir: Path) -> dict[str, Any]:
     return json.loads((model_dir / MANIFEST_NAME).read_text(encoding="utf-8"))
 
 
+def manifest_sha256(manifest_path: Path) -> str:
+    return _hash_file(Path(manifest_path))
+
+
+def model_stamp_from_manifest(
+    manifest_path: Path,
+    expected_model_id: str | None = None,
+) -> str:
+    """Return the immutable semantic-vector identity for a canonical manifest."""
+    manifest, reason = _canonical_manifest(
+        Path(manifest_path).parent,
+        expected_model_id,
+    )
+    if manifest is None:
+        raise RuntimeError(reason)
+    return f"{manifest['model_id']}@sha256:{manifest_sha256(manifest_path)}"
+
+
 def _canonical_manifest(model_dir: Path, expected_model_id: str | None = None) -> tuple[dict[str, Any] | None, str]:
     path = model_dir / MANIFEST_NAME
     if not path.is_file():
@@ -113,6 +142,240 @@ def validate_manifest(model_dir: Path, expected_model_id: str | None = None) -> 
         if expected_hash != actual_files[name].lower():
             return False, f"model file hash mismatch: {name}"
     return True, "valid"
+
+
+def validate_manifest_metadata(
+    manifest_path: Path,
+    expected_model_id: str | None = None,
+) -> tuple[bool, str]:
+    """Validate only the canonical manifest metadata, without requiring payload."""
+    manifest, reason = _canonical_manifest(Path(manifest_path).parent, expected_model_id)
+    return (manifest is not None), reason
+
+
+def default_model_cache_root() -> Path:
+    override = os.environ.get(MODEL_CACHE_ENV, "").strip()
+    if override:
+        return Path(override).expanduser()
+    return Path.home() / ".engram" / "models"
+
+
+def cache_dir_for_manifest(manifest_path: Path, cache_root: Path | None = None) -> Path:
+    root = Path(cache_root) if cache_root is not None else default_model_cache_root()
+    return root / manifest_sha256(Path(manifest_path))
+
+
+def bundled_manifest_path() -> Path:
+    root = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parents[2]))
+    return root / "resource" / "embedding-model" / MANIFEST_NAME
+
+
+def _process_lock(path: Path) -> threading.Lock:
+    key = str(path.resolve())
+    with _PROCESS_LOCKS_GUARD:
+        return _PROCESS_LOCKS.setdefault(key, threading.Lock())
+
+
+@contextlib.contextmanager
+def _cache_publish_lock(lock_path: Path):
+    """Serialize cache publication across threads and processes."""
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with _process_lock(lock_path):
+        handle = lock_path.open("a+b")
+        try:
+            if handle.tell() == 0:
+                handle.write(b"0")
+                handle.flush()
+            handle.seek(0)
+            if os.name == "nt":
+                _platform_file_lock.locking(
+                    handle.fileno(), _platform_file_lock.LK_LOCK, 1
+                )
+            else:
+                _platform_file_lock.flock(
+                    handle.fileno(), _platform_file_lock.LOCK_EX
+                )
+            try:
+                yield
+            finally:
+                handle.seek(0)
+                if os.name == "nt":
+                    _platform_file_lock.locking(
+                        handle.fileno(), _platform_file_lock.LK_UNLCK, 1
+                    )
+                else:
+                    _platform_file_lock.flock(
+                        handle.fileno(), _platform_file_lock.LOCK_UN
+                    )
+        finally:
+            handle.close()
+
+
+def _copy_verified_source(source_dir: Path, stage_dir: Path, manifest: dict[str, Any]) -> None:
+    valid, reason = validate_manifest(source_dir, manifest["model_id"])
+    if not valid:
+        raise RuntimeError(f"embedding model migration source invalid: {reason}")
+    for relative_name in manifest["files"]:
+        destination = stage_dir / relative_name
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source_dir / relative_name, destination)
+
+
+def _write_canonical_manifest(stage_dir: Path, manifest_path: Path) -> None:
+    shutil.copyfile(manifest_path, stage_dir / MANIFEST_NAME)
+
+
+def _verify_stage(stage_dir: Path, expected_model_id: str) -> None:
+    valid, reason = validate_manifest(stage_dir, expected_model_id)
+    if not valid:
+        raise RuntimeError(f"staged embedding model failed validation: {reason}")
+
+
+def _publish_stage(stage_dir: Path, target_dir: Path) -> None:
+    if target_dir.exists():
+        raise RuntimeError(f"embedding model cache path already exists but is invalid: {target_dir}")
+    os.replace(stage_dir, target_dir)
+
+
+def ensure_cached_model(
+    manifest_path: Path,
+    *,
+    cache_root: Path | None = None,
+    allow_download: bool = False,
+    migration_sources: tuple[Path, ...] | list[Path] = (),
+    expected_model_id: str | None = None,
+) -> Path:
+    """Resolve a verified immutable user cache entry keyed by manifest SHA-256."""
+    manifest_path = Path(manifest_path).resolve()
+    manifest, reason = _canonical_manifest(manifest_path.parent, expected_model_id)
+    if manifest is None:
+        raise RuntimeError(reason)
+    target_dir = cache_dir_for_manifest(manifest_path, cache_root)
+    valid, _ = validate_manifest(target_dir, manifest["model_id"])
+    if valid:
+        return target_dir
+
+    target_dir.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = target_dir.parent / f".{target_dir.name}.lock"
+    with _cache_publish_lock(lock_path):
+        valid, _ = validate_manifest(target_dir, manifest["model_id"])
+        if valid:
+            return target_dir
+        if target_dir.exists():
+            raise RuntimeError(f"embedding model cache path already exists but is invalid: {target_dir}")
+
+        stage_root = Path(
+            tempfile.mkdtemp(prefix=f".{target_dir.name}.stage-", dir=target_dir.parent)
+        )
+        stage_dir = stage_root / "model"
+        stage_dir.mkdir()
+        try:
+            migrated = False
+            for source in migration_sources:
+                source = Path(source)
+                source_valid, _ = validate_manifest(source, manifest["model_id"])
+                if not source_valid:
+                    continue
+                _copy_verified_source(source, stage_dir, manifest)
+                migrated = True
+                break
+            if not migrated:
+                if not allow_download:
+                    raise RuntimeError("verified embedding model payload is not available offline")
+                _export_to_staging(stage_dir, manifest, allow_download=True)
+            _write_canonical_manifest(stage_dir, manifest_path)
+            _verify_stage(stage_dir, manifest["model_id"])
+            _publish_stage(stage_dir, target_dir)
+        finally:
+            shutil.rmtree(stage_root, ignore_errors=True)
+    return target_dir
+
+
+def _safe_pack_members(archive: zipfile.ZipFile) -> list[str]:
+    entries = archive.infolist()
+    if any(item.is_dir() for item in entries):
+        raise RuntimeError("model pack contains unexpected directory entries")
+    names = [item.filename for item in entries]
+    if len(names) != len(set(names)):
+        raise RuntimeError("model pack contains duplicate paths")
+    for name in names:
+        path = Path(name)
+        if path.is_absolute() or ".." in path.parts or path.as_posix() != name:
+            raise RuntimeError(f"model pack contains unsafe path: {name}")
+    return names
+
+
+def create_model_pack(model_dir: Path, output_path: Path) -> Path:
+    """Create a deterministic offline pack from an exactly verified payload."""
+    model_dir = Path(model_dir).resolve()
+    valid, reason = validate_manifest(model_dir)
+    if not valid:
+        raise RuntimeError(f"cannot pack invalid embedding model: {reason}")
+    manifest = read_manifest(model_dir)
+    output_path = Path(output_path).resolve()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary_name = tempfile.mkstemp(
+        prefix=f".{output_path.name}.", suffix=".tmp", dir=output_path.parent
+    )
+    os.close(fd)
+    temporary = Path(temporary_name)
+    try:
+        with zipfile.ZipFile(temporary, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            for name in [MANIFEST_NAME, *manifest["files"]]:
+                info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
+                info.compress_type = zipfile.ZIP_DEFLATED
+                info.external_attr = 0o100644 << 16
+                with (model_dir / name).open("rb") as source, archive.open(info, "w") as target:
+                    shutil.copyfileobj(source, target, length=1024 * 1024)
+        os.replace(temporary, output_path)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return output_path
+
+
+def import_model_pack(
+    pack_path: Path,
+    manifest_path: Path,
+    *,
+    cache_root: Path | None = None,
+) -> Path:
+    """Verify and atomically import an offline pack into the shared cache."""
+    manifest_path = Path(manifest_path).resolve()
+    manifest, reason = _canonical_manifest(manifest_path.parent)
+    if manifest is None:
+        raise RuntimeError(reason)
+    target_dir = cache_dir_for_manifest(manifest_path, cache_root)
+    target_dir.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = target_dir.parent / f".{target_dir.name}.lock"
+    with _cache_publish_lock(lock_path):
+        valid, _ = validate_manifest(target_dir, manifest["model_id"])
+        if valid:
+            return target_dir
+        if target_dir.exists():
+            raise RuntimeError(f"embedding model cache path already exists but is invalid: {target_dir}")
+        stage_root = Path(
+            tempfile.mkdtemp(prefix=f".{target_dir.name}.stage-", dir=target_dir.parent)
+        )
+        stage_dir = stage_root / "model"
+        stage_dir.mkdir()
+        try:
+            with zipfile.ZipFile(pack_path, "r") as archive:
+                names = _safe_pack_members(archive)
+                expected_names = {MANIFEST_NAME, *manifest["files"]}
+                if set(names) != expected_names:
+                    raise RuntimeError("model pack file inventory does not match canonical manifest")
+                if archive.read(MANIFEST_NAME) != manifest_path.read_bytes():
+                    raise RuntimeError("model pack manifest does not match canonical manifest")
+                for name in names:
+                    destination = stage_dir / name
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    with archive.open(name) as source, destination.open("wb") as target:
+                        shutil.copyfileobj(source, target)
+            _verify_stage(stage_dir, manifest["model_id"])
+            _publish_stage(stage_dir, target_dir)
+        finally:
+            shutil.rmtree(stage_root, ignore_errors=True)
+    return target_dir
 
 
 def _write_manifest_atomic(model_dir: Path, manifest: dict[str, Any]) -> None:
@@ -216,24 +479,71 @@ def ensure_model(model_dir: Path, model_id: str = DEFAULT_MODEL_ID, allow_downlo
 
 
 def _main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--model-dir", required=True, type=Path)
+    parser = argparse.ArgumentParser(
+        description="Verify, hydrate, create, or import the pinned Engram FP32 embedding model payload."
+    )
+    parser.add_argument("--model-dir", type=Path)
     parser.add_argument("--model-id", default=DEFAULT_MODEL_ID)
     parser.add_argument("--ensure", action="store_true")
+    parser.add_argument("--ensure-cache", action="store_true")
     parser.add_argument("--allow-download", action="store_true")
     parser.add_argument("--validate", action="store_true")
+    parser.add_argument("--validate-metadata", action="store_true")
     parser.add_argument("--refresh-manifest", action="store_true")
     parser.add_argument("--revision")
+    parser.add_argument("--cache-root", type=Path)
+    parser.add_argument("--legacy-model-dir", action="append", default=[], type=Path)
+    parser.add_argument("--create-pack", type=Path)
+    parser.add_argument("--import-pack", type=Path)
     args = parser.parse_args(argv)
     try:
+        model_dir = args.model_dir or bundled_manifest_path().parent
+        manifest_path = model_dir / MANIFEST_NAME
+        validation_dir = model_dir
         if args.refresh_manifest:
             if not args.revision:
                 raise RuntimeError("--refresh-manifest requires --revision")
-            refresh_manifest(args.model_dir, args.model_id, args.revision)
+            refresh_manifest(model_dir, args.model_id, args.revision)
             print("refreshed")
         elif args.ensure:
-            print(ensure_model(args.model_dir, args.model_id, args.allow_download))
-        valid, reason = validate_manifest(args.model_dir, args.model_id)
+            print(ensure_model(model_dir, args.model_id, args.allow_download))
+        elif args.import_pack:
+            resolved = import_model_pack(
+                args.import_pack,
+                manifest_path,
+                cache_root=args.cache_root,
+            )
+            validation_dir = resolved
+            print(str(resolved))
+        elif args.ensure_cache:
+            resolved = ensure_cached_model(
+                manifest_path,
+                cache_root=args.cache_root,
+                allow_download=args.allow_download,
+                migration_sources=args.legacy_model_dir,
+                expected_model_id=args.model_id,
+            )
+            validation_dir = resolved
+            print(str(resolved))
+        elif args.create_pack:
+            source = model_dir
+            if not validate_manifest(source, args.model_id)[0]:
+                source = ensure_cached_model(
+                    manifest_path,
+                    cache_root=args.cache_root,
+                    allow_download=args.allow_download,
+                    migration_sources=args.legacy_model_dir,
+                    expected_model_id=args.model_id,
+                )
+            validation_dir = source
+            print(str(create_model_pack(source, args.create_pack)))
+
+        if args.validate_metadata:
+            valid, reason = validate_manifest_metadata(manifest_path, args.model_id)
+        elif args.ensure_cache or args.import_pack:
+            valid, reason = validate_manifest(validation_dir, args.model_id)
+        else:
+            valid, reason = validate_manifest(validation_dir, args.model_id)
         print(json.dumps({"valid": valid, "reason": reason}))
         return 0 if valid else 1
     except Exception as exc:
