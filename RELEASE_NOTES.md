@@ -1,5 +1,60 @@
 # Release Notes
 
+## 2026-09-01 - v1.5.8: Smaller Installer, Exact FP32 Semantics
+
+> Patch release. The main AMBER installer no longer carries the 470 MB FP32
+> embedding payload. It keeps the exact pinned model contract and hydrates a
+> SHA-verified per-user cache on first semantic use.
+
+### Highlights
+
+- **The main installer is 52.4% smaller.** The release setup is 199,836,679
+  bytes, down from 419,607,786 bytes in v1.5.7.
+- **FP32 graph semantics are unchanged.** AMBER still uses the exact
+  `intfloat/multilingual-e5-small` revision and normalized 384-dimensional
+  vectors; the baseline matrix and all row hashes match byte-for-byte.
+- **First-use hydration is pinned and atomic.** Only files listed by the
+  canonical manifest are fetched at its exact revision. Every SHA-256 is
+  checked before an immutable cache snapshot is published.
+- **Stale vectors cannot mix with the current model.** Semantic vectors and
+  relationships now carry `model_id@sha256:<manifest-sha>` provenance.
+- **An optional offline FP32 model pack is published separately.** Import it
+  before first semantic use when the target PC has no network access:
+
+  ```powershell
+  $exe = Join-Path $env:LOCALAPPDATA "Programs\EngramOverlay\dist\engram-overlay\engram-overlay.exe"
+  & $exe --role model-cache --import-pack ".\AMBER_1.5.8.552_FP32_ModelPack.zip"
+  ```
+
+  If AMBER was installed to a custom directory, use that installation's
+  `dist\engram-overlay\engram-overlay.exe` instead.
+
+### Validation
+
+- Development source: `f2de97a`.
+- Release version: `1.5.8.552` (`SEMVER4_BUILD=552`).
+- Payload-split and semantic regression tests: 57 passed.
+- Fresh frozen runtime contract, pinned hydration, role smoke, dashboard smoke,
+  and Inno Setup 6.7.3 release compile passed.
+- Offline model-pack import and embedding check passed with `HF_HUB_OFFLINE=1`.
+- Frozen bundle contains only the 1,094-byte canonical model manifest and no
+  `model.safetensors`.
+- Installer: `AMBER_1.5.8.552_x64-setup.exe` (199,836,679 bytes).
+- Installer SHA-256:
+  `C5C81F6BB4D9D2E0133AC32221BFD7C29E3A9CC30763129D271F74679B70F8BC`.
+- Offline model pack: `AMBER_1.5.8.552_FP32_ModelPack.zip` (283,945,681 bytes).
+- Model-pack SHA-256:
+  `C935EA8C411F71D23F394869B3F1E9FDDD7DB61EE5F70FACB62ABFD56E875D61`.
+- Canonical manifest SHA-256:
+  `EFA275F9C837F8EF48E69D1D80A29A150D964254A688C615904633E10E2880C7`.
+
+### Upgrade Notes
+
+- Existing settings, databases, and Wiki content remain outside the installed
+  application directory and are preserved by the same stable AppId.
+- A legacy bundled payload can be adopted into the verified user cache; the
+  literal v1.2 GUI in-place upgrade remains a post-release field verification.
+
 ## 2026-08-31 - v1.5.7: AMBER Branding and Reliable Legacy Upgrades
 
 > Patch release. The Windows package is now presented as **AMBER (ENGRAM)** while

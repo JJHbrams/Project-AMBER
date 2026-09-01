@@ -10,7 +10,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from core.install.model_manifest import validate_manifest
+from core.install.model_manifest import validate_manifest_metadata
 from core.install.versioning import resolve_version
 
 
@@ -191,8 +191,8 @@ def validate_build(
         or not build_manifest_path.is_file()
     ):
         return False, "overlay/dashboard executable or build manifest missing"
-    valid_model, model_reason = validate_manifest(
-        model_manifest_path.parent,
+    valid_model, model_reason = validate_manifest_metadata(
+        model_manifest_path,
         expected_model_id=None,
     )
     if not valid_model:

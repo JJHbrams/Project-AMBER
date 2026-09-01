@@ -60,7 +60,7 @@ class OverlayBuildArchitectureTests(unittest.TestCase):
         self.assertIn('"runtime-contract"', build)
         self.assertLess(
             build.index("Invoke-SourceRuntimeContract $python"),
-            build.index("Validating offline embedding model"),
+            build.index("Validating canonical embedding model manifest"),
         )
 
     def test_release_builder_caches_setup_and_has_explicit_release_profile(self):
@@ -241,10 +241,30 @@ class OverlayBuildArchitectureTests(unittest.TestCase):
 
     def test_build_uses_canonical_manifest_without_refreshing_it(self):
         build = (ROOT / "installer" / "build-overlay.ps1").read_text(encoding="utf-8-sig")
+        spec = (ROOT / "engram-overlay.spec").read_text(encoding="utf-8")
+        entry = (ROOT / "engram_overlay_entry.py").read_text(encoding="utf-8")
 
-        self.assertIn('"--ensure"', build)
-        self.assertIn('"--allow-download"', build)
+        self.assertIn('"--validate-metadata"', build)
+        self.assertNotIn('"--allow-download"', build)
         self.assertNotIn("--refresh-manifest", build)
+        self.assertIn("_collect_embedding_model_manifest", spec)
+        self.assertNotIn("model_dir.rglob", spec)
+        self.assertIn('if role == "model-cache":', entry)
+        self.assertIn("ENGRAM_MODEL_CACHE_DIR", build)
+        self.assertIn("engram-smoke-model-", build)
+
+    def test_frozen_bundle_retains_embedding_runtime_dependencies(self):
+        spec = (ROOT / "engram-overlay.spec").read_text(encoding="utf-8")
+        requirements = (ROOT / "requirements.txt").read_text(encoding="utf-8")
+
+        self.assertIn("sentence-transformers", requirements)
+        self.assertIn("'core.graph.semantic'", spec)
+        self.assertIn("'sentence_transformers'", spec)
+        self.assertIn("'transformers'", spec)
+        self.assertIn("'torch'", spec)
+        self.assertIn("'huggingface_hub'", spec)
+        self.assertNotIn("'torch'", spec.partition("excludes=")[2].partition("]")[0])
+        self.assertNotIn("'transformers'", spec.partition("excludes=")[2].partition("]")[0])
 
     def test_frozen_and_installer_versions_come_from_canonical_snapshot(self):
         spec = (ROOT / "engram-overlay.spec").read_text(encoding="utf-8")

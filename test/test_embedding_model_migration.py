@@ -46,9 +46,11 @@ class EmbeddingModelMigrationTests(unittest.IsolatedAsyncioTestCase):
         class _Encoder:
             def __init__(self):
                 self.inputs = []
+                self.options = []
 
-            def encode(self, text, **_kwargs):
+            def encode(self, text, **kwargs):
                 self.inputs.append(text)
+                self.options.append(kwargs)
                 return _Vector()
 
         encoder = _Encoder()
@@ -59,6 +61,13 @@ class EmbeddingModelMigrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             encoder.inputs,
             ["query: find memory", "passage: stored memory"],
+        )
+        self.assertEqual(
+            encoder.options,
+            [
+                {"normalize_embeddings": True, "show_progress_bar": False},
+                {"normalize_embeddings": True, "show_progress_bar": False},
+            ],
         )
         self._patcher.start()
 
@@ -130,3 +139,92 @@ class EmbeddingModelMigrationTests(unittest.IsolatedAsyncioTestCase):
             read_manifest(model_dir)["model_id"],
             "intfloat/multilingual-e5-small",
         )
+
+
+class EmbeddingModelResolverTests(unittest.TestCase):
+    def _graph(self):
+        graph = object.__new__(SemanticGraph)
+        graph._embedding_model_name = "intfloat/multilingual-e5-small"
+        graph._encoder = None
+        return graph
+
+    def test_encoder_loads_only_verified_local_cache_on_cpu(self):
+        graph = self._graph()
+        calls = []
+
+        class _SentenceTransformer:
+            def __init__(self, *args, **kwargs):
+                calls.append((args, kwargs))
+
+        class _Logging:
+            @staticmethod
+            def get_verbosity():
+                return 20
+
+            @staticmethod
+            def set_verbosity(_value):
+                return None
+
+            @staticmethod
+            def set_verbosity_error():
+                return None
+
+        modules = {
+            "sentence_transformers": types.SimpleNamespace(
+                SentenceTransformer=_SentenceTransformer
+            ),
+            "transformers": types.SimpleNamespace(logging=_Logging),
+        }
+        verified_cache = Path("C:/verified/cache")
+        with patch.dict("sys.modules", modules), patch(
+            "core.graph.semantic.semantic_graph.ensure_cached_model",
+            return_value=verified_cache,
+        ) as resolver:
+            graph._load_encoder_blocking()
+
+        self.assertIsNot(graph._encoder, False)
+        self.assertEqual(
+            calls,
+            [((str(verified_cache),), {"local_files_only": True, "device": "cpu"})],
+        )
+        self.assertTrue(resolver.call_args.kwargs["allow_download"])
+        self.assertEqual(
+            resolver.call_args.kwargs["expected_model_id"],
+            "intfloat/multilingual-e5-small",
+        )
+
+    def test_resolver_failure_has_no_unpinned_hub_fallback(self):
+        graph = self._graph()
+        constructor_calls = []
+
+        class _SentenceTransformer:
+            def __init__(self, *args, **kwargs):
+                constructor_calls.append((args, kwargs))
+
+        class _Logging:
+            @staticmethod
+            def get_verbosity():
+                return 20
+
+            @staticmethod
+            def set_verbosity(_value):
+                return None
+
+            @staticmethod
+            def set_verbosity_error():
+                return None
+
+        modules = {
+            "sentence_transformers": types.SimpleNamespace(
+                SentenceTransformer=_SentenceTransformer
+            ),
+            "transformers": types.SimpleNamespace(logging=_Logging),
+        }
+        with patch.dict("sys.modules", modules), patch(
+            "core.graph.semantic.semantic_graph.ensure_cached_model",
+            side_effect=RuntimeError("offline"),
+        ):
+            graph._load_encoder_blocking()
+
+        self.assertIs(graph._encoder, False)
+        self.assertEqual(constructor_calls, [])
