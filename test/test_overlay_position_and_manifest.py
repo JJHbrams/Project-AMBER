@@ -90,6 +90,7 @@ class PositionPersistenceTests(unittest.TestCase):
         manager._thought = SimpleNamespace(hide=lambda: None)
         manager._echo = SimpleNamespace(hide=lambda: None)
         manager._approval_windows = []
+        manager._approval_requests = {}
         manager._tool_order = []
         manager._tool_info = {}
         for name, value in {

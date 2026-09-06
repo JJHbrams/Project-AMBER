@@ -40,28 +40,27 @@ GRIP_SIZE = 16  # bubble_window.py의 클릭-vs-리사이즈 히트테스트와 
 TAIL_REACH = 18  # 몸통 경계 밖으로 꼬리가 삐져나올 수 있는 최대 여유 — 사방으로 확보
                  # (크로마키로 투명이라 실제로는 안 보이는 여백이라 낭비가 아님)
 
-# 캐릭터(보라 머리/틸 포인트) 팔레트에 맞춘 색상 — 기본 흑백 대신 사용.
-SPEECH_BG = "#fffdf8"
-SPEECH_OUTLINE = "#6c5ce7"
-SPEECH_FG = "#2d2a3d"
+# Signal Glass: restrained graphite defaults.  Theme keys remain exactly the
+# same, so existing user palettes still override every surface safely.
+SPEECH_BG = "#1b2029"
+SPEECH_OUTLINE = "#8878d7"
+SPEECH_FG = "#eef1f6"
 
-THOUGHT_BG = "#f5f1fb"
-THOUGHT_OUTLINE = "#b9a6e0"
-THOUGHT_FG = "#4a4363"
-THOUGHT_TOOL_FG = "#2ba7a1"  # 도구 상태 줄은 생각 텍스트와 다른 색으로 구분
+THOUGHT_BG = "#202631"
+THOUGHT_OUTLINE = "#536675"
+THOUGHT_FG = "#c9d0d9"
+THOUGHT_TOOL_FG = "#79bcb5"  # compact telemetry accent, not a second primary palette
 
-INPUT_BG = "#fbfbfd"
-INPUT_OUTLINE = "#6c5ce7"
+INPUT_BG = "#171c25"
+INPUT_OUTLINE = "#8d7cda"
 
-TOOL_BG = "#eaf7f5"
-TOOL_OUTLINE = "#2ba7a1"
-TOOL_FG = "#1f6e69"
+TOOL_BG = "#1a2a2d"
+TOOL_OUTLINE = "#5caea7"
+TOOL_FG = "#c5e4df"
 
-# 응답 말풍선의 인라인 코드(`code`) 조각 배경/글자색 — Claude 앱의 인라인 코드
-# pill 스타일 참고. 테마 시스템(DEFAULT_THEME)에는 아직 안 올린다 — 사용자가 색상
-# 커스터마이즈를 요청하면 그때 추가.
-CODE_BG = "#eef0f4"
-CODE_FG = "#4a3f8f"
+# Inline/codeblock colours are derived from the active shell below.  Fixed
+# light pills would break graphite defaults, while fixed dark pills would make
+# a user's bright theme unreadable.
 CODE_FONT_FAMILY = "Consolas"
 
 # 설정(overlay.yaml의 bubble.theme / 설정 창)에서 덮어쓸 수 있는 색상 키 전체 —
@@ -76,12 +75,15 @@ DEFAULT_THEME = {
     "thought_tool_fg": THOUGHT_TOOL_FG,
     "input_bg": INPUT_BG,
     "input_outline": INPUT_OUTLINE,
+    "echo_bg": "#2e251e",
+    "echo_outline": "#c99a57",
+    "echo_fg": "#fff1d9",
     "tool_bg": TOOL_BG,
     "tool_outline": TOOL_OUTLINE,
     "tool_fg": TOOL_FG,
     # 능동 발화(initiative nudge) — 캐릭터가 스스로 건네는 말. 답변(보라 speech)과
     # 구분되게 teal 계열 외곽선을 써서 "먼저 말 걸어온 것"임을 한눈에 알린다.
-    "nudge_bg": "#f0faf8",
+    "nudge_bg": "#1b3030",
     "nudge_outline": TOOL_OUTLINE,
     "nudge_fg": SPEECH_FG,
 }
@@ -248,7 +250,7 @@ _STYLESHEET: "dict[str, dict]" = {
     "header5":    {"font": (0, "bold", None, False), "spacing1": 3, "spacing3": 2},
     "header6":    {"font": (0, "bold", None, False), "spacing1": 3, "spacing3": 2},
     "hr":         {"foreground": ("outline", 0.55), "justify": "center", "spacing1": 6, "spacing3": 6},
-    # 인용구 — Claude 앱풍: 왼쪽 세로 강조바(▎) + 들여쓰기 + 옅은 배경 콜아웃 + 뮤트색.
+    # 인용구 — signal panel: 왼쪽 세로 강조바(▎) + 들여쓰기 + 옅은 배경 콜아웃 + 뮤트색.
     "quotebar":   {"foreground": ("outline", 0.0)},
     "quote":      {"font": (0, None, "italic", False), "foreground": ("fg", 0.3),
                    "background": ("bg", -0.05), "lmargin1": 6, "lmargin2": 22},
@@ -546,6 +548,29 @@ def _lighten(hex_color: str, factor: float) -> str:
     return _rgb_to_hex(r + (255 - r) * factor, g + (255 - g) * factor, b + (255 - b) * factor)
 
 
+def _blend_hex(base: str, accent: str, amount: float) -> str:
+    """Mix theme colours without introducing a separate code-palette token."""
+    amount = max(0.0, min(1.0, float(amount)))
+    br, bg, bb = _hex_to_rgb(base)
+    ar, ag, ab = _hex_to_rgb(accent)
+    return _rgb_to_hex(
+        br + (ar - br) * amount,
+        bg + (ag - bg) * amount,
+        bb + (ab - bb) * amount,
+    )
+
+
+def code_tokens(bg: str, fg: str, outline: str) -> tuple[str, str]:
+    """Return readable code-chip colours for either graphite or bright themes."""
+    red, green, blue = _hex_to_rgb(bg)
+    luminance = (red * 0.2126 + green * 0.7152 + blue * 0.0722) / 255
+    # Dark glass benefits from a more visible violet/teal tint; on a bright
+    # custom theme the same restrained blend stays a quiet, readable chip.
+    code_bg = _blend_hex(bg, outline, 0.18 if luminance < 0.45 else 0.09)
+    code_fg = _blend_hex(fg, outline, 0.22 if luminance < 0.45 else 0.30)
+    return code_bg, code_fg
+
+
 def _rounded_rect(canvas: tk.Canvas, x0, y0, x1, y1, radius, **kwargs):
     r = min(radius, (x1 - x0) / 2, (y1 - y0) / 2)
     points = [
@@ -613,17 +638,26 @@ def _draw_speech_shell(
 
     canvas.config(width=total_w, height=total_h)
 
+    # Pillow 경로와 같은 restrained two-layer depth cue.  Every colour is
+    # derived from a theme token, so a user palette never receives an unrelated
+    # hard-coded accent.
+    _rounded_rect(
+        canvas,
+        body_x0 + 2, body_y0 + 3, body_x1 + 2, body_y1 + 3,
+        radius=radius, fill="", outline=_lighten(outline, -0.38), width=2,
+    )
+
     if glow:
-        # 시안 이미지 피드백: 두 겹짜리 2색 글로우 + 내부 그라데이션은 깔끔한 시안보다
-        # 오히려 번잡해 보인다는 지적을 받았다 — 부드러운 링 하나만 남겨서 시안(C)의
-        # 담백한 느낌에 더 가깝게 되돌린다.
+        # A thin edge-light replaces the former broad neon halo.
         _rounded_rect(
             canvas,
             body_x0 - 4, body_y0 - 4, body_x1 + 4, body_y1 + 4,
-            radius=radius + 4, fill="", outline=_lighten(outline, 0.4), width=1,
+            radius=radius + 2, fill="", outline=_lighten(outline, 0.22), width=1,
         )
 
     _rounded_rect(canvas, body_x0, body_y0, body_x1, body_y1, radius=radius, fill=bg, outline=outline, width=2)
+    canvas.create_line(body_x0 + radius, body_y0 + 1, body_x1 - radius, body_y0 + 1,
+                       fill=_lighten(bg, 0.18), width=1)
 
     ex, ey, dx, dy = _tail_exit_point(body_x0, body_y0, body_w, body_h, angle_rad)
     base_half = 7
@@ -633,6 +667,10 @@ def _draw_speech_shell(
     p2x, p2y = ex - perp_x * base_half, ey - perp_y * base_half
     apex_x, apex_y = ex + dx * tail_len, ey + dy * tail_len
     canvas.create_polygon(p1x, p1y, apex_x, apex_y, p2x, p2y, fill=bg, outline=outline)
+    canvas.create_oval(
+        apex_x - 4, apex_y - 4, apex_x + 4, apex_y + 4,
+        fill=bg, outline=_lighten(outline, 0.35), width=1,
+    )
     canvas.create_oval(apex_x - 3, apex_y - 3, apex_x + 3, apex_y + 3, fill=bg, outline=outline)  # 꼬리 끝을 둥글게
     return int(total_w), int(total_h), int(body_x0), int(body_y0)
 
@@ -829,13 +867,14 @@ def draw_speech_bubble(
         _AVAIL_LOGGED = True
         log.info("[bubble] draw_speech_bubble 첫 호출 — _HTML_AVAILABLE=%s", _HTML_AVAILABLE)
     used_html = False
+    code_bg, code_fg = code_tokens(bg, fg, outline)
     if _HTML_AVAILABLE:
-        sized = render_rich_html(canvas, text or " ", max_width, font, fg, bg, outline, CODE_BG, CODE_FG, fixed_body_w)
+        sized = render_rich_html(canvas, text or " ", max_width, font, fg, bg, outline, code_bg, code_fg, fixed_body_w)
         if sized is not None:
             body_w, body_h = sized
             used_html = True
     if not used_html:
-        body_w, body_h = render_rich_text(canvas, text or " ", max_width, font, fg, bg, outline, CODE_BG, CODE_FG, fixed_body_w)
+        body_w, body_h = render_rich_text(canvas, text or " ", max_width, font, fg, bg, outline, code_bg, code_fg, fixed_body_w)
 
     needs_scroll = (not used_html) and (max_body_h is not None) and (body_h > max_body_h)
     if max_body_h is not None:
@@ -887,6 +926,13 @@ def draw_input_shell(
     total_w, total_h, _body_x0, _body_y0 = _place_bubble_image(
         canvas, max(body_w, MIN_BODY_W), max(body_h, MIN_BODY_H), angle_rad, bg, outline, radius=10
     )
+    # The compact send beacon is deliberately Canvas-native: it supplies a
+    # strong visual endpoint while Enter remains the accessible send action.
+    cx, cy = total_w - TAIL_REACH - 17, total_h / 2
+    canvas.create_oval(cx - 11, cy - 11, cx + 11, cy + 11,
+                       fill=_lighten(outline, -0.20), outline=outline, width=1)
+    canvas.create_line(cx - 3, cy - 4, cx + 5, cy, cx - 3, cy + 4,
+                       fill=_lighten(bg, 0.72), width=2, capstyle=tk.ROUND, joinstyle=tk.ROUND)
     draw_resize_grip(canvas, total_w, total_h, color=outline, corner=grip_corner, margin=TAIL_REACH)
     return total_w, total_h
 
@@ -932,17 +978,17 @@ def draw_thought_bubble(
 
     canvas.config(width=total_w, height=total_h)
 
-    bumps = max(4, min(8, int(body_w / 24)))
-    r = body_h / 2
-    span = (body_x1 - body_x0) - 2 * r
-    step = span / max(bumps - 1, 1) if bumps > 1 else 0
-    for i in range(bumps):
-        cx = body_x0 + r + i * step
-        canvas.create_oval(cx - r, body_y0, cx + r, body_y1, fill=bg, outline=outline)
-    canvas.create_rectangle(
-        body_x0 + r * 0.3, body_y0 + r * 0.3, body_x1 - r * 0.3, body_y1 - r * 0.3,
-        fill=bg, outline="",
-    )
+    # Thought/tool status is deliberately a low-contrast telemetry ribbon,
+    # distinct from the premium response panel without changing its placement
+    # or tail geometry contract.
+    _rounded_rect(canvas, body_x0 + 1, body_y0 + 2, body_x1 + 1, body_y1 + 2,
+                  radius=12, fill="", outline=_lighten(outline, -0.35), width=2)
+    _rounded_rect(canvas, body_x0, body_y0, body_x1, body_y1,
+                  radius=12, fill=bg, outline=outline, width=1)
+    canvas.create_line(body_x0 + 14, body_y0 + 2, body_x1 - 14, body_y0 + 2,
+                       fill=_lighten(bg, 0.16), width=1)
+    canvas.create_line(body_x0 + 10, body_y0 + 11, body_x0 + 10, body_y1 - 11,
+                       fill=tool_fg, width=2)
 
     ex, ey, dx, dy = _tail_exit_point(body_x0, body_y0, body_w, body_h, angle_rad)
     cx, cy = ex, ey

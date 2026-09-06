@@ -23,4 +23,5 @@ from .curiosity import (
     render_curiosity_prompt,
 )
 from .reflection import apply_reflection, prepare_reflection_context, run_reflection
+from .evidence import IdentityEvidence, get_self_reflection_evidence
 

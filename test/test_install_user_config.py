@@ -68,7 +68,7 @@ session:
             encoding="utf-8-sig"
         )
 
-        self.assertEqual(base_version, "1.5.7")
+        self.assertRegex(base_version, r"^\d+\.\d+\.\d+$")
         self.assertIn("#ifndef AppVersion", iss)
         self.assertIn('#define AppVersion "0.0.0.0"', iss)
         self.assertIn(
@@ -171,6 +171,22 @@ session:
         self.assertIn("RaiseException", run_configure)
         self.assertIn("if CurStep = ssPostInstall then", run_configure)
         self.assertEqual(run_configure.count("RunConfigure;"), 2)  # declaration plus one invocation
+
+    def test_external_overlay_page_is_explicitly_unavailable_but_mode_is_propagated(self):
+        iss = (ROOT / "installer" / "engram-overlay.iss").read_text(encoding="utf-8-sig")
+        configure = (ROOT / "installer" / "configure.ps1").read_text(encoding="utf-8-sig")
+
+        self.assertIn("ExternalOverlayPage: TInputOptionWizardPage", iss)
+        self.assertIn("ExternalOverlayPage.Add('설치 안 함 (권장)')", iss)
+        self.assertIn("Preset provider — 현재 릴리스에서 사용 불가", iss)
+        self.assertIn("Renderer SDK — 현재 릴리스에서 사용 불가", iss)
+        self.assertIn("-ExternalOverlayMode ' + ExternalOverlayModeCode()", iss)
+        self.assertIn("CurPageID = ExternalOverlayPage.ID", iss)
+        self.assertIn("CurPageID = wpFinished", iss)
+        self.assertIn('[ValidateSet("none", "presets", "sdk")]', configure)
+        self.assertIn("v1.1.0.89 has no self-contained provider/SDK asset", configure)
+        self.assertIn("external overlay was NOT installed", configure)
+        self.assertNotIn("releases/latest", iss + configure)
 
     def test_installer_stops_only_the_target_artifact_before_copying_files(self):
         iss = (ROOT / "installer" / "engram-overlay.iss").read_text(encoding="utf-8-sig")

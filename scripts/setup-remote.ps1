@@ -43,7 +43,9 @@ param(
     # 원격 파이썬 경로를 직접 지정한다. 비대화형 SSH 는 ~/.bashrc 를 읽지 않으므로
     # conda 로 설치한 파이썬은 PATH 에 안 잡힌다. 자동 탐색이 실패하면 이걸 쓴다.
     #   예: -RemotePython /opt/conda/bin/python
-    [string]$RemotePython = ""
+    [string]$RemotePython = "",
+    [string]$ResultLog = "",
+    [string]$ProofNonce = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -62,10 +64,17 @@ try {
     $OutputEncoding = $Utf8NoBom
 } catch {}
 
-function Step($m) { Write-Host "`n==> $m" -ForegroundColor Cyan }
-function Ok($m)   { Write-Host "  [OK] $m" -ForegroundColor Green }
-function Warn($m) { Write-Host "  [!] $m"  -ForegroundColor Yellow }
-function Die($m)  { Write-Host "  [X] $m"  -ForegroundColor Red; exit 1 }
+function Write-ResultLog($m) {
+    if (-not $ResultLog) { return }
+    $safe = ([string]$m) -replace '(?i)Bearer\s+[^\s"'']+', 'Bearer [REDACTED]'
+    try { Add-Content -LiteralPath $ResultLog -Value $safe -Encoding utf8 } catch {}
+}
+function Step($m) { Write-Host "`n==> $m" -ForegroundColor Cyan; Write-ResultLog "==> $m" }
+function Ok($m)   { Write-Host "  [OK] $m" -ForegroundColor Green; Write-ResultLog "[OK] $m" }
+function Warn($m) { Write-Host "  [!] $m"  -ForegroundColor Yellow; Write-ResultLog "[!] $m" }
+function Die($m)  { Write-Host "  [X] $m"  -ForegroundColor Red; Write-ResultLog "[X] $m"; exit 1 }
+if (-not $ProofNonce) { $ProofNonce = [guid]::NewGuid().ToString("N") }
+if ($ProofNonce -notmatch '^[A-Za-z0-9_-]{16,64}$') { Die "invalid provisioning proof nonce" }
 
 # ── python 찾기 (yaml 파싱용) ────────────────────────────────────────────────
 if (-not $Python) {
@@ -134,6 +143,12 @@ if (-not $TokenName) {
 }
 if ($names -notcontains $TokenName) { Die "그런 이름의 토큰이 없다: $TokenName (있는 것: $($names -join ', '))" }
 $scope = (($rows | Where-Object { $_ -like "$TokenName`t*" }) -split "`t")[1]
+
+# Capture an append-only audit marker *before* the eventual tools/list call.
+# A merely recent unrelated entry is not proof that this selected principal
+# reached MCP through this setup invocation.
+$auditPath = Join-Path $env:USERPROFILE ".engram\logs\remote-audit.jsonl"
+$auditBeforeLines = if (Test-Path $auditPath) { @(Get-Content $auditPath).Count } else { 0 }
 
 # ── 원격 포트 결정 ───────────────────────────────────────────────────────────
 if ($RemotePort -le 0) {
@@ -275,13 +290,16 @@ if ($probeText -notmatch $posixRe) {
     # 분류돼 AppLocker/EDR 이 차단하는 경우가 흔하고, 실제로 "액세스가 거부되었습니다"
     # 로 막혔다. cmd 의 where / if exist 만 쓰면 그 표면을 건드리지 않는다.
     # %OS% 는 로케일과 무관하게 Windows_NT 를 낸다.
-    $winProbe = 'echo ENGRAM_WIN=%OS%' `
+    $winProbeInner = 'echo ENGRAM_WIN=%OS%' `
         + '& where python python3 py 2>nul' `
         + '& if exist "%USERPROFILE%\miniconda3\python.exe" echo %USERPROFILE%\miniconda3\python.exe' `
         + '& if exist "%USERPROFILE%\anaconda3\python.exe" echo %USERPROFILE%\anaconda3\python.exe' `
         + '& if exist "%USERPROFILE%\miniforge3\python.exe" echo %USERPROFILE%\miniforge3\python.exe' `
         + '& if exist "C:\ProgramData\miniconda3\python.exe" echo C:\ProgramData\miniconda3\python.exe' `
         + '& if exist "C:\ProgramData\Anaconda3\python.exe" echo C:\ProgramData\Anaconda3\python.exe'
+    # The SSH account can have PowerShell as its login shell.  Send cmd syntax
+    # only through an explicit cmd.exe wrapper, never to the login shell.
+    $winProbe = 'cmd.exe /d /s /c "' + $winProbeInner + '"'
 
     $winOut = ($(ssh -o ConnectTimeout=15 $Target $winProbe 2>&1) | Out-String)
     if ($winOut -notmatch '(?m)^ENGRAM_WIN=Windows_NT') {
@@ -304,7 +322,10 @@ if ($probeText -notmatch $posixRe) {
     $allPy = @([regex]::Matches($winOut, '(?m)^\s*([A-Za-z]:\\[^\r\n]*?\.exe)\s*$') |
         ForEach-Object { $_.Groups[1].Value.Trim() } | Select-Object -Unique)
     $realPy = @($allPy | Where-Object { $_ -notmatch '\\WindowsApps\\' })
-    $pick = if ($realPy.Count -gt 0) { $realPy[0] } elseif ($allPy.Count -gt 0) { $allPy[0] } else { "" }
+    # Prefer the Windows py launcher: it selects the current installed Python
+    # (3.12 on the validated host) instead of an arbitrary old PythonNN path.
+    $launchers = @($realPy | Where-Object { $_ -match '\\py\.exe$' })
+    $pick = if ($launchers.Count -gt 0) { $launchers[0] } elseif ($realPy.Count -gt 0) { $realPy[0] } elseif ($allPy.Count -gt 0) { $allPy[0] } else { "" }
 
     $probeText = "ENGRAM_PROBE=Windows`nOS=Windows`nPY=$pick`nCAND=$($allPy -join ' ')`nHEALTH=SKIPPED`n"
     $remoteIsWin = $true
@@ -348,14 +369,14 @@ if (-not $SkipTunnelCheck) {
 # 스크립트는 base64 로 argv 에 실어 보내고(비밀 아님), 토큰만 stdin 으로 넘긴다.
 Step "원격 ~/.claude.json 에 등록"
 $registerPy = @"
-import json, pathlib, sys
+import json, pathlib, shutil, sys
 # BOM(U+FEFF)·개행·공백을 모두 제거한다. PowerShell 이 파이프 인코딩에 따라
 # 선두에 BOM 을 붙일 수 있고, 그대로 두면 HTTP 헤더 인코딩(latin-1)에서 터진다.
 tok = sys.stdin.read().strip().lstrip("﻿").strip()
 if not tok:
     print("EMPTY_TOKEN"); raise SystemExit(1)
-if not tok.isascii():
-    print("BAD_TOKEN non-ascii chars: " + repr(tok[:12])); raise SystemExit(1)
+if not all(ord(ch) < 128 for ch in tok):
+    print("BAD_TOKEN non-ascii"); raise SystemExit(1)
 
 # 터널을 먼저 확인한다 — 닿지 않으면 설정 파일을 건드리지 않고 중단한다.
 import urllib.request
@@ -371,7 +392,11 @@ p = pathlib.Path.home() / ".claude.json"
 try:
     cfg = json.loads(p.read_text(encoding="utf-8")) if p.exists() else {}
 except Exception:
-    cfg = {}
+    print("CLAUDE=PARSE_FAIL"); raise SystemExit(1)
+if not isinstance(cfg, dict):
+    print("CLAUDE=NOT_OBJECT"); raise SystemExit(1)
+if "mcpServers" in cfg and not isinstance(cfg["mcpServers"], dict):
+    print("CLAUDE=MCP_SERVERS_NOT_OBJECT"); raise SystemExit(1)
 desired = {
     "type": "http",
     "url": "http://127.0.0.1:$RemotePort/mcp",
@@ -389,7 +414,13 @@ elif "$SkipRegisterFlag" == "1":
     print("REGISTER=SKIPPED-DIFFERS")
 else:
     cfg.setdefault("mcpServers", {})["engram"] = desired
-    p.write_text(json.dumps(cfg, indent=2, ensure_ascii=False), encoding="utf-8")
+    if p.exists():
+        backup = p.with_name(p.name + ".engram-bak")
+        if not backup.exists(): backup.write_bytes(p.read_bytes())
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_name(p.name + ".engram-tmp")
+    tmp.write_text(json.dumps(cfg, indent=2, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(p)
     try:
         p.chmod(0o600)
     except Exception:
@@ -399,6 +430,53 @@ else:
 # 같은 호출 안에서 되읽어 검증한다 — ssh 를 또 부르면 비밀번호를 또 묻는다.
 back = json.loads(p.read_text(encoding="utf-8"))
 print("URL=" + back.get("mcpServers", {}).get("engram", {}).get("url", "NONE"))
+print("PROVIDER=claude-code registered")
+
+# Codex uses the documented native TOML MCP table, but must not be reported as
+# configured on hosts where the Codex client is not installed. The token arrived only on
+# stdin and is written only to this protected remote client config; never to a
+# local state record, argv, UI, or log.  Preserve unrelated TOML verbatim and
+# refuse a malformed file rather than attempting a lossy rewrite.
+codex_path = pathlib.Path.home() / ".codex" / "config.toml"
+if not shutil.which("codex"):
+    print("PROVIDER=codex unavailable")
+else:
+ try:
+    codex_raw = codex_path.read_text(encoding="utf-8") if codex_path.exists() else ""
+    if codex_raw:
+        try:
+            import tomllib
+            tomllib.loads(codex_raw)
+        except Exception:
+            print("CODEX=PARSE_FAIL")
+            raise SystemExit(1)
+    # Remove the managed table and every nested managed subtable, retaining
+    # all other user tables byte-for-byte.
+    kept, managed = [], False
+    for line in codex_raw.splitlines(keepends=True):
+        stripped = line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            managed = stripped[1:-1] == "mcp_servers.engram" or stripped[1:-1].startswith("mcp_servers.engram.")
+        if not managed: kept.append(line)
+    codex_raw = "".join(kept).rstrip()
+    codex_entry = '\n\n[mcp_servers.engram]\nurl = "http://127.0.0.1:$RemotePort/mcp"\nhttp_headers = { Authorization = "Bearer ' + tok + '" }\n'
+    desired_raw = codex_raw + codex_entry
+    if desired_raw != (codex_path.read_text(encoding="utf-8") if codex_path.exists() else ""):
+        if codex_path.exists():
+            codex_backup = codex_path.with_name(codex_path.name + ".engram-bak")
+            if not codex_backup.exists(): codex_backup.write_bytes(codex_path.read_bytes())
+        codex_path.parent.mkdir(parents=True, exist_ok=True)
+        codex_tmp = codex_path.with_name(codex_path.name + ".engram-tmp")
+        with open(str(codex_tmp), "w", encoding="utf-8", newline="\n") as handle: handle.write(desired_raw)
+        codex_tmp.replace(codex_path)
+        try: codex_path.chmod(0o600)
+        except Exception: pass
+    codex_back = codex_path.read_text(encoding="utf-8")
+    if 'http://127.0.0.1:$RemotePort/mcp' not in codex_back or 'Authorization = "Bearer ' + tok + '"' not in codex_back: raise RuntimeError("Codex config readback failed")
+    print("PROVIDER=codex registered")
+ except SystemExit: raise
+ except Exception as exc:
+    print("CODEX=FAIL %s" % exc); raise SystemExit(1)
 
 # 등록한 설정 그대로 실제 호출까지 해본다.
 import urllib.request
@@ -409,6 +487,7 @@ req = urllib.request.Request(
     headers={
         "Content-Type": "application/json",
         "Accept": "application/json, text/event-stream",
+        "X-Engram-Provision-Proof": "$ProofNonce",
         **s.get("headers", {}),
     },
 )
@@ -469,8 +548,10 @@ for t in d.get("tokens") or []:
 # 파이썬 코드는 전부 그 안에 들어 있으므로 따옴표 중첩이 발생하지 않는다.
 #   POSIX  : '<path>' -c "..."      (경로에 공백이 있어도 안전)
 #   Windows: "<path>" -c "..."      (cmd.exe 는 작은따옴표를 인용으로 안 본다)
-if ($remoteIsWin) {
-    $remoteCmd = "`"$remotePy`" -c `"import base64;exec(base64.b64decode('$b64'))`""
+    if ($remoteIsWin) {
+        # Explicit cmd wrapper also makes a PowerShell-default SSH account
+        # invoke the selected Python executable rather than parse it as text.
+        $remoteCmd = 'cmd.exe /d /s /c """{0}"" -c ""import base64;exec(base64.b64decode(''{1}''))"""' -f $remotePy, $b64
 } else {
     $remoteCmd = "'$remotePy' -c `"import base64;exec(base64.b64decode('$b64'))`""
 }
@@ -533,11 +614,19 @@ if ($SkipProvision) {
     Ok "보낼 skill: $($skillList -join ', ')"
 
     if ($remoteIsWin) {
-        $provCmd = "`"$remotePy`" -c `"import base64;exec(base64.b64decode('$instB64'))`""
+        # Windows command lines cap at 32767 chars.  The installer is large,
+        # so keep argv short and frame installer+payload as ASCII stdin.
+        $bootB64 = (& $Python -m $provModule --emit framed-bootstrap) | Out-String
+        if ($LASTEXITCODE -ne 0) { Die "Windows provision bootstrap render failed" }
+        $bootB64 = $bootB64.Trim()
+        $provCmd = 'cmd.exe /d /s /c """{0}"" -c ""import base64;exec(base64.b64decode(''{1}''))"""' -f $remotePy, $bootB64
+        $provFrame = '{"installer":"' + $instB64 + '","payload":"' + $payloadB64 + '"}'
+        if ($provCmd.Length -ge 32767) { Die "Windows provision bootstrap command exceeds command-line limit" }
     } else {
         $provCmd = "'$remotePy' -c `"import base64;exec(base64.b64decode('$instB64'))`""
+        $provFrame = $payloadB64
     }
-    $provRaw = ($payloadB64 | ssh $Target $provCmd 2>&1 | Out-String).Trim()
+    $provRaw = ($provFrame | ssh $Target $provCmd 2>&1 | Out-String).Trim()
 
     if ($provRaw -notmatch "PROVISIONED") {
         Die @"
@@ -546,15 +635,6 @@ if ($SkipProvision) {
         $($provRaw -replace "`n", "`n        ")
 "@
     }
-    # 성공한 호스트를 기록한다. 이 기록이 있는 호스트만 이후 터널이 붙을 때
-    # overlay 가 자동으로 배치를 갱신한다(내용이 바뀐 경우에만 ssh 를 띄운다).
-    $recorded = (& $Python -m $provModule --emit record --host $Target --remote-python $remotePy --remote-os $remoteOs) | Out-String
-    if ($recorded -match "RECORDED") {
-        Ok "자동 갱신 등록 — 이후 터널이 붙을 때 overlay 가 알아서 최신으로 맞춘다"
-    } else {
-        Warn "자동 갱신 등록 실패 — 앞으로도 이 스크립트를 수동으로 돌려야 한다"
-    }
-
     foreach ($line in ($provRaw -split "`n")) {
         $line = $line.Trim()
         if ($line -match '^SKILL=(.+)$')    { Ok "skill  $($Matches[1])" }
@@ -572,7 +652,6 @@ if ($SkipProvision) {
 # ── 검증 ─────────────────────────────────────────────────────────────────────
 # 원격 호출도 위 등록과 같은 ssh 세션에서 이미 수행됐다(PROBE=). 여기서 결과만 판정한다.
 Step "검증"
-$auditPath = Join-Path $env:USERPROFILE ".engram\logs\remote-audit.jsonl"
 $probe = if ($mProbe.Success) { $mProbe.Groups[1].Value.Trim() } else { "" }
 if ($probe -notmatch '^200\s') {
     Die @"
@@ -587,23 +666,38 @@ Ok "원격 tools/list → HTTP 200 (도구 $toolCount 개)"
 # 그 요청이 이 머신의 engram 까지 왔다는 보장이 안 된다.
 # 방금 호출이 마지막 줄로 남았는지(최근 2분 이내) 확인한다. ts 는 UTC.
 if (-not (Test-Path $auditPath)) {
-    Warn "감사 로그 파일이 없다: $auditPath"
+    Die "로컬 감사 로그 파일이 없다: $auditPath (tools/list 200 뒤의 fresh audit 증거가 필요)"
 } else {
-    $last = Get-Content $auditPath -Tail 1
-    $ts = [regex]::Match($last, '"ts":\s*"([^"]+)"')
-    $fresh = $false
-    if ($ts.Success) {
+    $newAuditRows = @(Get-Content $auditPath | Select-Object -Skip $auditBeforeLines)
+    $matchedAudit = $false
+    foreach ($row in $newAuditRows) {
         try {
-            $age = (Get-Date).ToUniversalTime() - [datetime]::Parse($ts.Groups[1].Value)
-            $fresh = ($age.TotalSeconds -lt 120)
+            $entry = $row | ConvertFrom-Json
+            $age = (Get-Date).ToUniversalTime() - [datetime]::Parse([string]$entry.ts)
+            # The streamable transport records the JSON-RPC method as the tool
+            # field.  The nonce distinguishes this probe from concurrent calls
+            # made with the same named principal on another remote host.
+            if ($entry.principal -eq $TokenName -and $entry.action -eq "allow" -and $entry.path -eq "/mcp" -and $entry.tool -eq "tools/list" -and $entry.detail -match [regex]::Escape("provision_nonce=$ProofNonce") -and $age.TotalSeconds -ge 0 -and $age.TotalSeconds -lt 120) {
+                $matchedAudit = $true
+                break
+            }
         } catch {}
     }
-    if ($fresh) {
-        Ok "로컬 감사 로그에 방금 호출이 기록됨"
-        Write-Host "       $last" -ForegroundColor DarkGray
+    if ($matchedAudit) {
+        Ok "로컬 감사 로그에 선택 토큰의 방금 tools/list 호출이 기록됨"
     } else {
-        Warn "감사 로그 마지막 줄이 방금 것이 아니다 — 확인 필요: $auditPath"
-        Write-Host "       $last" -ForegroundColor DarkGray
+        Die "선택 토큰의 새 tools/list 감사 기록이 없다: $auditPath"
+    }
+}
+
+if (-not $SkipProvision) {
+    # First-provision success is durable only after both the remote tools/list
+    # HTTP 200 and this fresh local audit proof.  The record contains no token.
+    $recorded = (& $Python -m core.integrations.remote_provision --emit record --host $Target --remote-python $remotePy --remote-os $remoteOs) | Out-String
+    if ($recorded -match "RECORDED") {
+        Ok "자동 갱신 등록 — 이후 터널이 붙을 때 overlay 가 알아서 최신으로 맞춘다"
+    } else {
+        Die "자동 갱신 등록 실패 — 성공 배치 기록을 남기지 못했다"
     }
 }
 

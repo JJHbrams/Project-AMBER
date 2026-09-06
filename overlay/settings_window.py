@@ -9,9 +9,12 @@ from __future__ import annotations
 import ctypes
 import os
 import shutil
+import secrets
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import tkinter as tk
 import tkinter.ttk as ttk
 import webbrowser
@@ -43,7 +46,8 @@ from overlay.character_assets import (
     resolve_bundled_reaction_sheet,
     resolve_reaction_pack,
 )
-from overlay.external_renderer import InstalledRenderer, apply_renderer_selection, discover_renderers
+from overlay.external_renderer import InstalledRenderer, apply_renderer_selection, discover_renderers, legacy_renderer_diagnostic
+from overlay.remote_tunnel import sanitize_for_display
 from overlay.cli_capabilities import effort_key, efforts as provider_efforts, model_key, models as provider_models, validate as validate_cli
 from core.identity import get_persona_db_baseline, set_persona_baseline
 from core.config.runtime_config import normalize_policy_guidance_level
@@ -86,6 +90,21 @@ def open_overlay_event_api_manual(opener: Callable[[str], object] | None = None)
     """Open the installed manual page; injected opener keeps this UI action testable."""
     opener = opener or webbrowser.open
     return opener(OVERLAY_EVENT_API_MANUAL_URL)
+
+
+def _manual_ssh_key_available(host: str) -> bool:
+    """A noninteractive preflight; never falls back to password auth."""
+    try:
+        probe = subprocess.run(
+            # `exit 0` is understood by POSIX sh and Windows cmd; `true` is
+            # not a Windows command and would misdiagnose a valid key.
+            ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", host, "exit 0"],
+            capture_output=True, text=True, timeout=15,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        return probe.returncode == 0
+    except Exception:
+        return False
 _POLICY_LEVEL_VALUE_TO_DISPLAY = {
     value: display for display, value in _POLICY_LEVEL_DISPLAY_TO_VALUE.items()
 }
@@ -585,6 +604,7 @@ def _audit_tail(n: int) -> str:
 def open_settings(
     root: tk.Tk,
     on_saved: Callable[[], None] | None = None,
+    on_closed: Callable[[], None] | None = None,
     on_get_ollama_models: Callable[[], list[str]] | None = None,
     on_reload_ollama_models: Callable[[], None] | None = None,
     tunnels=None,
@@ -599,6 +619,7 @@ def open_settings(
     win = _SettingsWindow(
         root,
         on_saved=on_saved,
+        on_closed=on_closed,
         on_get_ollama_models=on_get_ollama_models,
         on_reload_ollama_models=on_reload_ollama_models,
         tunnels=tunnels,
@@ -611,18 +632,21 @@ class _SettingsWindow:
         self,
         root: tk.Tk,
         on_saved: Callable[[], None] | None = None,
+        on_closed: Callable[[], None] | None = None,
         on_get_ollama_models: Callable[[], list[str]] | None = None,
         on_reload_ollama_models: Callable[[], None] | None = None,
         tunnels=None,
     ):
         self._root = root
         self._on_saved = on_saved
+        self._on_closed = on_closed
+        self._closed = False
         self._on_get_ollama_models = on_get_ollama_models
         self._on_reload_ollama_models = on_reload_ollama_models
         self._tunnels = tunnels  # overlay.remote_tunnel.TunnelManager | None
         self._remote_after_id: str | None = None
         self._toast_after_id: str | None = None
-        self._renderer_restart_required = False
+        self._renderer_selection_changed = False
 
         self.window = tk.Toplevel(root)
         self.window._is_settings_window = True
@@ -733,6 +757,12 @@ class _SettingsWindow:
             self._persona_tip_frame.pack_forget()
 
     def _close(self):
+        if self._closed:
+            return
+        self._closed = True
+        # A hidden Settings window must never leave a credential-bearing manual
+        # first-provision intent that a later automatic reconnect can consume.
+        self._pending_manual_provision.clear()
         self._cancel_grid_eyedropper()
         if self._remote_after_id:
             try:
@@ -744,6 +774,12 @@ class _SettingsWindow:
             self.window.destroy()
         except Exception:
             pass
+        finally:
+            if self._on_closed is not None:
+                try:
+                    self._on_closed()
+                except Exception:
+                    pass
 
     def _build_overlay_tab(self, PAD: dict):
         f = self._tab_overlay
@@ -757,13 +793,13 @@ class _SettingsWindow:
         )
         self._custom_overlay_help_button.grid(row=0, column=3, sticky="w", padx=(0, 8), pady=(5, 0))
 
-        # Selection is manifest-only: Settings never accepts an arbitrary command.
+        # Selection is registry-only: Settings never accepts an arbitrary command.
         renderer_box = ttk.LabelFrame(f, text="외부 오버레이")
         renderer_box.grid(row=1, column=0, columnspan=5, sticky="ew", padx=8, pady=(4, 4))
         renderer_box.columnconfigure(1, weight=1)
         self._renderer_var = tk.StringVar(value="기본 오버레이 사용")
         self._renderer_mode_var = tk.StringVar(value="observer")
-        self._renderer_status_var = tk.StringVar(value="설치된 manifest를 확인하는 중입니다.")
+        self._renderer_status_var = tk.StringVar(value="연결된 외부 오버레이를 확인하는 중입니다.")
         self._renderers: dict[str, InstalledRenderer | None] = {}
         self._renderer_existing_invalid = False
         ttk.Label(renderer_box, text="오버레이:").grid(row=0, column=0, sticky="w", **PAD)
@@ -1547,6 +1583,11 @@ class _SettingsWindow:
         )
         self._tunnel_add_combo.pack(side="left")
         ttk.Button(bar, text="추가", command=self._add_tunnel).pack(side="left", padx=(4, 8))
+        self._provision_token_var = tk.StringVar()
+        self._provision_token_combo = ttk.Combobox(
+            bar, textvariable=self._provision_token_var, width=24, state="readonly"
+        )
+        self._provision_token_combo.pack(side="left", padx=(0, 6))
         ttk.Button(bar, text="제거", command=self._remove_tunnel).pack(side="left")
         ttk.Button(bar, text="연결", command=lambda: self._tunnel_action("start")).pack(
             side="left", padx=(8, 0)
@@ -1574,6 +1615,9 @@ class _SettingsWindow:
         )
 
         self._tunnel_rows: list[str] = []
+        self._provision_tokens: dict[str, str] = {}
+        self._pending_manual_provision: dict[str, str] = {}
+        self._provision_status: dict[str, str] = {}
         self._load_remote_tab()
         self._refresh_remote_status()
 
@@ -1596,6 +1640,27 @@ class _SettingsWindow:
                     self._tunnel_rows.append(host)
         self._redraw_tunnel_tree()
         self._token_list_var.set(self._token_summary())
+        self._load_provision_tokens()
+
+    def _load_provision_tokens(self):
+        """Expose token name/scope for selection; token values never enter Tk."""
+        self._provision_tokens = {}
+        try:
+            data = yaml.safe_load((Path.home() / ".engram" / "mcp-tokens.yaml").read_text(encoding="utf-8")) or {}
+        except Exception:
+            data = {}
+        for item in data.get("tokens") or []:
+            if not isinstance(item, dict) or not str(item.get("token") or "").strip():
+                continue
+            name = str(item.get("name") or "").strip()
+            if name:
+                self._provision_tokens[f"{name}  (scope={item.get('scope') or 'global'})"] = name
+        choices = list(self._provision_tokens)
+        self._provision_token_combo["values"] = choices
+        if len(choices) == 1:
+            self._provision_token_var.set(choices[0])
+        elif choices:
+            self._provision_token_var.set("")
 
     def _token_summary(self) -> str:
         """토큰 name/scope 만 보여준다. 값은 절대 UI 에 싣지 않는다."""
@@ -1659,6 +1724,7 @@ class _SettingsWindow:
             return
         if host in self._tunnel_rows:
             self._tunnel_rows.remove(host)
+        self._pending_manual_provision.pop(host, None)
         if self._tunnels:
             try:
                 self._tunnels.remove(host)
@@ -1678,8 +1744,18 @@ class _SettingsWindow:
             return
         try:
             if action == "start":
+                from core.integrations.remote_provision import load_records
+                needs_first_provision = not isinstance(load_records().get(host), dict)
+                token_name = self._provision_tokens.get(self._provision_token_var.get())
+                if needs_first_provision and not token_name:
+                    messagebox.showinfo("토큰 선택", "첫 배치에 사용할 토큰(name/scope)을 고르세요.", parent=self.window)
+                    return
+                if needs_first_provision:
+                    self._pending_manual_provision[host] = token_name
+                    self._provision_status[host] = "터널 UP 대기 중 — 첫 배치 예정"
                 self._tunnels.start(host)
             else:
+                self._pending_manual_provision.pop(host, None)
                 self._tunnels.stop(host)
         except Exception as e:
             messagebox.showerror("실패", str(e), parent=self.window)
@@ -1877,10 +1953,45 @@ class _SettingsWindow:
         for host in self._tunnel_rows:
             if not self._tunnel_tree.exists(host):
                 continue
-            self._tunnel_tree.set(host, "state", _format_tunnel_state(states.get(host)))
+            state_text = _format_tunnel_state(states.get(host))
+            if host in self._provision_status:
+                state_text += " · " + sanitize_for_display(self._provision_status[host], 120)
+            self._tunnel_tree.set(host, "state", state_text)
+            if getattr(states.get(host), "state", "") in {"auth_failed", "failed", "down"}:
+                self._pending_manual_provision.pop(host, None)
+            if host in self._pending_manual_provision and getattr(states.get(host), "state", "") == "up":
+                token_name = self._pending_manual_provision.pop(host)
+                self._provision_status[host] = "첫 배치 실행 중"
+                threading.Thread(
+                    target=self._run_manual_provision,
+                    args=(host, token_name), daemon=True, name=f"remote-provision-{host}",
+                ).start()
 
         self._audit_var.set(_audit_tail(12))
         self._remote_after_id = self.window.after(2000, self._refresh_remote_status)
+
+    def _run_manual_provision(self, host: str, token_name: str) -> None:
+        """First provisioning requires independently usable SSH key auth."""
+        script = Path(__file__).resolve().parents[1] / "scripts" / "setup-remote.ps1"
+        if not _manual_ssh_key_available(host):
+            self._provision_status[host] = "첫 배치 보류 — SSH 키 등록 필요"
+            return
+        safe_host = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in host)[:80] or "host"
+        log_dir = Path.home() / ".engram" / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        result_log = log_dir / f"remote-provision-{safe_host}-{int(time.time())}.log"
+        proof_nonce = secrets.token_urlsafe(18)
+        try:
+            process = subprocess.Popen(
+                ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script),
+                 "-Target", host, "-TokenName", token_name, "-ResultLog", str(result_log),
+                 "-ProofNonce", proof_nonce],
+                creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0),
+            )
+            exit_code = process.wait(timeout=600)
+            self._provision_status[host] = "첫 배치 완료" if exit_code == 0 else f"첫 배치 실패 — 로그 {result_log.name} 확인"
+        except Exception:
+            self._provision_status[host] = f"첫 배치 실패 — 로그 {result_log.name} 확인"
 
     def _build_global_tab(self, PAD: dict):
         f = self._tab_global
@@ -2575,8 +2686,8 @@ class _SettingsWindow:
                     self._on_saved()
                 except Exception:
                     pass
-            if getattr(self, "_renderer_restart_required", False):
-                self._renderer_status_var.set("외부 오버레이 선택 또는 모드가 저장되었습니다. 오버레이를 재시작해야 적용됩니다.")
+            if getattr(self, "_renderer_selection_changed", False):
+                self._renderer_status_var.set("외부 오버레이 선택 또는 모드가 즉시 적용되었습니다.")
             if self._persona_load_ok:
                 self._update_persona_banner()
                 self._show_toast(f"저장되었습니다. 슬라이더 고정 {pinned_count}/4, 나머지는 adaptive로 유지됩니다.")
@@ -2602,17 +2713,18 @@ class _SettingsWindow:
         self._renderer_combo["values"] = tuple(self._renderers)
         ext = _nested_get(cfg, ["overlay", "external_renderer"], {})
         selected = None
-        if isinstance(ext, dict) and isinstance(ext.get("command"), list):
+        if isinstance(ext, dict) and isinstance(ext.get("selected_renderer_id"), str):
             for label, renderer in self._renderers.items():
-                if renderer is not None and list(renderer.command) == ext["command"]:
+                if renderer is not None and renderer.id == ext["selected_renderer_id"]:
                     selected = label
                     self._renderer_mode_var.set(str(ext.get("mode", "observer")).lower())
                     break
         # The shipped default contains an empty external_renderer mapping; it is
         # equivalent to Built-in, not an unverified previous selection.
-        self._renderer_existing_invalid = bool(isinstance(ext, dict) and ext.get("command")) and selected is None
+        legacy = legacy_renderer_diagnostic(cfg)
+        self._renderer_existing_invalid = bool(legacy or (isinstance(ext, dict) and ext.get("selected_renderer_id") and selected is None))
         if self._renderer_existing_invalid:
-            label = "현재 설정 (설치 또는 manifest 검증 필요)"
+            label = "현재 설정 (v2 연결 또는 재선택 필요)"
             self._renderer_combo["values"] = (*self._renderer_combo["values"], label)
             self._renderer_var.set(label)
             self._renderer_mode_combo["values"] = ()
@@ -2620,7 +2732,7 @@ class _SettingsWindow:
             self._renderer_var.set(selected or "기본 오버레이 사용")
             self._on_renderer_selected()
         diagnosis = f" · 사용 불가 {len(diagnostics)}개 ({diagnostics[0].reason})" if diagnostics else ""
-        self._renderer_status_var.set(f"설치된 외부 오버레이 {len(renderers)}개{diagnosis}. 변경 사항은 오버레이 재시작 후 적용됩니다.")
+        self._renderer_status_var.set(legacy or f"연결된 외부 오버레이 {len(renderers)}개{diagnosis}. 선택은 즉시 적용됩니다.")
 
     def _on_renderer_selected(self, _event=None) -> None:
         renderer = self._renderers.get(self._renderer_var.get())
@@ -2656,11 +2768,11 @@ class _SettingsWindow:
         previous_renderer = _nested_get(user, ["overlay", "external_renderer"], None)
 
         if self._renderer_existing_invalid:
-            raise ValueError("현재 외부 오버레이 설정을 검증할 수 없습니다. 기본 오버레이 사용 또는 설치된 외부 오버레이를 명시적으로 선택하세요.")
+            raise ValueError("현재 외부 오버레이 설정을 검증할 수 없습니다. 기본 오버레이 사용 또는 연결된 외부 오버레이를 명시적으로 선택하세요.")
         renderer = self._renderers.get(self._renderer_var.get())
         if not apply_renderer_selection(user, renderer, self._renderer_mode_var.get()):
-            raise ValueError("선택한 외부 오버레이 모드는 manifest에서 지원되지 않습니다.")
-        self._renderer_restart_required = previous_renderer != _nested_get(user, ["overlay", "external_renderer"], None)
+            raise ValueError("선택한 외부 오버레이 연결이 해당 모드를 지원하지 않습니다.")
+        self._renderer_selection_changed = previous_renderer != _nested_get(user, ["overlay", "external_renderer"], None)
 
         # ── 오버레이 탭 ──
         char_path = self._char_path_var.get().strip()

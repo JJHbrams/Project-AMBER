@@ -13,7 +13,8 @@ from overlay.character import (
     target_height_for_work_area,
 )
 from overlay.character_assets import (
-    ReactionPackResolution, _inline_state_template, inline_reaction_pack,
+    ReactionPackResolution, _inline_state_template, deterministic_hold_ms, inline_reaction_pack,
+    resolve_layered_timeline, resolve_timeline_position, rotation_value, timeline_nominal_total_ms,
     resolve_bundled_character_source, resolve_bundled_reaction_sheet, resolve_reaction_pack,
 )
 
@@ -25,6 +26,62 @@ STATES = {
 
 
 class SpriteManifestTests(unittest.TestCase):
+    def test_timeline_duration_boundaries_hold_wrap_and_completion(self):
+        looping = {"frames": (1, 2), "durations_ms": (100, 200), "loop": True, "hold_ms": 50}
+        self.assertTrue(resolve_timeline_position(looping, 49).holding)
+        self.assertEqual(resolve_timeline_position(looping, 49).frames, (1,))
+        self.assertEqual(resolve_timeline_position(looping, 50).frames, (2,))
+        self.assertFalse(resolve_timeline_position(looping, 249).holding)
+        wrapped = resolve_timeline_position(looping, 250)
+        self.assertEqual((wrapped.frames, wrapped.cycle), ((1,), 1))
+
+        completed = resolve_timeline_position({**looping, "loop": False}, 250)
+        self.assertEqual(completed.frames, (2,))
+        self.assertTrue(completed.completed)
+        self.assertTrue(completed.holding)
+
+    def test_timeline_hold_range_is_seeded_bounded_and_pure(self):
+        first = deterministic_hold_ms((25, 75), "seed-a")
+        self.assertEqual(first, deterministic_hold_ms((25, 75), "seed-a"))
+        self.assertLessEqual(25, first)
+        self.assertLessEqual(first, 75)
+        second = deterministic_hold_ms((25, 75), "seed-a", 1)
+        cycle_start = first + 200
+        self.assertEqual(resolve_timeline_position(
+            {"frames": (1, 2), "durations_ms": (999, 200), "loop": True, "hold_ms": (25, 75)},
+            cycle_start, seed="seed-a",
+        ).cycle, 1)
+        self.assertEqual(resolve_timeline_position(
+            {"frames": (1, 2), "durations_ms": (999, 200), "loop": True, "hold_ms": (25, 75)},
+            cycle_start + max(0, second - 1), seed="seed-a",
+        ).frames, (1,))
+
+    def test_nominal_total_uses_asymmetric_hold_range_midpoint(self):
+        self.assertEqual(timeline_nominal_total_ms({
+            "frames": (1, 2), "durations_ms": (999, 200), "hold_ms": (20, 80),
+        }), 250)
+
+    def test_layered_timeline_returns_composition_metadata(self):
+        position = resolve_layered_timeline({
+            "frames": (0, 1), "durations_ms": (100, 100), "loop": True,
+            "layers": ({"frames": (2, 3), "durations_ms": (50, 150), "loop": True},),
+        }, 75, seed=7)
+        self.assertEqual(position.frames, (0, 3))
+
+    def test_layered_option_completion_uses_max_nominal_total_when_any_layer_is_non_looping(self):
+        spec = {
+            "frames": (0, 1), "durations_ms": (100, 100), "loop": True,
+            "layers": ({"frames": (2, 3), "durations_ms": (50, 250), "loop": False},),
+        }
+        self.assertEqual(timeline_nominal_total_ms(spec), 200)
+        self.assertFalse(resolve_layered_timeline(spec, 299).completed)
+        self.assertTrue(resolve_layered_timeline(spec, 300).completed)
+
+    def test_rotation_is_deterministic_and_non_repeating(self):
+        values = [rotation_value((4, 5, 6), step, seed="stable") for step in range(8)]
+        self.assertEqual(values, [rotation_value((4, 5, 6), step, seed="stable") for step in range(8)])
+        self.assertTrue(all(left != right for left, right in zip(values, values[1:])))
+
     def test_bundled_engram_uses_declared_body_frames(self):
         pack = resolve_reaction_pack("engram")
         self.assertEqual(pack.states["default"]["frames"], (18,))
@@ -38,6 +95,11 @@ class SpriteManifestTests(unittest.TestCase):
         self.assertEqual(idle["transform"], "none")
         self.assertEqual(idle["vfx"], "twinkle")
         self.assertEqual(idle["selection"], "shuffle")
+
+    def test_undeclared_specific_tool_hint_falls_back_to_declared_generating(self):
+        model = SpriteStateMachine({"idle", "generating"}, started_ms=0)
+        self.assertTrue(model.handle_event({"kind": "tool_use", "tool_name": "web_search"}, 10))
+        self.assertEqual(model.state, "generating")
 
     def test_transient_manifest_timings_hold_their_final_state(self):
         states = resolve_reaction_pack("engram").states
@@ -252,6 +314,21 @@ states: {idle: {frames: [0]}}
 
 
 class SpriteCropTests(unittest.TestCase):
+    def test_layer_composition_keeps_cell_geometry_across_frames(self):
+        overlay = CharacterOverlay.__new__(CharacterOverlay)
+        overlay._profile = SimpleNamespace(reaction_pack=ReactionPackResolution(
+            source="inline", chroma_key="#00FF00", columns=2, rows=1,
+            cell_width=4, cell_height=8, crop_y_offset_px=0,
+        ))
+        sheet = Image.new("RGBA", (8, 8), (0, 255, 0, 255))
+        sheet.paste((255, 0, 0, 255), (0, 0, 4, 8))
+        sheet.paste((0, 0, 255, 255), (4, 0, 8, 8))
+        overlay._sprite_sheet = sheet
+        overlay._sprite_cache = {}
+        cached = overlay._sprite_image(0, 20, False)
+        self.assertIs(overlay._sprite_layer_image((0,), 20, False), cached)
+        self.assertEqual(overlay._sprite_layer_image((0, 1), 20, False).size, (10, 20))
+
     def test_default_crop_keeps_full_cell_aspect_ratio_at_target_height(self):
         overlay = CharacterOverlay.__new__(CharacterOverlay)
         overlay._profile = SimpleNamespace(reaction_pack=ReactionPackResolution(
@@ -331,11 +408,24 @@ class SpriteEventTests(unittest.TestCase):
         model.set_hovered(False, 510)
         self.assertEqual(model.state, "search")
 
-    def test_input_always_restores_generating(self):
+    def test_active_input_override_restores_prior_work_and_hover_without_mutating_work(self):
         model = SpriteStateMachine(STATES)
         model.set_work("memory", 10)
-        model.notify_input(20)
-        model.expire(500, 450)
+        model.set_hovered(True, 15)
+        model.set_input_active(True, 20)
+        self.assertEqual(model.state, "input")
+        self.assertEqual(model.work_state, "memory")
+        model.set_input_active(False, 30)
+        self.assertEqual(model.state, "hover")
+        self.assertEqual(model.work_state, "memory")
+        model.set_hovered(False, 40)
+        self.assertEqual(model.state, "memory")
+
+    def test_input_idle_then_generation_transition_is_not_blocked(self):
+        model = SpriteStateMachine(STATES)
+        model.set_input_active(True, 10)
+        model.set_input_active(False, 20)
+        self.assertTrue(model.set_work("generating", 30))
         self.assertEqual(model.state, "generating")
 
     def test_locked_error_ignores_lower_priority_events(self):
@@ -358,6 +448,20 @@ class SpriteEventTests(unittest.TestCase):
 
 
 class SpriteSelectionTests(unittest.TestCase):
+    def test_rotation_is_seeded_stable_per_bucket_without_immediate_repeat(self):
+        spec = {"frames": (4, 5, 6), "selection": "rotation", "frame_ms": 100}
+
+        def render(seed):
+            choices = {}
+            rng = random.Random(seed)
+            values = [select_sprite_frame(spec, "idle", 1, point, choices, rng)[0] for point in range(0, 800, 100)]
+            self.assertEqual(select_sprite_frame(spec, "idle", 1, 799, choices, rng)[0], values[-1])
+            return values
+
+        values = render(42)
+        self.assertEqual(values, render(42))
+        self.assertTrue(all(left != right for left, right in zip(values, values[1:])))
+
     def test_random_frame_is_stable_in_a_bucket_and_can_change_in_next(self):
         spec = {"frames": (19, 20, 21, 22), "selection": "random", "frame_ms": 100}
         choices = {}

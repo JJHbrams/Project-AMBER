@@ -147,6 +147,43 @@ class CharacterAssetResolverTests(unittest.TestCase):
         self.assertEqual(result.states["click"]["transform"], "none")
         self.assertEqual(result.states["click"]["vfx"], "sparkle_burst")
 
+    def test_reaction_manifest_normalizes_optional_timeline_without_changing_v1_defaults(self):
+        manifest = _REACTION_MANIFEST + """
+states:
+  idle:
+    frames: [0, 1]
+    selection: sequence
+    durations_ms: [100, 250]
+    loop: true
+    hold_ms: [20, 40]
+    layers:
+      - {frames: [2, 3], durations_ms: [50, 300], loop: false}
+"""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _write_reaction_pack(root / "engram", manifest)
+            with patch("overlay.character_assets.USER_REACTION_PACKS_DIR", root), patch(
+                "overlay.character_assets.resolve_editable_overlay_path", return_value=root / "missing"
+            ):
+                result = resolve_reaction_pack("engram")
+
+        idle = result.states["idle"]
+        self.assertEqual(idle["durations_ms"], (100, 250))
+        self.assertEqual(idle["hold_ms"], (20, 40))
+        self.assertEqual(idle["layers"][0]["frames"], (2, 3))
+        self.assertEqual(idle["dwell_ms"], 350)
+
+    def test_rotation_selection_rejects_timeline_cell_keys(self):
+        manifest = _REACTION_MANIFEST + "states: {idle: {frames: [0, 1], selection: rotation, durations_ms: [100, 200]}}\n"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _write_reaction_pack(root / "engram", manifest)
+            with patch("overlay.character_assets.USER_REACTION_PACKS_DIR", root), patch(
+                "overlay.character_assets.resolve_editable_overlay_path", return_value=root / "missing"
+            ):
+                result = resolve_reaction_pack("engram")
+        self.assertEqual(result.source, "disabled")
+
 
 if __name__ == "__main__":
     unittest.main()

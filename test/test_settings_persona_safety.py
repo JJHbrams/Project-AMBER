@@ -104,6 +104,19 @@ class PersonaOverwriteSafetyTests(unittest.TestCase):
         window._update_persona_banner.assert_not_called()
         self.assertIn("일반 설정은 저장되었습니다", window._show_toast.call_args.args[0])
 
+    def test_settings_close_callback_is_delivered_once_after_idempotent_close(self):
+        window = _SettingsWindow.__new__(_SettingsWindow)
+        window.window = Mock()
+        window._closed = False
+        window._pending_manual_provision = {}
+        window._cancel_grid_eyedropper = Mock()
+        window._remote_after_id = None
+        window._on_closed = Mock()
+        window._close()
+        window._close()
+        window.window.destroy.assert_called_once_with()
+        window._on_closed.assert_called_once_with()
+
 
 if __name__ == "__main__":
     unittest.main()

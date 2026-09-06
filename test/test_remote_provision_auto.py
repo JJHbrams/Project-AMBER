@@ -122,6 +122,25 @@ class ProvisionHostTests(unittest.TestCase):
                 rp.payload_fingerprint(rp.build_remote_payload(_REPO_ROOT, remote_os="posix")),
             )
 
+    def test_windows_automatic_refresh_uses_short_framed_stdin_transport(self):
+        with _StatePathPatch():
+            rp.record_provisioned("host-win", fingerprint="stale", remote_python=r"C:\Windows\py.exe", remote_os="windows")
+
+            class _Ok:
+                returncode = 0
+                stdout = "PROVISIONED\n"
+                stderr = ""
+
+            with patch.object(rp.subprocess, "run", return_value=_Ok()) as run:
+                result = rp.provision_host("host-win")
+            self.assertTrue(result["ok"])
+            command = run.call_args.args[0]
+            self.assertLess(len(" ".join(command)), 32767)
+            self.assertNotIn(rp.encode_payload_script(), " ".join(command))
+            frame = run.call_args.kwargs["input"]
+            self.assertIn('"installer"', frame)
+            self.assertIn('"payload"', frame)
+
     def test_failed_ssh_does_not_record_success(self):
         with _StatePathPatch():
             rp.record_provisioned(
@@ -167,10 +186,12 @@ class SshCommandTests(unittest.TestCase):
         inner = rp._ssh_command("h", "/usr/bin/python3", "QUJD", "posix")[-1]
         self.assertTrue(inner.startswith("'/usr/bin/python3'"))
 
-    def test_windows_uses_double_quotes(self):
-        # cmd.exe 는 작은따옴표를 인용으로 보지 않는다.
+    def test_windows_uses_proven_cmd_wrapper_for_powershell_login_shell(self):
         inner = rp._ssh_command("h", r"C:\py\python.exe", "QUJD", "windows")[-1]
-        self.assertTrue(inner.startswith('"C:\\py\\python.exe"'))
+        self.assertEqual(
+            inner,
+            'cmd.exe /d /s /c """C:\\py\\python.exe"" -c ""import base64;exec(base64.b64decode(\'QUJD\'))"""',
+        )
 
 
 class TunnelUpCallbackTests(unittest.TestCase):

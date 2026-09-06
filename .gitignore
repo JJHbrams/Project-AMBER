@@ -59,3 +59,8 @@ gui/node_modules
 # build artifacts
 resource/overlay.png
 .mcp.json
+
+# Release artifacts (GitHub Release 로 배포 — repo 에 넣지 않는다)
+AMBER_*_x64-setup.exe
+AMBER_*_ModelPack.zip
+debug.log

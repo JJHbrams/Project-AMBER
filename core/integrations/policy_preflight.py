@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 import tempfile
 from pathlib import Path
@@ -65,10 +66,11 @@ _WRITE_TOOL_PATH_FIELDS = {
     "notebookedit": ("notebook_path", "file_path", "path", "notebookPath"),
 }
 _GIT_EXECUTABLE_NAMES = {"git", "git.exe", "git.cmd", "git.bat"}
-_GIT_WRITE_SUBCOMMANDS = {"commit", "merge", "rebase", "cherry-pick"}
+_GIT_WRITE_SUBCOMMANDS = {"add", "commit", "merge", "rebase", "cherry-pick"}
 _GIT_READONLY_SUBCOMMANDS = {"status", "log", "diff", "show", "branch", "rev-parse"}
 _GIT_UNSAFE_READ_OPTIONS = {"--ext-diff", "--textconv"}
 _GIT_UNSAFE_READ_ENV = {"GIT_EXTERNAL_DIFF", "GIT_DIFF_OPTS"}
+_GIT_FETCH_CONFIG_ENV_PREFIX = "GIT_CONFIG"
 _GIT_NON_WRITING_SUBCOMMANDS = {"help", "version"}
 _GIT_GLOBAL_OPTIONS_NO_VALUE = {
     "--bare",
@@ -188,6 +190,12 @@ _GIT_BRANCH_MUTATING_OPTION_PREFIXES = (
     "--track=",
     "-u=",
 )
+_GIT_SAFE_FETCH_OPTIONS = {
+    "--append", "--atomic", "--dry-run", "--force", "--ipv4", "--ipv6",
+    "--no-tags", "--no-write-fetch-head", "--porcelain", "--progress", "--prune",
+    "--quiet", "--verbose", "-4", "-6", "-a", "-f", "-n", "-p", "-q", "-v",
+}
+_GIT_SAFE_FETCH_REMOTE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 _MAX_NESTED_GIT_SHELL_DEPTH = 4
 
 
@@ -621,13 +629,17 @@ def _parse_bash_env_assignment(token: str) -> tuple[str, str] | None:
 
 def _store_git_env_override(overrides: dict[str, str], name: str, value: str) -> None:
     normalized_name = _normalize_text(name).upper()
-    if normalized_name in {"GIT_DIR", "GIT_WORK_TREE", *_GIT_UNSAFE_READ_ENV}:
+    if normalized_name in {"GIT_DIR", "GIT_WORK_TREE", *_GIT_UNSAFE_READ_ENV} or normalized_name.startswith(
+        _GIT_FETCH_CONFIG_ENV_PREFIX
+    ):
         overrides[normalized_name] = value
 
 
 def _clear_git_env_override(overrides: dict[str, str], name: str) -> None:
     normalized_name = _normalize_text(name).upper()
-    if normalized_name in {"GIT_DIR", "GIT_WORK_TREE", *_GIT_UNSAFE_READ_ENV}:
+    if normalized_name in {"GIT_DIR", "GIT_WORK_TREE", *_GIT_UNSAFE_READ_ENV} or normalized_name.startswith(
+        _GIT_FETCH_CONFIG_ENV_PREFIX
+    ):
         overrides.pop(normalized_name, None)
 
 
@@ -960,6 +972,71 @@ def _validate_git_readonly_context(
         )
 
 
+def _validate_git_safe_fetch_arguments(
+    args: list[str],
+    *,
+    config_overrides: bool,
+    env_overrides: dict[str, str],
+) -> None:
+    """Accept only fetches that update remote-tracking or prefetch refs.
+
+    Configured remote helpers are intentionally a trust boundary: the hook
+    validates the command line but does not inspect or execute repository
+    configuration to determine a remote's transport.
+    """
+    if config_overrides or any(name.startswith(_GIT_FETCH_CONFIG_ENV_PREFIX) for name in env_overrides):
+        raise HookPayloadError("git fetch with config overrides could not be classified safely")
+    operands: list[str] = []
+    for token in args:
+        normalized = token.lower()
+        if token in _GIT_SAFE_FETCH_OPTIONS or (
+            token.startswith("--") and normalized in _GIT_SAFE_FETCH_OPTIONS
+        ):
+            continue
+        if token == "--" or token.startswith("-"):
+            raise HookPayloadError("git fetch option could not be classified safely")
+        operands.append(token)
+    if not operands:
+        raise HookPayloadError("git fetch requires exactly one ordinary remote name")
+    remote = operands[0]
+    if not _GIT_SAFE_FETCH_REMOTE_NAME.fullmatch(remote) or remote in {".", ".."}:
+        raise HookPayloadError("git fetch remote must be an ordinary configured remote name")
+    refspecs = operands[1:]
+    if refspecs[:1] == ["tag"]:
+        if len(refspecs) != 2 or not _is_safe_fetch_ref_source(refspecs[1]):
+            raise HookPayloadError("git fetch tag source could not be classified safely")
+        return
+    for refspec in refspecs:
+        _validate_git_safe_fetch_refspec(refspec, remote)
+
+
+def _is_safe_fetch_ref_source(source: str) -> bool:
+    return bool(
+        source
+        and not source.startswith((".", "/", "\\"))
+        and "\\" not in source
+        and "://" not in source
+        and ":" not in source
+    )
+
+
+def _validate_git_safe_fetch_refspec(refspec: str, remote: str) -> None:
+    body = refspec[1:] if refspec.startswith("+") else refspec
+    if not body or body.count(":") > 1:
+        raise HookPayloadError("git fetch refspec could not be classified safely")
+    source, separator, destination = body.partition(":")
+    if not _is_safe_fetch_ref_source(source):
+        raise HookPayloadError("git fetch refspec source could not be classified safely")
+    if not separator or not destination:
+        return
+    remote_prefix = f"refs/remotes/{remote}/"
+    if destination.startswith(remote_prefix) and len(destination) > len(remote_prefix):
+        return
+    if destination.startswith("refs/prefetch/") and len(destination) > len("refs/prefetch/"):
+        return
+    raise HookPayloadError("git fetch refspec destination is not a safe remote-tracking mapping")
+
+
 def _classify_direct_git_command(
     command_tokens: list[str],
     *,
@@ -1010,6 +1087,16 @@ def _classify_direct_git_command(
             return {
                 "kind": "git-readonly",
                 "git_subcommand": normalized,
+            }
+        if normalized == "fetch":
+            _validate_git_safe_fetch_arguments(
+                args[arg_index + 1 :],
+                config_overrides=config_overrides,
+                env_overrides=env_overrides,
+            )
+            return {
+                "kind": "git-remote-ref-update",
+                "git_subcommand": "fetch",
             }
         if normalized in _GIT_NON_WRITING_SUBCOMMANDS or normalized in _GIT_TERMINAL_GLOBAL_OPTIONS:
             return {
@@ -1062,6 +1149,8 @@ def _classify_direct_git_command(
                     require_directory=True,
                 )
                 work_tree_error = work_tree is None
+            elif normalized == "--config-env":
+                config_overrides = True
             arg_index += 2
             continue
         if normalized.startswith("--git-dir="):
@@ -1083,6 +1172,8 @@ def _classify_direct_git_command(
             arg_index += 1
             continue
         if any(normalized.startswith(prefix) for prefix in _GIT_INLINE_VALUE_PREFIXES):
+            if normalized.startswith("--config-env="):
+                config_overrides = True
             arg_index += 1
             continue
         if normalized in _GIT_GLOBAL_OPTIONS_NO_VALUE:
@@ -1090,7 +1181,7 @@ def _classify_direct_git_command(
             continue
         if token == "--" or token.startswith("-"):
             raise HookPayloadError("git command could not be classified safely")
-        raise HookPayloadError(f"git subcommand '{token}' is not allowed by Claude pretool policy")
+        raise HookPayloadError(f"git subcommand '{token}' is not allowed by the agent pretool policy")
     return {
         "kind": "git-readonly",
         "git_subcommand": "help",
@@ -1187,6 +1278,10 @@ def _extract_git_command_context(
     if any(result.get("kind") == "git-write" for result in git_results):
         if len(git_results) != 1:
             raise HookPayloadError("multiple Git commands in one compound shell command are not supported")
+        return git_results[0]
+    if any(result.get("kind") == "git-remote-ref-update" for result in git_results):
+        if len(git_results) != 1:
+            raise HookPayloadError("git remote-ref update cannot be combined with another Git command")
         return git_results[0]
     return {
         "kind": "git-readonly",
@@ -1342,6 +1437,13 @@ def classify_agent_pretool_payload(
             return {
                 "classified": False,
                 "reason": "git command is a safe read-only operation",
+                "hook": hook_context,
+            }
+        if parsed_command.get("kind") == "git-remote-ref-update":
+            hook_context["git_subcommand"] = parsed_command.get("git_subcommand", "")
+            return {
+                "classified": False,
+                "reason": "git command is a bounded remote-ref update",
                 "hook": hook_context,
             }
         repo_root = parsed_command["git_worktree_root"]

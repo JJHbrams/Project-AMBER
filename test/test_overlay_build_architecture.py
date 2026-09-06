@@ -51,7 +51,7 @@ class OverlayBuildArchitectureTests(unittest.TestCase):
         self.assertIn("-Deploy $DistDir -ValidateOnly", release)
         self.assertIn("-Deploy $DistDir -NoStart", release)
         self.assertNotIn("PyInstaller --noconfirm", release)
-        self.assertIn('$overlayMode = if ($FreshBuild) { "rebuild" } else { "auto" }', release)
+        self.assertIn('$overlayMode = if ($FreshBuild) { "clean" } else { "auto" }', release)
 
         build = (ROOT / "installer" / "build-overlay.ps1").read_text(
             encoding="utf-8-sig"

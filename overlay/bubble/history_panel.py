@@ -72,6 +72,16 @@ class HistoryPanel:
         x, y, width, _height = self._get_anchor_rect()
         self._win.geometry(f"+{x + width + 12}+{y}")
 
+    def hide(self) -> None:
+        """Dismiss the popup panel without changing its persisted conversation."""
+        if self._win is not None:
+            try:
+                self._win.destroy()
+            except Exception:
+                pass
+        self._win = None
+        self._list_frame = None
+
     def _reload(self) -> None:
         if self._list_frame is None:
             return

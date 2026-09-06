@@ -66,13 +66,11 @@ overlay:
   # - bubble: 캐릭터 옆 말풍선 대화창 (기본)
   chat_mode: "bubble"
 
-  # 선택 사항: 커스텀 오버레이에 공개 메타데이터 이벤트만 JSONL stdin으로 보낸다.
-  # observer는 번들 캐릭터를 유지하고, replace는 handshake 성공 후 번들을 숨긴다.
-  # command는 셸 문자열이 아닌 명시적 문자열 배열이며, 비어 있으면 번들 렌더러만 사용한다.
-  # 외부 프로세스는 시작 시 stdout에 overlay.hello JSONL 한 줄을 보내야 한다.
+  # 선택 사항: 독립 실행 렌더러가 loopback Event API v2에 연결하면 공개 메타데이터만 전송한다.
+  # 호스트는 렌더러 프로세스나 명령을 실행하지 않는다. 연결된 renderer id와 mode만 저장한다.
   external_renderer:
-    mode: "observer" # observer | replace. replace는 handshake 후 번들 캐릭터를 숨긴다.
-    command: []
+    selected_renderer_id: ""
+    mode: "observer" # observer | replace
 
   # 단축키
   hotkey: "alt+f12"

@@ -26,6 +26,9 @@ from core.integrations.remote_provision import (
     encode_payload,
     render_remote_installer,
     render_session_start_script,
+    encode_framed_installer,
+    encode_payload_script,
+    render_framed_installer_bootstrap,
 )
 from core.integrations.remote_agent_policy import (
     REMOTE_POLICY_MARKER,
@@ -34,6 +37,8 @@ from core.integrations.remote_agent_policy import (
 )
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
+_SETUP_REMOTE = _REPO_ROOT / "scripts" / "setup-remote.ps1"
+_SETTINGS_WINDOW = _REPO_ROOT / "overlay" / "settings_window.py"
 
 # 원격에서 실패하는 절차를 모델에게 쥐어주면 그걸 시도하다 막힌다.
 _EXCLUDED_SKILLS = ("engram-new-session", "engram")
@@ -124,6 +129,19 @@ class SessionStartScriptTests(unittest.TestCase):
 
 
 class RemoteInstallerTests(unittest.TestCase):
+    def test_framed_windows_bootstrap_executes_installer_from_stdin(self):
+        payload = build_remote_payload(_REPO_ROOT, remote_os="windows")
+        frame = encode_framed_installer(encode_payload_script(), encode_payload(payload))
+        with TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            env = dict(os.environ, HOME=str(home), USERPROFILE=str(home))
+            result = subprocess.run(
+                [sys.executable, "-c", render_framed_installer_bootstrap()], input=b"\xef\xbb\xbf" + frame.encode("ascii"),
+                capture_output=True, env=env,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("PROVISIONED", result.stdout.decode("utf-8"))
+            self.assertTrue((home / ".agents" / "skills").is_dir())
     def test_writes_skills_hook_and_registers_session_start(self):
         payload = build_remote_payload(_REPO_ROOT, remote_os="posix")
         with TemporaryDirectory() as tmp:
@@ -132,8 +150,9 @@ class RemoteInstallerTests(unittest.TestCase):
             self.assertIn("PROVISIONED", result.stdout, result.stderr)
 
             for name in payload["skills"]:
-                skill_file = home / ".claude" / "skills" / name / "SKILL.md"
-                self.assertTrue(skill_file.exists(), f"{name} 이 배치되지 않았다")
+                for relpath in (".claude/skills", ".agents/skills"):
+                    skill_file = home / relpath / name / "SKILL.md"
+                    self.assertTrue(skill_file.exists(), f"{name} 이 {relpath}에 배치되지 않았다")
 
             hook_path = home / payload["hook_relpath"]
             self.assertTrue(hook_path.exists())
@@ -242,6 +261,61 @@ class RemoteInstallerTests(unittest.TestCase):
         raw = base64.b64decode(encode_payload(build_remote_payload(_REPO_ROOT))).decode("utf-8")
         for forbidden in ("Authorization", "Bearer", "mcp-tokens"):
             self.assertNotIn(forbidden, raw, f"배치 payload 에 '{forbidden}' 가 들어 있다")
+
+    def test_setup_remote_registers_native_codex_http_config_without_local_token_state(self):
+        source = _SETUP_REMOTE.read_text(encoding="utf-8")
+        self.assertIn('[mcp_servers.engram]', source)
+        self.assertIn('http_headers = { Authorization = "Bearer ', source)
+        self.assertIn('CODEX=PARSE_FAIL', source)
+        self.assertIn('codex_path.chmod(0o600)', source)
+        # The durable auto-refresh record must follow the tools/list and fresh
+        # local-audit gates, never precede them.
+        self.assertGreater(source.index('tools/list → HTTP 200'), source.index('PROBE=%d %d'))
+        self.assertGreater(source.index('--emit record'), source.index('tools/list → HTTP 200'))
+        self.assertNotIn('TokenName $TokenName', source)
+
+    def test_audit_gate_requires_a_new_attributable_mcp_event(self):
+        source = _SETUP_REMOTE.read_text(encoding="utf-8")
+        self.assertIn('$auditBeforeLines', source)
+        self.assertIn('Select-Object -Skip $auditBeforeLines', source)
+        for proof in ('$entry.principal -eq $TokenName', '$entry.action -eq "allow"',
+                      '$entry.path -eq "/mcp"', '$entry.tool -eq "tools/list"',
+                      'provision_nonce=$ProofNonce'):
+            self.assertIn(proof, source)
+
+    def test_setup_generates_nonsecret_nonce_and_never_prints_token_prefix(self):
+        source = _SETUP_REMOTE.read_text(encoding="utf-8")
+        self.assertIn('$ProofNonce = [guid]::NewGuid().ToString("N")', source)
+        self.assertIn('BAD_TOKEN non-ascii', source)
+        self.assertNotIn('repr(tok[:12])', source)
+
+    def test_windows_probe_and_payloads_explicitly_wrap_cmd(self):
+        source = _SETUP_REMOTE.read_text(encoding="utf-8")
+        self.assertIn("cmd.exe /d /s /c", source)
+        self.assertIn('$winProbe = \'cmd.exe /d /s /c', source)
+        self.assertIn("$remoteCmd = 'cmd.exe /d /s /c", source)
+        self.assertIn("$provCmd = 'cmd.exe /d /s /c", source)
+
+    def test_windows_prefers_py_launcher_and_register_supports_python36(self):
+        source = _SETUP_REMOTE.read_text(encoding="utf-8")
+        self.assertIn("$launchers", source)
+        self.assertIn("\\\\py\\.exe$", source)
+        self.assertIn("all(ord(ch) < 128 for ch in tok)", source)
+        self.assertNotIn("tok.isascii()", source)
+
+    def test_manual_settings_provision_uses_visible_interactive_console_only(self):
+        source = _SETTINGS_WINDOW.read_text(encoding="utf-8")
+        start = source.index('def _run_manual_provision')
+        body = source[start:source.index('def _build_global_tab', start)]
+        self.assertIn('CREATE_NEW_CONSOLE', body)
+        self.assertIn('"-TokenName", token_name', body)
+        self.assertNotIn('"-BatchMode"', body)
+        self.assertNotIn('capture_output=True', body)
+
+    def test_manual_key_preflight_uses_cross_shell_success_command(self):
+        source = _SETTINGS_WINDOW.read_text(encoding="utf-8")
+        self.assertIn('"exit 0"', source)
+        self.assertNotIn('host, "true"', source)
 
     def test_policy_hooks_are_installed_with_provider_native_config_shapes(self):
         payload = build_remote_payload(_REPO_ROOT, remote_os="posix")

@@ -55,7 +55,9 @@ REMOTE_SAFE_SKILLS = (
 
 # 원격 hook 스크립트 경로. 로컬 PowerShell 판과 같은 marker 를 쓴다 —
 # settings.json 병합이 marker 로 기존 항목을 걷어내므로 여기서 갈리면 중복이 쌓인다.
-REMOTE_SKILLS_RELDIR = ".claude/skills"
+# Both clients discover skills from their native roots.  These files contain no
+# credential material, so supporting a host with both clients is safe.
+REMOTE_SKILLS_RELDIRS = (".claude/skills", ".agents/skills")
 
 logger = logging.getLogger(__name__)
 
@@ -155,7 +157,7 @@ def build_remote_payload(
         "marker": SESSIONSTART_HOOK_MARKER,
         "hook_relpath": hook_relpath,
         "hook_command_template": hook_command_template,
-        "skills_reldir": REMOTE_SKILLS_RELDIR,
+        "skills_reldirs": REMOTE_SKILLS_RELDIRS,
         "hook_script": render_session_start_script(
             remote_os=remote_os, caller=caller, scope_key=scope_key
         ),
@@ -210,8 +212,12 @@ def _ssh_command(host: str, remote_python: str, installer_b64: str, remote_os: s
     # 경로 인용은 원격 셸에 맞춘다. base64 는 영숫자와 +/= 뿐이라 메타문자가 없다.
     # cmd.exe 는 작은따옴표를 인용으로 보지 않으므로 Windows 원격은 큰따옴표를 쓴다.
     code = "import base64;exec(base64.b64decode('" + installer_b64 + "'))"
-    quote = '"' if remote_os == "windows" else "'"
-    inner = quote + remote_python + quote + ' -c "' + code + '"'
+    if remote_os == "windows":
+        # Windows SSH may execute through a PowerShell login shell.  This is
+        # the proven wrapper that forces cmd parsing and supports spaces.
+        inner = 'cmd.exe /d /s /c """{0}"" -c ""{1}"""'.format(remote_python, code)
+    else:
+        inner = "'" + remote_python + "'" + ' -c "' + code + '"'
     return [
         "ssh",
         "-o", "BatchMode=yes",          # 백그라운드다. 비밀번호를 물을 수 없다.
@@ -252,11 +258,19 @@ def provision_host(
     if not force and fingerprint == str(record.get("fingerprint") or ""):
         return {"ok": True, "skipped": True, "reason": "unchanged", "fingerprint": fingerprint}
 
-    cmd = _ssh_command(host, str(record["remote_python"]), encode_payload_script(), remote_os)
+    if remote_os == "windows":
+        # Keep the large installer out of the Windows CreateProcess command
+        # line.  The bootstrap is small; installer and payload travel as stdin.
+        bootstrap_b64 = base64.b64encode(render_framed_installer_bootstrap().encode("utf-8")).decode("ascii")
+        cmd = _ssh_command(host, str(record["remote_python"]), bootstrap_b64, remote_os)
+        stdin_payload = encode_framed_installer(encode_payload_script(), encode_payload(payload))
+    else:
+        cmd = _ssh_command(host, str(record["remote_python"]), encode_payload_script(), remote_os)
+        stdin_payload = encode_payload(payload)
     try:
         completed = subprocess.run(
             cmd,
-            input=encode_payload(payload),
+            input=stdin_payload,
             capture_output=True,
             text=True,
             timeout=timeout,
@@ -325,19 +339,25 @@ payload = json.loads(base64.b64decode(raw).decode("utf-8"))
 home = Path.home()
 marker = payload["marker"]
 results = []
+def write_utf8(path, text):
+    # Path.write_text(newline=...) was added after Python 3.6.  Remote hosts
+    # may have an older interpreter; use open() for the same stable LF output.
+    with open(str(path), "w", encoding="utf-8", newline="\n") as handle:
+        handle.write(text)
 
 # 1) skills
-skills_dir = home / payload["skills_reldir"]
-for name, body in sorted((payload.get("skills") or {}).items()):
-    target = skills_dir / name
-    target.mkdir(parents=True, exist_ok=True)
-    (target / "SKILL.md").write_text(body, encoding="utf-8", newline="\n")
-    results.append("SKILL=%s" % name)
+for skills_relpath in payload["skills_reldirs"]:
+    skills_dir = home / skills_relpath
+    for name, body in sorted((payload.get("skills") or {}).items()):
+        target = skills_dir / name
+        target.mkdir(parents=True, exist_ok=True)
+        write_utf8(target / "SKILL.md", body)
+        results.append("SKILL=%s" % name)
 
 # 2) SessionStart hook 스크립트
 hook_path = home / payload["hook_relpath"]
 hook_path.parent.mkdir(parents=True, exist_ok=True)
-hook_path.write_text(payload["hook_script"], encoding="utf-8", newline="\n")
+write_utf8(hook_path, payload["hook_script"])
 try:
     hook_path.chmod(0o700)
 except Exception:
@@ -429,7 +449,7 @@ results.append("SETTINGS=%s registered=%d" % (settings_path, registered))
 # deduped, atomically replaced, and read back before success is reported.
 def atomic_json(path, value):
     tmp = path.with_name(path.name + ".engram-tmp")
-    tmp.write_text(json.dumps(value, indent=2, ensure_ascii=False) + "\n", encoding="utf-8", newline="\n")
+    write_utf8(tmp, json.dumps(value, indent=2, ensure_ascii=False) + "\n")
     os.replace(str(tmp), str(path))
     back = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(back, dict): raise ValueError("readback is not object")
@@ -472,7 +492,7 @@ for provider, spec in sorted((payload.get("policy_hooks") or {}).items()):
     hook=home / spec["relpath"]
     hook.parent.mkdir(parents=True, exist_ok=True)
     temp=hook.with_name(hook.name + ".engram-tmp")
-    temp.write_text(spec["body"], encoding="utf-8", newline="\n"); os.replace(str(temp), str(hook))
+    write_utf8(temp, spec["body"]); os.replace(str(temp), str(hook))
     # The enrolled interpreter can be /opt/conda/bin/python and Windows often
     # has no PATH python.  Persist exactly the interpreter and absolute script
     # selected on the remote host, never a relative .engram command.
@@ -509,6 +529,26 @@ def encode_payload(payload: dict[str, object]) -> str:
     return base64.b64encode(raw).decode("ascii")
 
 
+def render_framed_installer_bootstrap() -> str:
+    """Short remote ``-c`` program for Windows stdin-framed provisioning.
+
+    Keeping the rendered installer out of argv avoids Windows' 32767-character
+    command-line ceiling.  The frame contains only public payload/installer
+    bytes; bearer credentials never enter this transport.
+    """
+    return (
+        "import base64,io,json,sys;raw=sys.stdin.buffer.read();"
+        "raw=raw[3:] if raw.startswith(b'\\xef\\xbb\\xbf') else raw;"
+        "v=json.loads(raw.decode('ascii'));"
+        "sys.stdin=io.TextIOWrapper(io.BytesIO(v['payload'].encode('ascii')),encoding='ascii');"
+        "exec(base64.b64decode(v['installer']))"
+    )
+
+
+def encode_framed_installer(installer_b64: str, payload_b64: str) -> str:
+    return json.dumps({"installer": installer_b64, "payload": payload_b64}, separators=(",", ":"))
+
+
 def main(argv: list[str] | None = None) -> int:
     """setup-remote.ps1 이 쓰는 CLI.
 
@@ -520,7 +560,7 @@ def main(argv: list[str] | None = None) -> int:
 
     parser = argparse.ArgumentParser(description="Emit the remote session provisioning payload")
     parser.add_argument(
-        "--emit", required=True, choices=("installer", "payload", "skills", "record")
+        "--emit", required=True, choices=("installer", "payload", "skills", "record", "framed-bootstrap")
     )
     parser.add_argument("--host", default="", help="--emit record 용 ssh 호스트")
     parser.add_argument("--remote-python", default="", help="--emit record 용 원격 파이썬 경로")
@@ -531,6 +571,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.emit == "installer":
         print(base64.b64encode(render_remote_installer().encode("utf-8")).decode("ascii"))
+        return 0
+    if args.emit == "framed-bootstrap":
+        print(base64.b64encode(render_framed_installer_bootstrap().encode("utf-8")).decode("ascii"))
         return 0
     if args.emit == "record":
         # 첫 배치 성공 뒤 setup-remote.ps1 이 호출한다. 이 기록이 있는 호스트만

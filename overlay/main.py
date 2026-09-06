@@ -31,10 +31,12 @@ from .config import (
     get_cli_model,
     get_flip_horizontal,
     get_ollama_model,
+    get_overlay_state,
     get_permission_level,
     get_workdir,
     load_cfg,
     resolve_path,
+    update_overlay_state,
     set_bubble_session_id,
     set_cli_provider,
     set_cli_model,
@@ -83,6 +85,21 @@ def _is_ollama_routing_model(model: str) -> bool:
 
 
 # ── Ollama 모델 캐시 (백그라운드 로드) ──────────────────────────
+# Renderer input arrives on a socket thread and must be replayed on Tk's loop.
+# Draining is a queue poll costing microseconds, so the interval is chosen for
+# perceived responsiveness rather than cost: 50ms added up to a visible lag on
+# every external click and drag.
+_RENDERER_DRAIN_MS = 10
+# How often the host re-checks which application actually owns the foreground.
+_FOREGROUND_POLL_MS = 250
+# Mouse-button sampling. A click holds the button for tens of milliseconds, so
+# the leading edge has to be sampled well inside that to be seen at all.
+_POINTER_WATCH_MS = 25
+# A renderer pointer action counts as "the overlay is in front" for this long,
+# because the external window belongs to another process whose HWND the host
+# deliberately never learns.
+_RENDERER_FOCUS_GRACE_SEC = 0.4
+
 _ollama_model_cache: list[str] = []
 _ollama_cache_lock = threading.Lock()
 _ollama_cache_ready = False
@@ -277,6 +294,12 @@ def _make_tray_icon(app: "OverlayApp"):
         return [pystray.MenuItem(m, _select_provider_action(provider, m), checked=lambda _, mod=m: app.get_cli_provider() == provider and app.get_cli_model(provider) == mod, radio=True) for m in choices]
 
     menu = pystray.Menu(
+        pystray.MenuItem(
+            "런처 표시",
+            lambda _icon, _item=None: app.root.after(0, app.show_launcher_from_tray),
+            visible=lambda _item: bool(getattr(app, "_launcher_hidden", False)),
+            default=lambda _item: bool(getattr(app, "_launcher_hidden", False)),
+        ),
         pystray.MenuItem("채팅 열기/닫기", lambda: app.toggle_chat()),
         pystray.MenuItem("대화 기록 보기", lambda: app.root.after(0, app.show_bubble_history)),
         pystray.MenuItem(
@@ -341,6 +364,8 @@ class OverlayApp:
         self._ollama_model = get_ollama_model(cfg)
         self._chat_mode = get_chat_mode(cfg)
         self._bubble_session: "BubbleSessionManager | None" = None
+        self._bubble_session_cleanup_lock = threading.Lock()
+        self._bubble_sessions_cleaning: set[int] = set()
         self._quitting = False
         self._quit_reason = "unknown"
         self._mcp_recovery_lock = threading.Lock()
@@ -386,43 +411,73 @@ class OverlayApp:
             on_restart=self.restart,
             on_history=self.show_bubble_history,
             on_pointer_event=self._on_bundled_pointer_event,
+            on_collapse=lambda: self._set_presentation("launcher"),
+            on_expand=lambda: self._set_presentation("full"),
+            on_hide_launcher=self.hide_launcher_to_tray,
+            is_launcher_mode=lambda: getattr(self, "_presentation_mode", "full") == "launcher",
         )
         # Observer geometry is an in-memory click anchor only.  Replacement
         # geometry remains owned by CharacterOverlay and is persisted there.
         self._observer_rect: tuple[int, int, int, int] | None = None
+        self._observer_rects: dict[str, tuple[int, int, int, int]] = {}
+        self._active_observer_id: str | None = None
         self._bubble_anchor = "bundled"
         self._replace_startup_geometry_pending = False
+        self._settings_active = False
+        self._presentation_mode = "full"
+        self._launcher_hidden = False
+        self._presentation_request = 0
+        self._external_renderer_visible = False
+        self._external_renderer_hiding = False
+        self._external_hide_timeout_after = None
+        self._external_hide_fallback_shown = False
+        # A renderer click can report menu_dismiss on ButtonPress before it
+        # receives ButtonRelease/left_click.  Keep a short, replace-only
+        # fallback so that the first click after an external host menu still
+        # opens the bubble if the release never reaches the renderer.
+        self._pending_external_menu_activation = None
         self._overlay_events = OverlayEventPublisher(
             cfg,
             on_failure=lambda: self._renderer_inbound.put({"type": "_renderer.failure"}),
             on_message=self._renderer_inbound.put,
         )
-        if self._overlay_events.start() and self._overlay_events.mode == "replace":
-            # The next geometry is renderer bootstrap data.  Keep the restored
-            # bundled/state x/y authoritative, then acknowledge it back to the
-            # child; later geometry is a real user movement and persists.
-            self._replace_startup_geometry_pending = True
-            self.character.hide_for_external_renderer()
-            rect = self.character.get_phys_rect()
-            self._overlay_events.publish("overlay.set_position", "idle", {"x": rect[0], "y": rect[1]})
-        self.root.after(50, self._drain_external_renderer_messages)
+        self._overlay_events.start()
+        self.root.after(_RENDERER_DRAIN_MS, self._drain_external_renderer_messages)
 
         # 말풍선 모드 UI(렌더러/입력창/히스토리) — 가벼워서 미리 만들어둔다.
         # 실제 Claude 세션(BubbleSessionManager)은 캐릭터를 처음 클릭할 때 지연 기동한다.
         bubble_cfg = get_bubble_cfg(cfg)
         terminal_cfg = cfg.get("terminal") or {}
-        self._bubble_manager = BubbleManager(self.root, self._get_bubble_anchor_rect, bubble_cfg, terminal_cfg)
+        external_replace_active = lambda: self._overlay_events.connected and self._overlay_events.mode == "replace" and (
+            not self._overlay_events.supports("overlay.presentation") or self._external_renderer_visible
+        )
+        self._bubble_manager = BubbleManager(self.root, self._get_bubble_anchor_rect, bubble_cfg, terminal_cfg, external_replace_active)
         self._bubble_input = InputBar(
             self.root,
             self._get_bubble_anchor_rect,
             bubble_cfg,
             terminal_cfg,
             get_speech_rect=self._bubble_manager.get_speech_rect,
+            external_replace_active=external_replace_active,
+            on_input_activity=self._on_bubble_input_activity,
         )
         self._bubble_history = HistoryPanel(
             self.root, get_stm_port=lambda: self._stm_server.port, scope_key="overlay",
             cfg_bubble=bubble_cfg, get_anchor_rect=self._get_bubble_anchor_rect,
         )
+        # Bubbles hold topmost over a replace renderer only while the overlay is
+        # actually in front; see _poll_overlay_foreground.
+        self._overlay_foreground = True
+        self._renderer_interaction_at = 0.0
+        self._renderer_pid: "int | None" = None
+        self._pointer_was_down = False
+        self._pointer_press_pending = False
+        self.root.after(_FOREGROUND_POLL_MS, self._poll_overlay_foreground)
+        self.root.after(_POINTER_WATCH_MS, self._watch_pointer_presses)
+        # Built-in and capability-aware replacement start compact; legacy
+        # renderers remain full because they cannot acknowledge the contract.
+        if self._overlay_events.mode != "replace":
+            self._set_presentation("launcher")
 
         # 능동적 상주(initiative) — 유휴 시 캐릭터가 스스로 말을 건다.
         # 활동 추적: 마지막 상호작용 시각 + 현재 턴 진행 여부(발화 가능 판정용).
@@ -1118,7 +1173,19 @@ class OverlayApp:
 
     def restart(self):
         """overlay 프로세스를 재시작한다 (자신을 재실행)."""
+        self._cancel_pending_external_menu_activation()
+        self.character._dismiss_context_menu()
         self._quit_reason = "restart_request"
+        # A restart should put the user back where they were. The renderer
+        # handshake always starts collapsed, so hand the next process a
+        # one-shot note instead of changing what a fresh connection does.
+        try:
+            expanded = getattr(self, "_presentation_mode", "full") == "full"
+            update_overlay_state(
+                lambda state: state.update({"restore_presentation": "full" if expanded else "launcher"})
+            )
+        except Exception:
+            log.debug("[overlay] presentation restore note skipped", exc_info=True)
         log.info("[overlay] 재시작 요청")
         if getattr(sys, "frozen", False):
             cmd = [sys.executable]
@@ -1142,27 +1209,49 @@ class OverlayApp:
             self.quit()
 
     def open_settings(self):
-        """설정 GUI 창을 열고 저장 후 config를 다시 로드한다."""
-        open_settings(
-            self.root,
-            on_saved=self._reload_config,
-            on_get_ollama_models=_get_ollama_model_list_snapshot,
-            on_reload_ollama_models=_reload_ollama_models,
-            tunnels=self._tunnels,
-        )
+        """설정 GUI 창을 열고 저장 후 config를 다시 로드한다.
+
+        A replace renderer can report its menu dismissal on ButtonPress while
+        the host-owned Settings command is about to run.  Settings is a host
+        action, not a renderer click: invalidate that one-shot recovery before
+        creating (or refocusing) the Settings Toplevel so closing it cannot
+        later activate an input bubble.
+        """
+        self._cancel_pending_external_menu_activation()
+        self._settings_active = True
+
+        def settings_closed() -> None:
+            # A late renderer message must not survive Settings and activate a
+            # bubble after the user returns to the overlay.
+            self._settings_active = False
+            self._cancel_pending_external_menu_activation()
+
+        try:
+            open_settings(
+                self.root,
+                on_saved=self._reload_config,
+                on_closed=settings_closed,
+                on_get_ollama_models=_get_ollama_model_list_snapshot,
+                on_reload_ollama_models=_reload_ollama_models,
+                tunnels=self._tunnels,
+            )
+        except Exception:
+            self._settings_active = False
+            raise
 
     def _reload_config(self):
         """설정 저장 후 overlay config를 다시 읽어 반영한다."""
-        # external_renderer is intentionally start-time only.  A new selection
-        # takes effect after a full overlay restart, preserving handshake and
-        # bundled-renderer fallback ownership in the lifecycle startup path.
-        log.info("[overlay] external renderer selection is restart-only; keeping current renderer lifecycle")
         # CharacterOverlay owns image/profile caches, so saving from the GUI must
         # replace them now rather than waiting for the filesystem watcher tick.
         if not self.character.reload_config():
             log.warning("[overlay] settings reload rejected; keeping last good runtime configuration")
             return
         cfg = load_cfg()
+        ext = ((cfg.get("overlay") or {}).get("external_renderer") or {}) if isinstance(cfg.get("overlay"), dict) else {}
+        self._overlay_events.set_selection(
+            str(ext.get("selected_renderer_id") or "") if isinstance(ext, dict) else "",
+            str(ext.get("mode") or "observer") if isinstance(ext, dict) else "observer",
+        )
         new_provider = get_cli_provider(cfg)
         self._chat_mode = get_chat_mode(cfg)
         self.character.set_flip(get_flip_horizontal(cfg))
@@ -1181,6 +1270,7 @@ class OverlayApp:
         bubble_cfg = get_bubble_cfg(cfg)
         self._bubble_manager.update_cfg(bubble_cfg)
         self._bubble_input.update_cfg(bubble_cfg)
+        self._publish_external_size("config_reload")
 
         if self._is_dashboard_enabled(cfg):
             if self._dashboard_proc is None or self._dashboard_proc.poll() is not None:
@@ -1243,9 +1333,180 @@ class OverlayApp:
             return self._observer_rect
         return self.character.get_bundled_phys_rect()
 
+    def _publish_external_size(self, reason: str) -> None:
+        """Offer the current physical character size only to opted-in replace renderers."""
+        if self._overlay_events.mode != "replace" or not self._overlay_events.supports("overlay.set_size"):
+            return
+        # get_phys_rect() intentionally becomes the renderer's latest geometry
+        # after hide_for_external_renderer(). Settings must instead use the
+        # freshly recalculated bundled dimensions as its authoritative target.
+        _x, _y, width, height = self.character.get_bundled_phys_rect()
+        payload = {"width": max(1, int(width)), "height": max(1, int(height))}
+        log.info("[overlay-api] requesting replace renderer size=%sx%s reason=%s", payload["width"], payload["height"], reason)
+        self._overlay_events.publish("overlay.set_size", "idle", payload)
+
+    def _set_presentation(self, mode: str) -> None:
+        """UI-only launcher/full switch; never stops the overlay backend."""
+        if mode not in {"launcher", "full"}:
+            return
+        presentation_replace = (
+            self._overlay_events.mode == "replace"
+            and self._overlay_events.supports("overlay.presentation")
+        )
+        if presentation_replace and mode == "launcher" and getattr(self, "_presentation_mode", None) == "launcher":
+            return
+        self._presentation_mode = mode
+        if mode == "launcher":
+            if presentation_replace:
+                # Latch and notify the connected renderer before any host-side geometry,
+                # nudge, or window work can yield late renderer pointer input.
+                self._begin_external_hide()
+            self.character.snapshot_launcher_anchor()
+            self._dismiss_popup_conversation()
+        else:
+            self.character.capture_launcher_expand_anchor()
+        if presentation_replace:
+            if mode == "launcher":
+                # The renderer still owns the pixels until its hidden ack. The
+                # timeout restores an escape hatch if a broken renderer never
+                # acknowledges, but pointer input stays latched until a real ack.
+                pass
+            else:
+                self._cancel_external_hide_timeout()
+                self._external_renderer_hiding = False
+                # Renderer x/y is stale across launcher moves; retain only its
+                # last acknowledged/persisted physical dimensions. On a first
+                # run CharacterOverlay safely falls back to bundled dimensions.
+                _old_x, _old_y, width, height = self.character.get_presentation_rect("full")
+                x, y, _width, _height = self.character.launcher_full_target((width, height))
+                self._overlay_events.publish("overlay.set_position", "idle", {"x": x, "y": y})
+                self._overlay_events.publish("overlay.show", "idle", {})
+            return
+        if mode == "launcher":
+            self.character.show_launcher()
+        else:
+            self.character.show_full()
+
+    def _cancel_external_hide_timeout(self) -> None:
+        after_id = getattr(self, "_external_hide_timeout_after", None)
+        self._external_hide_timeout_after = None
+        if after_id is not None:
+            try:
+                self.root.after_cancel(after_id)
+            except Exception:
+                pass
+
+    def _reveal_launcher_after_external_hide(self) -> None:
+        if getattr(self, "_external_hide_fallback_shown", False):
+            return
+        if getattr(self, "_launcher_hidden", False):
+            return
+        self._external_hide_fallback_shown = True
+        self.character.restore_bundled_renderer()
+        self.character.show_launcher()
+
+    def _begin_external_hide(self) -> None:
+        self._cancel_external_hide_timeout()
+        self._external_renderer_hiding = True
+        self._external_hide_fallback_shown = False
+        self._overlay_events.publish("overlay.hide", "idle", {})
+
+        def fallback() -> None:
+            self._external_hide_timeout_after = None
+            if self._presentation_mode == "launcher" and self._external_renderer_hiding:
+                self._reveal_launcher_after_external_hide()
+
+        try:
+            self._external_hide_timeout_after = self.root.after(2000, fallback)
+        except Exception:
+            # Tests and shutdown paths may not have a live Tk interpreter. The
+            # authoritative ack can still complete the transition.
+            self._external_hide_timeout_after = None
+
+    def _dismiss_popup_conversation(self) -> None:
+        """Collapse only the popup conversation and child, retaining host services."""
+        if hasattr(self, "_bubble_manager") and self._bubble_manager.defer_nudge():
+            self._initiative.defer_active()
+        self._nudge_awaiting_reply = False
+        self._nudge_engage_live = False
+        self._pending_nudge_text = ""
+        if hasattr(self, "_bubble_input"):
+            self._bubble_input.hide()
+        if hasattr(self, "_bubble_manager"):
+            self._bubble_manager.clear_all()
+        if hasattr(self, "_bubble_history"):
+            self._bubble_history.hide()
+        self._bubble_turn_active = False
+        session = getattr(self, "_bubble_session", None)
+        if session is not None:
+            # Detach first: a cleanup completion must never clear a newer
+            # session created while the launcher is already responsive again.
+            self._bubble_session = None
+            self._cleanup_bubble_session_async(session)
+
+    def _cleanup_bubble_session_async(self, session: object) -> None:
+        """Cancel and reap one popup provider session without blocking Tk."""
+        lock = getattr(self, "_bubble_session_cleanup_lock", None)
+        if lock is None:
+            lock = threading.Lock()
+            self._bubble_session_cleanup_lock = lock
+        cleaning = getattr(self, "_bubble_sessions_cleaning", None)
+        if cleaning is None:
+            cleaning = set()
+            self._bubble_sessions_cleaning = cleaning
+        session_key = id(session)
+        with lock:
+            if session_key in cleaning:
+                return
+            cleaning.add(session_key)
+
+        def stop_and_reap() -> None:
+            try:
+                session.stop()
+            except Exception:
+                log.exception("[overlay] launcher collapse bubble session stop failed")
+            finally:
+                with lock:
+                    cleaning.discard(session_key)
+
+        threading.Thread(
+            target=stop_and_reap,
+            # BubbleSession.stop() is bounded. Keep this non-daemon so process
+            # exit cannot abandon popup-provider cleanup midway and orphan it.
+            daemon=False,
+            name="overlay-bubble-session-reaper",
+        ).start()
+
+    def hide_launcher_to_tray(self) -> None:
+        """Withdraw only the launcher UI; the backend and session remain alive."""
+        if self._presentation_mode != "launcher":
+            return
+        self._launcher_hidden = True
+        self.character._hide_launcher_tooltip()
+        self.root.withdraw()
+        try:
+            self.tray.update_menu()
+        except Exception:
+            pass
+
+    def show_launcher_from_tray(self) -> None:
+        """Restore the persisted host-owned launcher without restarting anything."""
+        self._launcher_hidden = False
+        try:
+            self.tray.update_menu()
+        except Exception:
+            pass
+        if self._presentation_mode != "launcher":
+            self._set_presentation("launcher")
+            return
+        self.character.restore_bundled_renderer()
+        self.character.show_launcher()
+
     def _select_bubble_anchor(self, source: str) -> None:
         if source == "observer" and self._observer_rect is None:
             return
+        if source != "observer":
+            self._active_observer_id = None
         self._bubble_anchor = source
         # Reflow existing speech/thought bubbles as well as the next input.
         if hasattr(self, "_bubble_manager"):
@@ -1304,19 +1565,28 @@ class OverlayApp:
             self._bubble_input.hide()
             return
         self._ensure_bubble_session()
+        self._bubble_manager.begin_input()
         # 클릭으로 입력창을 열 때, 페이드로 사라진 마지막 교환(응답 +/- 질문 에코)을
         # 되살려서 "방금 뭐였지" 를 바로 다시 볼 수 있게 한다.
-        self._bubble_manager.replay_last()
+        self._bubble_manager.replay_last(include_echo=False)
         self._bubble_input.show(on_submit=self._on_bubble_submit)
+        self._mark_overlay_engaged()
 
     def _on_bubble_submit(self, text: str) -> None:
         # 내 메시지는 입력창이 있던 자리에 "에코 말풍선"으로 잠깐 남긴다(응답과 별개).
         # 응답 말풍선은 입력창과 무관하게 자기 위치(마지막 드래그 위치 또는 캐릭터 옆
         # 상단 기본)에 별도로 뜬다 — 내 입력이 응답으로 출력되는 것처럼 보이던 문제 해결.
         self._bubble_last_activity = time.monotonic()
-        self.character.notify_input()
+        # Submitting keeps the conversation in front for the whole answer; the
+        # foreground window is the app the user typed from, not the overlay.
+        self._mark_overlay_engaged()
+        # InputBar normally ended the override before invoking us. Keep direct
+        # callers safe, then enter generation without reusing the old input
+        # transient that mutated work_state as a side effect.
+        self.character.set_input_active(False)
         self._overlay_events.publish("conversation.input_submitted", "input")
         self._overlay_events.publish("generation.started", "generating")
+        self.character.set_sprite_state("generating")
         self._bubble_turn_active = True  # 턴 시작 — 응답이 끝날(turn_end/error/result) 때까지 발화 억제
         # 자율발화에 대한 답장일 때만 engaged 로 친다. 예전엔 모든 입력에서 무조건
         # notify_engaged 를 불렀는데, 그러면 자율발화와 무관한 평소 대화가 백오프를
@@ -1331,6 +1601,14 @@ class OverlayApp:
         self._bubble_manager.show_user_message(text)
         if self._bubble_session is not None:
             self._bubble_session.send(text)
+
+    def _on_bubble_input_activity(self, active: bool) -> None:
+        """Publish metadata-only typing activity and mirror it in the bundled sprite."""
+        self.character.set_input_active(active)
+        self._overlay_events.publish(
+            "conversation.input_active" if active else "conversation.input_idle",
+            "input" if active else "idle",
+        )
 
     def _on_bubble_event(self, ev: dict) -> None:
         """세션 이벤트를 렌더러로 넘기면서, initiative 발화 판정에 필요한 상태
@@ -1349,13 +1627,17 @@ class OverlayApp:
 
     def _restore_bundled_renderer(self) -> None:
         """Replacement failure must always return control to the bundled window."""
+        self._cancel_pending_external_menu_activation()
+        self._cancel_external_hide_timeout()
+        self._external_renderer_hiding = False
         try:
             self.character.restore_bundled_renderer()
         except Exception:
             log.debug("[overlay-api] bundled renderer restore skipped", exc_info=True)
         finally:
-            # The child may have exited after showing a bubble.  Its geometry
+            # The renderer may have disconnected after showing a bubble.  Its geometry
             # must not survive a failed restore attempt as a stale anchor.
+            self._external_renderer_visible = False
             self._observer_rect = None
             self._replace_startup_geometry_pending = False
             self._select_bubble_anchor("bundled")
@@ -1376,8 +1658,179 @@ class OverlayApp:
         if event is not None:
             self._overlay_events.publish(event[0], event[1], payload)
 
+    def _cancel_pending_external_menu_activation(self) -> None:
+        """Cancel the one-shot replace-menu click fallback, if currently armed."""
+        pending = getattr(self, "_pending_external_menu_activation", None)
+        self._pending_external_menu_activation = None
+        if pending is None:
+            return
+        for after_id in (pending.get("after_id"), pending.get("expiry_id")):
+            if after_id is not None:
+                try:
+                    self.root.after_cancel(after_id)
+                except Exception:
+                    pass
+
+    def _consume_recovered_external_menu_activation(self) -> bool:
+        """Consume a fallback-fired interaction so its delayed release cannot toggle."""
+        pending = getattr(self, "_pending_external_menu_activation", None)
+        recovered = bool(pending and pending.get("activated"))
+        self._cancel_pending_external_menu_activation()
+        return recovered
+
+    def _arm_external_menu_activation_fallback(self) -> None:
+        """Activate once only when an open replace menu consumes ButtonRelease."""
+        self._cancel_pending_external_menu_activation()
+        pending: dict[str, object] = {"after_id": None, "expiry_id": None, "activated": False}
+
+        def activate_if_still_pending() -> None:
+            if getattr(self, "_pending_external_menu_activation", None) is not pending:
+                return
+            pending["after_id"] = None
+            pending["activated"] = True
+            if not getattr(self, "_quitting", False) and self._overlay_events.mode == "replace":
+                self.character.external_activate()
+
+            # A normal but slow click can deliver its release after the short
+            # fallback delay.  Retain this one interaction briefly so that
+            # release still publishes a pointer event but cannot toggle again.
+            def expire_recovered_interaction() -> None:
+                if getattr(self, "_pending_external_menu_activation", None) is pending:
+                    self._pending_external_menu_activation = None
+            try:
+                pending["expiry_id"] = self.root.after(500, expire_recovered_interaction)
+            except Exception:
+                self._pending_external_menu_activation = None
+
+        pending["callback"] = activate_if_still_pending
+        self._pending_external_menu_activation = pending
+        try:
+            after_id = self.root.after(125, activate_if_still_pending)
+        except Exception:
+            self._pending_external_menu_activation = None
+            return
+        if getattr(self, "_pending_external_menu_activation", None) is pending:
+            pending["after_id"] = after_id
+
+    def _consume_presentation_restore(self) -> "str | None":
+        """Read and clear the one-shot presentation note left by restart()."""
+        try:
+            value = get_overlay_state().get("restore_presentation")
+        except Exception:
+            return None
+        if value is None:
+            return None
+        # Clear unconditionally: a note that survives its restart would expand
+        # the overlay on some later, unrelated renderer connection.
+        def clear(state: dict) -> None:
+            state.pop("restore_presentation", None)
+
+        try:
+            update_overlay_state(clear)
+        except Exception:
+            log.debug("[overlay] presentation restore clear skipped", exc_info=True)
+        return value if value in {"full", "launcher"} else None
+
+    def _foreground_window(self) -> "tuple[int, int] | None":
+        """(hwnd, pid) of the foreground window, or None when it cannot be read."""
+        try:
+            user32 = ctypes.windll.user32
+            hwnd = user32.GetForegroundWindow()
+            if not hwnd:
+                return None
+            pid = ctypes.c_ulong(0)
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            return int(hwnd), int(pid.value)
+        except Exception:
+            return None
+
+    def _note_renderer_interaction(self) -> None:
+        """Record that the user just interacted with the external renderer."""
+        self._renderer_interaction_at = time.monotonic()
+        self._mark_overlay_engaged()
+
+    def _mark_overlay_engaged(self) -> None:
+        """The user is working with the overlay: bubbles belong in front."""
+        if getattr(self, "_overlay_foreground", False):
+            return
+        self._overlay_foreground = True
+        self._apply_overlay_foreground(True, 0)
+
+    def _apply_overlay_foreground(self, foreground: bool, below_hwnd: int) -> None:
+        """Presentation only: never let this break renderer input handling."""
+        for surface in (getattr(self, "_bubble_manager", None), getattr(self, "_bubble_input", None)):
+            if surface is None:
+                continue
+            try:
+                surface.set_overlay_foreground(foreground, below_hwnd)
+            except Exception:
+                log.debug("[overlay] foreground fan-out skipped", exc_info=True)
+
+    def _watch_pointer_presses(self) -> None:
+        """Latch mouse-button presses for the foreground poll to consume.
+
+        GetAsyncKeyState's "pressed since the last call" low bit is documented
+        as not always accurate and did not fire here at all, so this samples the
+        physical down state often enough to catch a click's leading edge — the
+        same technique the host already uses to dismiss its own menu.
+        """
+        try:
+            user32 = ctypes.windll.user32
+            down = any(user32.GetAsyncKeyState(vk) & 0x8000 for vk in (0x01, 0x02))
+            if down and not getattr(self, "_pointer_was_down", False):
+                self._pointer_press_pending = True
+            self._pointer_was_down = down
+        except Exception:
+            pass
+        finally:
+            if not self._quitting:
+                self.root.after(_POINTER_WATCH_MS, self._watch_pointer_presses)
+
+    def _pointer_pressed_since_last_poll(self) -> bool:
+        """Consume the latched press, if any."""
+        pressed = bool(getattr(self, "_pointer_press_pending", False))
+        self._pointer_press_pending = False
+        return pressed
+
+    def _poll_overlay_foreground(self) -> None:
+        """Step bubbles back when the user clicks into another application.
+
+        The trigger is the click, not the state. Which window merely *holds* the
+        foreground says nothing: submitting from an editor destroys the input
+        Entry, so Windows hands the foreground straight back to that editor
+        without the user asking for anything. Treating that as "another window
+        is in front" pulled a finished answer behind the moment it completed,
+        while treating only foreground *changes* as activation meant clicking
+        the editor you submitted from did nothing, because it was already in
+        front. Watching for an actual button press covers both.
+        """
+        try:
+            current = self._foreground_window()
+            clicked = self._pointer_pressed_since_last_poll()
+            recent = (time.monotonic() - getattr(self, "_renderer_interaction_at", 0.0)) <= _RENDERER_FOCUS_GRACE_SEC
+            if getattr(self, "_renderer_pid", None) is None:
+                self._renderer_pid = self._overlay_events.replace_owner_pid()
+            foreground = getattr(self, "_overlay_foreground", True)
+            below = 0
+            if current is None:
+                pass  # Unknown: never demote on missing information.
+            elif current[1] == os.getpid() or current[1] == getattr(self, "_renderer_pid", None) or recent:
+                foreground = True
+            elif clicked:
+                # A press landed while something that is not the overlay owns
+                # the foreground, so that is what the user clicked on.
+                foreground, below = False, current[0]
+            if foreground != getattr(self, "_overlay_foreground", None) or below:
+                self._overlay_foreground = foreground
+                self._apply_overlay_foreground(foreground, below)
+        except Exception:
+            log.debug("[overlay] foreground poll skipped", exc_info=True)
+        finally:
+            if not self._quitting:
+                self.root.after(_FOREGROUND_POLL_MS, self._poll_overlay_foreground)
+
     def _drain_external_renderer_messages(self) -> None:
-        """Run renderer callbacks on Tk's event loop, never on the stdout thread."""
+        """Run renderer callbacks on Tk's event loop, never on a socket thread."""
         try:
             while True:
                 message = self._renderer_inbound.get_nowait()
@@ -1387,23 +1840,75 @@ class OverlayApp:
                     self._handle_external_renderer_message(message)
         except queue.Empty:
             pass
-        if not self._quitting:
-            self.root.after(50, self._drain_external_renderer_messages)
+        except Exception:
+            log.exception("[overlay-api] renderer message pump failed; restoring bundled renderer")
+            try:
+                self._restore_bundled_renderer()
+            except Exception:
+                log.exception("[overlay-api] bundled renderer fallback failed")
+        finally:
+            if not self._quitting:
+                self.root.after(_RENDERER_DRAIN_MS, self._drain_external_renderer_messages)
 
     def _handle_external_renderer_message(self, message: dict) -> None:
         """Tk-thread handler for the small, public renderer-to-host input contract."""
-        if message.get("schema_version") not in (None, 1):
+        if message.get("schema_version") not in (None, 1, 2):
             return
         payload = message.get("payload")
         payload = payload if isinstance(payload, dict) else {}
         kind = message.get("type")
+        source = message.get("_renderer") if isinstance(message.get("_renderer"), dict) else {}
+        source_mode = source.get("mode") or getattr(self._overlay_events, "mode", "observer")
+        source_id = source.get("id")
         try:
-            if kind == "overlay.geometry_changed":
-                if self._overlay_events.mode == "observer":
+            if kind == "_renderer.connected":
+                if payload.get("mode") != "replace":
+                    return
+                # Identify the renderer from its own socket rather than waiting
+                # for a click that may never come.
+                self._renderer_pid = self._overlay_events.replace_owner_pid()
+                if self._overlay_events.supports("overlay.presentation"):
+                    self._presentation_mode = "launcher"
+                    # Read the restart note before hiding: hiding first and
+                    # expanding after makes the renderer play its exit
+                    # animation and immediately reappear, which is exactly the
+                    # "vanishes for a moment then comes back" flicker.
+                    if self._consume_presentation_restore() == "full":
+                        self._set_presentation("full")
+                    else:
+                        self._begin_external_hide()
+                else:
+                    self._replace_startup_geometry_pending = True
+                    self.character.hide_for_external_renderer()
+                    rect = self.character.get_phys_rect()
+                    self._overlay_events.publish("overlay.set_position", "idle", {"x": rect[0], "y": rect[1]})
+                    self._publish_external_size("connected")
+            elif kind == "_renderer.disconnected":
+                if payload.get("mode") == "replace":
+                    self._renderer_pid = None
+                self.character._dismiss_context_menu()
+                if payload.get("mode") == "replace":
+                    self._restore_bundled_renderer()
+                else:
+                    renderer_id = payload.get("renderer_id")
+                    if isinstance(renderer_id, str):
+                        getattr(self, "_observer_rects", {}).pop(renderer_id, None)
+                    if (
+                        self._bubble_anchor == "observer"
+                        and renderer_id == getattr(self, "_active_observer_id", None)
+                    ):
+                        self._observer_rect = None
+                        self._select_bubble_anchor("bundled")
+            elif kind == "overlay.geometry_changed":
+                if source_mode == "observer":
                     width, height = max(1, int(payload["width"])), max(1, int(payload["height"]))
                     x, y = int(payload["x"]), int(payload["y"])
-                    self._observer_rect = (x, y, width, height)
-                    if self._bubble_anchor == "observer":
+                    rect = (x, y, width, height)
+                    if isinstance(source_id, str):
+                        self._observer_rects[source_id] = rect
+                    if not isinstance(source_id, str) or source_id == getattr(self, "_active_observer_id", None):
+                        self._observer_rect = rect
+                    if self._bubble_anchor == "observer" and self._observer_rect == rect:
                         self._select_bubble_anchor("observer")
                 else:
                     startup_geometry = getattr(self, "_replace_startup_geometry_pending", False)
@@ -1415,30 +1920,86 @@ class OverlayApp:
                     self._overlay_events.publish(
                         "overlay.set_position", "idle", {"x": rect[0], "y": rect[1]}
                     )
+            elif kind == "overlay.visibility_changed":
+                # An acknowledgement is authoritative only for the currently
+                # requested transition.  A delayed older ack must never move
+                # either independently stored presentation window.
+                visible = payload.get("visible")
+                if (
+                    source_mode != "replace"
+                    or not self._overlay_events.supports("overlay.presentation")
+                    or not isinstance(visible, bool)
+                ):
+                    return
+                if visible and self._presentation_mode == "full":
+                    self.character.hide_for_external_renderer()
+                    self._external_renderer_visible = True
+                elif not visible and self._presentation_mode == "launcher":
+                    self._cancel_external_hide_timeout()
+                    self._external_renderer_hiding = False
+                    # A hide-to-tray action can race the renderer's late
+                    # hidden acknowledgement. Keep it withdrawn until the
+                    # explicit tray restore, while still recording the ack.
+                    self._reveal_launcher_after_external_hide()
+                    self._external_renderer_visible = False
             elif kind == "pointer.action":
+                if getattr(self, "_external_renderer_hiding", False):
+                    return
                 action = payload.get("action")
+                if action in {"left_click", "right_click", "drag_begin", "drag_move", "drag_end"}:
+                    # Deliberate interaction only: hover crossings would let an
+                    # unrelated foreground app be mistaken for the renderer.
+                    self._note_renderer_interaction()
+                if action == "menu_dismiss":
+                    menu_was_open = (
+                        source_mode == "replace"
+                        and bool(getattr(self.character, "_context_menu_open", False))
+                    )
+                    self.character._dismiss_context_menu()
+                    if menu_was_open and not getattr(self, "_settings_active", False):
+                        self._arm_external_menu_activation_fallback()
+                    elif menu_was_open:
+                        # Settings owns focus now.  Treat a late renderer
+                        # ButtonPress dismissal as non-activating noise.
+                        self._cancel_pending_external_menu_activation()
+                    return
                 if action == "left_click":
+                    if getattr(self, "_presentation_mode", "full") == "launcher":
+                        self._set_presentation("full")
+                        return
+                    recovered_menu_click = self._consume_recovered_external_menu_activation()
                     self._overlay_events.publish("pointer.left_clicked", "click")
-                    if self._overlay_events.mode == "observer":
+                    if source_mode == "observer":
+                        if isinstance(source_id, str):
+                            self._observer_rect = getattr(self, "_observer_rects", {}).get(source_id)
                         if self._observer_rect is None:
                             log.warning("[overlay-api] ignored observer click without geometry")
                             return
+                        self._active_observer_id = source_id if isinstance(source_id, str) else None
                         self._select_bubble_anchor("observer")
-                    self.character.external_activate()
+                    if not recovered_menu_click:
+                        self.character.external_activate()
                 elif action == "right_click":
+                    self._cancel_pending_external_menu_activation()
                     self._overlay_events.publish("pointer.right_clicked", "click")
-                    if self._overlay_events.mode == "observer":
+                    if source_mode == "observer":
+                        if isinstance(source_id, str):
+                            self._observer_rect = getattr(self, "_observer_rects", {}).get(source_id)
                         if self._observer_rect is None:
                             log.warning("[overlay-api] ignored observer context click without geometry")
                             return
+                        self._active_observer_id = source_id if isinstance(source_id, str) else None
                         self._select_bubble_anchor("observer")
                     self.character.external_context_menu(int(payload["screen_x"]), int(payload["screen_y"]))
+                elif action == "overlay_close":
+                    self._set_presentation("launcher")
                 elif action == "pointer_enter":
                     self._overlay_events.publish("pointer.entered", "hover")
                 elif action == "pointer_leave":
                     self._overlay_events.publish("pointer.left", "idle")
                 elif action in {"drag_move", "drag_end"}:
-                    if self._overlay_events.mode == "observer":
+                    self._cancel_pending_external_menu_activation()
+                    if source_mode == "observer":
                         return
                     rect = self.character.get_phys_rect()
                     rect = self.character.apply_external_geometry(
@@ -1447,11 +2008,14 @@ class OverlayApp:
                         rect[2],
                         rect[3],
                         persist_position=action == "drag_end",
+                        presentation_mode=getattr(self, "_presentation_mode", "full"),
                     )
                     # The renderer already moves its own window synchronously.
                     # Echoing queued drag_move positions makes a fast drag jump
                     # backwards. Persist and acknowledge only the final point.
                     if action == "drag_end":
+                        if getattr(self, "_presentation_mode", "full") == "full":
+                            self.character.remember_launcher_relative_offset(*rect)
                         self._overlay_events.publish(
                             "overlay.set_position", "idle", {"x": rect[0], "y": rect[1]}
                         )
@@ -1468,7 +2032,9 @@ class OverlayApp:
         까지만 알 수 있어서, 넷 중 무엇인지는 여기서만 구분된다.
         (speech_fade:false 로 응답 풍선이 계속 떠 있으면 영구히 막히는데, 그게
         로그에 안 남으면 밖에서는 원인을 알 수 없다.)"""
-        if self._chat_mode != "bubble":
+        if getattr(self, "_presentation_mode", "full") == "launcher":
+            reason = "런처 상태"
+        elif self._chat_mode != "bubble":
             reason = f"chat_mode={self._chat_mode}"
         elif self._bubble_turn_active:
             reason = "턴 진행 중"
@@ -1523,6 +2089,7 @@ class OverlayApp:
         nudge_text = self._initiative.active_nudge_text()
         self._ensure_bubble_session()
         self._bubble_manager.refresh_positions()
+        self._bubble_manager.begin_input()
         # 열려 있던 입력창부터 닫는다. 이 hide() 는 직전 발화의 닫힘 콜백을 소비하므로
         # 반드시 _nudge_awaiting_reply 를 새 값으로 세우기 **전에** 끝나야 한다 —
         # 순서가 뒤집히면 이전 입력창이 닫히면서 방금 뜬 발화를 무응답으로 마감해버린다.
@@ -1679,6 +2246,9 @@ class OverlayApp:
         if self._quitting:
             return
         self._quitting = True
+        self._cancel_pending_external_menu_activation()
+        self.character._dismiss_context_menu()
+        self._withdraw_visible_surfaces()
         self._overlay_events.stop()
         try:
             self.character.cancel_config_watch()
@@ -1722,6 +2292,30 @@ class OverlayApp:
         try:
             self.root.quit()
             self.root.destroy()
+        except Exception:
+            pass
+
+    def _withdraw_visible_surfaces(self) -> None:
+        """Take the overlay off screen before the slow part of teardown.
+
+        quit() then spends seconds on session cancellation, STM promotion and
+        child-process shutdown, all on the Tk thread. Leaving the character or
+        launcher painted through that makes a restart look like it hung for ten
+        seconds and only then did something. Hiding first costs milliseconds and
+        makes the click feel answered.
+        """
+        for hide in (
+            lambda: self._bubble_input.hide(),
+            lambda: self._bubble_manager.clear_all(),
+            lambda: self._bubble_history.hide(),
+            lambda: self.character.root.withdraw(),
+        ):
+            try:
+                hide()
+            except Exception:
+                continue
+        try:
+            self.root.update_idletasks()
         except Exception:
             pass
 
