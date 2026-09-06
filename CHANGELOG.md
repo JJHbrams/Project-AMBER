@@ -4,6 +4,84 @@ All notable changes to this project are documented in this file.
 
 ## Unreleased
 
+## [1.5.12] — 2026-09-07
+
+### Fixed
+
+- 콘솔이 없는 GUI 프로세스(`engram-overlay.exe`, agent-policy-hook)에서 guard와
+  policy hook이 `git`을 호출할 때 새 콘솔 창이 떠 포커스를 빼앗던 문제. 세 호출
+  지점에 `CREATE_NO_WINDOW`를 적용한다.
+
+### Removed
+
+- 남아 있던 미병합 브랜치를 정리했다. `fix/git-pretool-add-fetch`의 git add/safe
+  fetch 분류는 이미 dev에 반영되어 있었고(중복), `fix/replace-context-menu-topmost`의
+  접근은 replace 모드 context menu가 host 소유 nonmodal Tk 창으로 다시 구현되면서
+  대체됐다(현재 구현은 실기 확인됨).
+
+## [1.5.11] — 2026-09-06
+
+1.5.9 이후 외부 overlay renderer 경로에 집중한 릴리스다. 설계·실측은
+`docs/dev/external-overlay-bubble-flow.md`에 있다.
+
+### Added
+
+- 외부 overlay Event API v2를 host한다. `127.0.0.1`의 인증된 loopback JSONL로
+  metadata-only 이벤트만 공개하며, renderer 프로세스를 실행하거나 종료하지 않는다.
+  하나의 연결이 여러 logical renderer를 catalog로 광고할 수 있다.
+- 번들 sprite timeline에 선언적 타이밍(첫 cell hold 대체, loop/one-shot 완료,
+  layered frame, ranged hold, bucket rotation)을 도입했다.
+
+### Changed
+
+- 외부 renderer의 geometry 저장이 더 이상 Tk 메인 스레드에서 fsync하지 않는다.
+  `update_overlay_state_async`가 400ms 창으로 합쳐 전용 writer 스레드에서 쓰고,
+  아직 쓰이지 않은 변경은 읽기 때 재생해 read-after-write 일관성을 유지한다.
+  드래그 20건 기준 메인 스레드 점유 약 980ms → 1.209ms, 디스크 쓰기 20회 → 1회.
+- Event API의 outbound가 클라이언트별 유한 큐와 송신 스레드를 거친다. `publish`는
+  즉시 반환하고, 큐가 차면 의미 이벤트만 버린다. 위치·표시 제어와 handshake는
+  버리지 않는다.
+- 말풍선 z-order가 시간 추측이 아니라 실제 입력을 따른다. 응답 생성 중과 그 이후
+  계속 앞에 있고, 사용자가 다른 창을 클릭하면 그 창 아래로 재적층한다. 입력창도
+  같은 규칙을 쓴다.
+- 외부 renderer는 인증된 replace 연결의 소켓 피어로 식별한다. host는 여전히
+  renderer의 경로·명령·manifest를 읽지 않는다.
+- renderer 입력 드레인 간격을 50ms에서 10ms로 줄였다.
+
+### Fixed
+
+- 재시작이 펼침 상태를 잃고 런처로 돌아가던 문제. 재시작은 1회용 복원 메모를
+  남기며, hide 없이 곧바로 펼쳐 퇴장/재등장 깜빡임이 없다.
+- 재시작 클릭 후 창이 약 10초간 그려진 채 멈춰 있던 문제. 느린 정리 전에 화면에서
+  먼저 내린다.
+- replace 모드 입력창이 다른 창 밑에서 열려 보이지 않던 문제.
+- `Bash`가 `tool_category`에서 `other`로 분류되던 문제. PowerShell은 `shell`로
+  걸리는데 `bash`에는 일반 동사가 없어 빠져 있었다.
+- launcher 접기/펼치기의 위치 보존과 상호작용 지연.
+
+## [1.5.9] — 2026-09-04
+
+### Added
+
+- reverse SSH tunnel이 연결될 때 원격 client provisioning을 안전하게 갱신한다. 등록되지
+  않은 host의 첫 수동 provisioning은 명시적 사용자 흐름으로 유지하고, 자동 reconnect는
+  키 인증만 사용한다.
+- speech bubble 꼬리 끝을 본문과 독립적으로 드래그해 방향을 지정할 수 있다. 정규화된
+  방향은 기존 bubble position state와 호환되게 저장·복원하며, Pillow/Canvas 렌더러에
+  같은 tip affordance를 제공한다.
+- capability를 hello에서 명시한 replace 외부 renderer에만 physical character size를
+  `overlay.set_size`로 전달한다. renderer는 종횡비·안전 범위를 보존해 적용하고 실제
+  geometry로 응답한다.
+
+### Fixed
+
+- Agent pretool policy가 `git add`를 worktree/cwd 해석 뒤 일반 advisory write로 분류한다.
+  bounded safe `git fetch` remote-tracking/prefetch 갱신은 허용하고, 모호하거나 local ref를
+  바꾸는 fetch 및 compound 명령은 fail-closed로 유지한다.
+- replace 외부 renderer의 context menu가 다른 Windows 창·desktop을 클릭해도 남지 않게
+  native popup을 감시·종료한다. 메뉴 항목을 누르는 정상 action과 이후 left-click bubble
+  activation은 유지한다.
+
 ## [1.5.8] — 2026-09-01
 
 ### Changed

@@ -95,6 +95,10 @@ class Nudge:
     context: str = ""
     topic: str = ""
     ref_id: Optional[int] = None
+    # Safe source labels/digest only.  Never retain raw public event payloads or
+    # evidence text for initiative logging/outcome handling.
+    provenance: tuple[str, ...] = ()
+    fingerprint: str = ""
 
 
 class SourceProvider(Protocol):
@@ -109,16 +113,27 @@ class SourceProvider(Protocol):
 # ── 소스 구현 ─────────────────────────────────────────────────────────────
 
 class MemoryEventSource:
-    """Queue one coalesced initiative candidate from public memory-tool activity.
+    """Poll bounded identity evidence and coalesce public memory-tool refreshes.
 
-    Tool inputs and outputs can contain private memory contents, so this source
-    deliberately reads only the public event kind and tool name.
+    Identity polling works without events.  Public memory-tool events only
+    invalidate the short-lived evidence cache; tool inputs and outputs are never
+    retained or used as reflection material.
     """
 
     key = "memory"
 
     def __init__(self):
         self._pending: Optional[Nudge] = None
+        self._pending_created_at = 0.0
+        self._pending_ttl_sec = 15 * 60
+        # Public events invalidate this short-lived read-only evidence cache.
+        # They are wake/refresh signals only; their payload is never retained.
+        self._refresh_requested = False
+        self._evidence_cache = None
+        self._evidence_cache_at = 0.0
+        self._evidence_cache_ttl_sec = 5 * 60
+        self._recent_fingerprints: dict[str, float] = {}
+        self._fingerprint_ttl_sec = 6 * 3600
 
     def feed_event(self, event: object) -> None:
         safe = public_event(event)
@@ -126,22 +141,80 @@ class MemoryEventSource:
             return
         if not is_memory_tool_name(safe.get("tool_name")):
             return
-        self._pending = Nudge(
-            self.key,
-            fallback_text="기억을 살펴보다가 문득 떠오른 게 있어. 잠깐 얘기해볼래?",
-            context="최근 기억을 살펴본 뒤 사용자에게 부담 없이 대화를 건네는 상황.",
-            topic="기억 탐색",
-        )
+        # The event is a metadata-only refresh signal, not reflection content.
+        self._refresh_requested = True
 
     def poll(self) -> Optional[Nudge]:
         pending, self._pending = self._pending, None
-        return pending
+        if pending is not None:
+            created_at, self._pending_created_at = self._pending_created_at, 0.0
+            if created_at and time.monotonic() - created_at < self._pending_ttl_sec:
+                return pending
+            # Expired candidates are deliberately dropped, including restored
+            # candidates: a delayed prompt must not revive stale identity text.
+            return None
+        # Poll independently: a long-cooldown reflection must still be possible
+        # even when no public memory-tool event arrives.
+        try:
+            # Keep this optional DB/KG dependency lazy so the overlay can fail
+            # closed instead of failing import-time when identity storage is unavailable.
+            from core.identity import get_self_reflection_evidence
+            now = time.monotonic()
+            if (self._evidence_cache is None or self._refresh_requested
+                    or now - self._evidence_cache_at >= self._evidence_cache_ttl_sec):
+                self._evidence_cache = get_self_reflection_evidence()
+                self._evidence_cache_at = now
+            evidence = self._evidence_cache
+        except Exception:
+            evidence = None
+        self._refresh_requested = False
+        if evidence is None:
+            return None
+        now = time.monotonic()
+        self._recent_fingerprints = {
+            key: seen for key, seen in self._recent_fingerprints.items()
+            if now - seen < self._fingerprint_ttl_sec
+        }
+        if evidence.fingerprint in self._recent_fingerprints:
+            return None
+        context_parts = []
+        if evidence.name:
+            context_parts.append(f"나는 {evidence.name}이다.")
+        if evidence.narrative:
+            context_parts.append(f"정체성 서사: {evidence.narrative}")
+        if evidence.themes:
+            context_parts.append("내가 이어 온 테마: " + ", ".join(evidence.themes))
+        if evidence.wiki_summary:
+            context_parts.append(f"내 정체성 시스템 요약: {evidence.wiki_summary}")
+        anchor = evidence.themes[0] if evidence.themes else (evidence.wiki_title or "내 정체성")
+        provenance = []
+        if evidence.name:
+            provenance.append("identity.name")
+        if evidence.narrative:
+            provenance.append("identity.narrative")
+        if evidence.themes:
+            provenance.append("identity.themes")
+        if evidence.wiki_summary:
+            provenance.append("kg:engram-연속체-정체성-시스템:summary")
+        if evidence.wiki_title and not evidence.themes:
+            provenance.append("kg:engram-연속체-정체성-시스템:title")
+        nudge = Nudge(
+            self.key,
+            fallback_text=f"나는 {anchor}라는 방향을 이어 온 나를 잠깐 돌아보고 있었어. 지금 곁에 있어.",
+            context="SELF_REFLECTION\n" + "\n".join(context_parts),
+            topic="self-reflection",
+            provenance=tuple(provenance),
+            fingerprint=evidence.fingerprint,
+        )
+        self._recent_fingerprints[evidence.fingerprint] = now
+        return nudge
 
     def restore(self, nudge: Nudge) -> None:
         # A newer event may arrive while phrasing is in flight. If so, the
         # one-slot queue already coalesces both signals and should win.
         if self._pending is None:
             self._pending = nudge
+            self._pending_created_at = time.monotonic()
 
 class GitStatusSource:
     """작업 디렉토리의 미커밋/미푸시 상태를 훑어 발화 거리를 만든다.
@@ -292,6 +365,8 @@ _PHRASE_INSTRUCTION = (
     "- 1~2문장, 말풍선에 담길 만큼 짧게. 머리말·설명·따옴표 없이 대사만 출력.\n"
     "- 아래 '말투' 를 반영하되 이모지는 최대 1개.\n"
     "- 재촉하지 말고, 사용자가 무시해도 괜찮은 톤으로."
+    "\n- self-reflection 상황에서는 반드시 '나/내'의 1인칭으로, 제공된 정체성 근거에만 기대어 말한다."
+    " 사실을 지어내거나 근거 문장을 인용·재현하지 말고, 민감한 정보나 행동을 요구하지 마라."
 )
 
 
@@ -304,14 +379,23 @@ def make_persona_phraser(timeout_sec: float = 25.0) -> Callable[[str, str], Opti
 
     def phrase(context: str, _fallback: str) -> Optional[str]:
         try:
-            from core.identity import get_identity, get_persona, render_persona
+            from core.identity import get_identity
             from core.identity.reflection_client import call_claude_resumable
         except Exception:
             logger.debug("[initiative] 프레이저 import 실패", exc_info=True)
             return None
         try:
             name = (get_identity() or {}).get("name") or "연속체"
-            persona_line = render_persona(get_persona() or {}) or ""
+            # Reflection prompts intentionally exclude the unrestricted persona
+            # blob (including few-shot examples); their evidence is the bounded
+            # identity context assembled by MemoryEventSource.
+            self_reflection = context.startswith("SELF_REFLECTION\n")
+            if self_reflection:
+                context = context.removeprefix("SELF_REFLECTION\n")
+                persona_line = ""
+            else:
+                from core.identity import get_persona, render_persona
+                persona_line = render_persona(get_persona() or {}) or ""
         except Exception:
             name, persona_line = "연속체", ""
         prompt = (
@@ -533,7 +617,8 @@ class InitiativeEngine:
                 if nudge is None:
                     key, detail = "dry", "소재 없음(모든 소스가 None 또는 쿨다운)"
                 else:
-                    self._log_state("spoke", f"발화 → source={nudge.source_key} topic={nudge.topic or '-'}")
+                    marker = nudge.fingerprint or nudge.topic or "-"
+                    self._log_state("spoke", f"발화 → source={nudge.source_key} marker={marker}")
                     self._speak(nudge)
                     return
             self._log_state(key, f"보류 — {detail}")
@@ -701,6 +786,16 @@ class InitiativeEngine:
                 logger.debug("[initiative] 소스 %s 후보 복원 실패", source_key, exc_info=True)
         self._log_state("discard", f"폐기 — 프레이징 완료 시점에 화면이 바빠짐 (source={source_key}, 간격·쿨다운 환불)")
 
+    def defer_active(self) -> bool:
+        """Hide a rendered nudge without recording ignored/engaged/cooldown."""
+        if self._active_nudge is None:
+            return False
+        self._active_nudge = None
+        self._active_text = ""
+        self._active_since = 0.0
+        self._discard()
+        return True
+
     def _render(self, nudge: Nudge, text: str) -> None:
         try:
             self._show_nudge(text, self._on_nudge_click)
@@ -712,7 +807,8 @@ class InitiativeEngine:
         self._active_nudge = nudge
         self._active_text = text
         self._active_since = time.monotonic()
-        self._rollback = None
+        # Keep the pre-render payment token until resolve. Launcher defer is a
+        # non-outcome and must restore the exact source candidate/timestamps.
         # 판정이 끝난 뒤에도 남는 슬롯 — 다음 발화가 오면 덮인다.
         self._last_nudge = nudge
         self._last_nudge_text = text

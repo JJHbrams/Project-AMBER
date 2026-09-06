@@ -324,23 +324,9 @@ foreach ($skillName in @("orchestrate", "engram-new-session", "engram-task-workf
     }
 }
 
-# 7e. Subagent skills (planner / coder / servant)
-#     Copilot CLI → ~/.copilot/agents/<name>.agent.md
-#     Claude Code → ~/.claude/agents/<name>.md
-Write-Step "Subagent skills (planner / coder / servant)..."
-if (-not (Test-Path $CopilotAgentsDir)) { New-Item -Path $CopilotAgentsDir -ItemType Directory -Force | Out-Null }
-if (-not (Test-Path $ClaudeAgentsDir))  { New-Item -Path $ClaudeAgentsDir  -ItemType Directory -Force | Out-Null }
-@("planner", "coder", "servant") | ForEach-Object {
-    $skill = $_
-    $src = Join-Path $SkillsSourceDir "$skill.md"
-    if (Test-Path $src) {
-        $copilotDst = Join-Path $CopilotAgentsDir "$skill.agent.md"
-        $claudeDst  = Join-Path $ClaudeAgentsDir  "$skill.md"
-        Copy-Item $src $copilotDst -Force
-        Copy-Item $src $claudeDst  -Force
-        Write-Ok $copilotDst
-        Write-Ok $claudeDst
-    } else {
-        Write-Warn "Skill source not found: $src"
-    }
+# 7e. Provider-owned subagent definitions (planner / coder / servant)
+Write-Step "Subagent definitions (Claude Code / Copilot CLI / Codex)..."
+$AgentDefinitionsInstaller = Join-Path $ProjectRoot "installer\deploy_agent_definitions.ps1"
+& $AgentDefinitionsInstaller -ProjectRoot $ProjectRoot -UserProfile $env:USERPROFILE | ForEach-Object {
+    Write-Ok $_
 }

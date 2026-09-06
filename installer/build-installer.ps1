@@ -114,7 +114,11 @@ if ($SkipBuild) {
     }
     Write-Ok "Existing bundle is current and validated"
 } else {
-    $overlayMode = if ($FreshBuild) { "rebuild" } else { "auto" }
+    # A release-facing "fresh" build must invalidate PyInstaller's analysis/PYZ
+    # cache.  "rebuild" intentionally permits incremental workpath reuse and
+    # can otherwise package stale Python bytecode while the input manifest
+    # describes current sources.
+    $overlayMode = if ($FreshBuild) { "clean" } else { "auto" }
     Write-Step "Preparing frozen bundle ($overlayMode)"
     & $Engine -Mode $overlayMode -CondaEnv $CondaEnv -Deploy $DistDir -NoStart
     if ($LASTEXITCODE -ne 0) {

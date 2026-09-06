@@ -58,6 +58,8 @@ states:
       frames: [14],
       selection: fixed,
       frame_ms: 700,
+      durations_ms: [700],
+      loop: true,
       transform: none,
       vfx: none,
     }

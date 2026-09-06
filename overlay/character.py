@@ -1,5 +1,7 @@
 """캐릭터 오버레이 창 — 투명 always-on-top, 드래그/클릭 가능."""
 
+import ctypes
+from ctypes import wintypes
 import random
 import re
 import tkinter as tk
@@ -19,6 +21,7 @@ from overlay.character_assets import (
     USER_REACTION_PACKS_DIR,
     ReactionPackResolution,
     inline_reaction_pack,
+    resolve_layered_timeline,
     resolve_bundled_character_source,
     resolve_character_set,
     resolve_legacy_asset,
@@ -28,6 +31,7 @@ from overlay.reaction_badge import crop_sprite, is_memory_tool_name, key_chroma,
 from overlay.config import (
     _USER_CONFIG_PATH, resolve_editable_overlay_path, load_cfg,
     get_overlay_state, set_flip_horizontal, update_overlay_state,
+    update_overlay_state_async,
 )
 
 USER_CONFIG_DIR = Path.home() / ".engram"
@@ -35,8 +39,59 @@ USER_OVERLAY_RESOURCE = USER_CONFIG_DIR / "overlay.png"
 USER_CHARACTER_DIR = USER_CONFIG_DIR / "character"
 RESOURCE_OVERLAY = resolve_editable_overlay_path("resource/overlay.png")
 _CHROMA = "#010101"
+
+
+def launcher_tooltip_position(lx: int, ly: int, width: int, height: int, work: tuple[int, int, int, int]) -> tuple[int, int]:
+    """Choose a measured tooltip position without assuming a primary monitor."""
+    candidates = ((lx + 58, ly + 8), (lx - width - 6, ly + 8), (lx + 26 - width // 2, ly - height - 6), (lx + 26 - width // 2, ly + 58))
+    x, y = next(((cx, cy) for cx, cy in candidates if work[0] <= cx and cx + width <= work[2] and work[1] <= cy and cy + height <= work[3]), candidates[-1])
+    return bubble_geometry.clamp_rect(x, y, width, height, work)
+
+
+def presentation_menu_action(
+    launcher_mode: bool, *, can_collapse: bool, can_hide_to_tray: bool,
+) -> tuple[str, str] | None:
+    """Return the one presentation action appropriate to the visible surface."""
+    if launcher_mode and can_hide_to_tray:
+        return "트레이로 숨기기", "hide_to_tray"
+    if not launcher_mode and can_collapse:
+        return "런처로 접기", "collapse"
+    return None
 _SMALL_MODEL_RE = re.compile(r"\b[0-4](?:\.\d+)?b\b", re.IGNORECASE)
 log = logging.getLogger(__name__)
+
+
+def _is_widget_descendant(widget, ancestor) -> bool:
+    """Whether focus remains on a surface or one of its child widgets."""
+    while widget is not None:
+        if widget is ancestor:
+            return True
+        try:
+            widget = widget.master
+        except Exception:
+            return False
+    return False
+
+
+def _clamp_menu_geometry(x: int, y: int, width: int, height: int, work_rect: tuple[int, int, int, int]) -> tuple[int, int, int, int]:
+    cx, cy = bubble_geometry.clamp_rect(int(x), int(y), int(width), int(height), work_rect)
+    return int(width), int(height), cx, cy
+
+
+def _point_outside_rect(point: tuple[int, int], rect: tuple[int, int, int, int]) -> bool:
+    x, y = point
+    left, top, right, bottom = rect
+    return not (left <= x < right and top <= y < bottom)
+
+
+def _menu_entry_is_selected(kind: str, variable_value, *, value="", onvalue="1") -> bool:
+    """Mirror Tk menu value matching without treating a non-empty StringVar as true."""
+    current = "" if variable_value is None else str(variable_value)
+    if kind == "radiobutton":
+        return current == str(value)
+    if kind == "checkbutton":
+        return current == str(onvalue)
+    return False
 
 
 def _clamp_float(value, minimum: float, maximum: float, default: float) -> float:
@@ -223,6 +278,7 @@ class SpriteStateMachine:
     state: str = "idle"
     work_state: str = "idle"
     hovered: bool = False
+    input_active: bool = False
     started_ms: float = 0.0
     epoch: int = 0
 
@@ -244,13 +300,16 @@ class SpriteStateMachine:
 
     @property
     def locked(self) -> bool:
-        return self.state in _SPRITE_LOCKED_STATES
+        return self.state in _SPRITE_LOCKED_STATES and not (
+            self.input_active and self.state == self._available("input")
+        )
 
     def set_work(self, state: str, now_ms: float) -> bool:
         if state not in _SPRITE_WORK_STATES or state not in self.states or self.locked:
             return False
         self.work_state = state
-        return self._set_display("hover" if self.hovered else state, now_ms)
+        target = "input" if self.input_active else ("hover" if self.hovered else state)
+        return self._set_display(target, now_ms)
 
     def show_transient(self, state: str, now_ms: float) -> bool:
         if state not in _SPRITE_LOCKED_STATES or state not in self.states:
@@ -267,27 +326,36 @@ class SpriteStateMachine:
         self.hovered = value
         if self.locked:
             return False
-        return self._set_display("hover" if value else self.work_state, now_ms)
+        target = "input" if self.input_active else ("hover" if value else self.work_state)
+        return self._set_display(target, now_ms)
 
-    def notify_input(self, now_ms: float) -> bool:
-        if self.locked:
+    def set_input_active(self, value: bool, now_ms: float) -> bool:
+        value = bool(value)
+        if value == self.input_active:
             return False
-        self.work_state = self._available("generating")
-        return self.show_transient("input", now_ms)
+        self.input_active = value
+        target = "input" if value else ("hover" if self.hovered else self.work_state)
+        return self._set_display(target, now_ms)
 
     def handle_event(self, event: object, now_ms: float) -> bool:
         state = classify_sprite_event(event)
         if state is None:
             return False
+        if state in {"thought", "search", "memory"} and state not in self.states:
+            state = "generating"
         if state == "success":
             if self.locked:
                 return False
             self.work_state = self._available("idle")
+            if self.input_active:
+                return self._set_display("input", now_ms)
             return self.show_transient(state, now_ms)
         if state in {"error", "provider_error"}:
             if self.locked:
                 return False
             self.work_state = self._available("idle")
+            if self.input_active:
+                return self._set_display("input", now_ms)
             return self.show_transient(state, now_ms)
         return self.set_work(state, now_ms)
 
@@ -342,6 +410,13 @@ def select_sprite_frame(
         key = (state, epoch, bucket)
         if key not in choices:
             choices[key] = rng.choice(frames)  # type: ignore[attr-defined]
+        return choices[key], bucket
+    if selection == "rotation":
+        key = (state, epoch, bucket)
+        if key not in choices:
+            previous = choices.get((state, epoch, bucket - 1)) if bucket > 0 else None
+            candidates = tuple(frame for frame in frames if len(frames) == 1 or frame != previous)
+            choices[key] = rng.choice(candidates)  # type: ignore[attr-defined]
         return choices[key], bucket
     if selection == "shuffle":
         orders = shuffle_orders if shuffle_orders is not None else {}
@@ -552,6 +627,10 @@ class CharacterOverlay:
         on_restart: Callable[[], None] | None = None,
         on_history: Callable[[], None] | None = None,
         on_pointer_event: Callable[[str, dict], None] | None = None,
+        on_collapse: Callable[[], None] | None = None,
+        on_expand: Callable[[], None] | None = None,
+        on_hide_launcher: Callable[[], None] | None = None,
+        is_launcher_mode: Callable[[], bool] | None = None,
     ):
         self.root = root
         self.on_activate = on_activate
@@ -566,6 +645,16 @@ class CharacterOverlay:
         self.on_restart = on_restart
         self.on_history = on_history
         self.on_pointer_event = on_pointer_event
+        self.on_collapse = on_collapse
+        self.on_expand = on_expand
+        self.on_hide_launcher = on_hide_launcher
+        self.is_launcher_mode = is_launcher_mode
+        self._launcher_canvas = None
+        self._launcher_tooltip = None
+        self._launcher_press = None
+        self._launcher_moved = False
+        self._full_rect = None
+        self._launcher_expand_anchor: tuple[int, int] | None = None
 
         self.root.overrideredirect(True)
         self.root.attributes("-topmost", True)
@@ -747,8 +836,11 @@ class CharacterOverlay:
         now_ms = time.monotonic() * 1000
         model = SpriteStateMachine(set(profile.reaction_pack.states or {}), started_ms=old_model.started_ms)
         model.hovered = old_model.hovered
+        model.input_active = old_model.input_active
         model.work_state = model._available(old_model.work_state)
-        desired = old_model.state if old_model.state in model.states else ("hover" if model.hovered else model.work_state)
+        desired = "input" if model.input_active else (
+            old_model.state if old_model.state in model.states else ("hover" if model.hovered else model.work_state)
+        )
         model.state = model._available(desired)
         model.epoch = old_model.epoch + 1
         if model.state != old_model.state:
@@ -811,8 +903,8 @@ class CharacterOverlay:
         if self._profile.sprite_enabled and self._sprite_model.handle_event(event, time.monotonic() * 1000):
             self._schedule_animation_in(0)
 
-    def notify_input(self) -> None:
-        if self._profile.sprite_enabled and self._sprite_model.notify_input(time.monotonic() * 1000):
+    def set_input_active(self, active: bool) -> None:
+        if self._profile.sprite_enabled and self._sprite_model.set_input_active(active, time.monotonic() * 1000):
             self._schedule_animation_in(0)
 
     def _sprite_image(self, index: int, target_h: int, flip: bool) -> Image.Image:
@@ -827,6 +919,17 @@ class CharacterOverlay:
             if flip: sprite = sprite.transpose(Image.FLIP_LEFT_RIGHT)
             self._sprite_cache[key] = sprite
         return self._sprite_cache[key]
+
+    def _sprite_layer_image(self, indices: tuple[int, ...], target_h: int, flip: bool) -> Image.Image:
+        """Composite declared grid layers on one stable, bottom-aligned canvas."""
+        images = tuple(self._sprite_image(index, target_h, flip) for index in indices)
+        if len(images) == 1:
+            return images[0]
+        width = max(image.width for image in images)
+        composed = Image.new("RGBA", (width, target_h), (0, 0, 0, 0))
+        for image in images:
+            composed.alpha_composite(image, ((width - image.width) // 2, target_h - image.height))
+        return composed
 
     def _load_image(self, work_size: tuple[int, int] | None = None, source_path: Path | None = None):
         cfg = self._cfg["overlay"]
@@ -933,8 +1036,11 @@ class CharacterOverlay:
         x, y = self.root.winfo_x(), self.root.winfo_y()
         def update(state: dict) -> None:
             work = bubble_geometry.get_monitor_work_rect(x + self._img_w // 2, y + self._img_h // 2)
-            state["overlay_window"] = {"x": int(x), "y": int(y), "work_area": list(work)}
-        update_overlay_state(update)
+            previous = state.get("overlay_window")
+            record = dict(previous) if isinstance(previous, dict) else {}
+            record.update({"x": int(x), "y": int(y), "work_area": list(work)})
+            state["overlay_window"] = record
+        update_overlay_state_async(update)
 
     def hide_for_external_renderer(self) -> None:
         """Hide only the bundled window after a replacement renderer handshake."""
@@ -946,6 +1052,258 @@ class CharacterOverlay:
         self.root.deiconify()
         self.root.attributes("-topmost", True)
 
+    def show_launcher(self) -> None:
+        """Replace the bundled art with a compact host-owned signal pebble."""
+        if self._launcher_canvas is not None:
+            saved = (get_overlay_state().get("launcher_window") or {})
+            x, y = int(saved.get("x", self.root.winfo_x())), int(saved.get("y", self.root.winfo_y()))
+            work = bubble_geometry.get_monitor_work_rect(x + 26, y + 26)
+            x, y = bubble_geometry.clamp_rect(x, y, 52, 52, work)
+            self.root.geometry(f"52x52+{x}+{y}")
+            return
+        self._full_rect = self.get_phys_rect()
+        canvas = tk.Canvas(self.root, width=52, height=52, bg=_CHROMA, highlightthickness=0, bd=0)
+        # Keep this entirely canvas-native: it stays sharp on high-DPI screens
+        # and does not add a separate launcher bitmap to package or reload.
+        canvas.create_oval(5, 7, 49, 51, fill="#241642", outline="", tags="launcher-shadow")
+        ring = canvas.create_oval(3, 3, 49, 49, fill="#5b3db7", outline="#ffffff", width=2, tags="launcher-face")
+        canvas.create_oval(14, 16, 39, 34, fill="#ffffff", outline="", tags="launcher-glyph")
+        canvas.create_polygon(19, 31, 18, 38, 25, 33, fill="#ffffff", outline="", tags="launcher-glyph")
+        for dot_x in (21, 26, 31):
+            canvas.create_oval(dot_x, 23, dot_x + 3, 26, fill="#5b3db7", outline="", tags="launcher-glyph")
+        canvas.configure(takefocus=True)
+        canvas.bind("<ButtonPress-1>", self._on_launcher_press)
+        canvas.bind("<B1-Motion>", self._on_launcher_drag)
+        canvas.bind("<ButtonRelease-1>", self._on_launcher_release)
+        canvas.bind("<Button-3>", self._on_launcher_context_menu)
+        canvas.bind("<Return>", self._activate_launcher)
+        canvas.bind("<space>", self._activate_launcher)
+        canvas.bind("<FocusIn>", lambda _event: canvas.itemconfigure(ring, outline="#ffff00", width=4))
+        canvas.bind("<FocusOut>", lambda _event: canvas.itemconfigure(ring, outline="#ffffff", width=3))
+        canvas.bind("<Enter>", lambda _event: (canvas.configure(cursor="hand2"), self._set_launcher_hover(True), self._show_launcher_tooltip()))
+        canvas.bind("<Leave>", lambda _event: (canvas.configure(cursor=""), self._set_launcher_hover(False), self._hide_launcher_tooltip()))
+        self._label.pack_forget()
+        canvas.pack()
+        self._launcher_canvas = canvas
+        saved = (get_overlay_state().get("launcher_window") or {})
+        x, y = int(saved.get("x", self._full_rect[0])), int(saved.get("y", self._full_rect[1]))
+        work = bubble_geometry.get_monitor_work_rect(x, y)
+        x, y = bubble_geometry.clamp_rect(x, y, 52, 52, work)
+        self.root.geometry(f"52x52+{x}+{y}")
+        update_overlay_state_async(lambda state: state.update({"launcher_window": {"x": x, "y": y, "width": 52, "height": 52}}))
+
+    def show_full(self) -> None:
+        if self._launcher_canvas is None:
+            return
+        self._launcher_canvas.destroy()
+        self._launcher_canvas = None
+        self._hide_launcher_tooltip()
+        self._label.pack()
+        if self._full_rect is not None:
+            x, y, w, h = self.launcher_full_target()
+            work = bubble_geometry.get_monitor_work_rect(x + w // 2, y + h // 2)
+            self.root.geometry(f"{w}x{h}+{x}+{y}")
+            def update(state: dict) -> None:
+                previous = state.get("overlay_window")
+                record = dict(previous) if isinstance(previous, dict) else {}
+                record.update({"x": x, "y": y, "width": w, "height": h, "work_area": list(work)})
+                state["overlay_window"] = record
+            update_overlay_state(update)
+
+    def _activate_launcher(self, _event=None):
+        callback = self.on_expand or self.on_activate
+        if callback is not None:
+            callback()
+        return "break"
+
+    def _on_launcher_press(self, event) -> None:
+        self._launcher_press = (event.x_root, event.y_root)
+        self._launcher_moved = False
+
+    def _on_launcher_drag(self, event) -> None:
+        if self._launcher_press is None:
+            return
+        old_x, old_y = self._launcher_press
+        dx, dy = event.x_root - old_x, event.y_root - old_y
+        if abs(dx) > 4 or abs(dy) > 4:
+            self._launcher_moved = True
+        x, y = self.root.winfo_x() + dx, self.root.winfo_y() + dy
+        self.root.geometry(f"+{x}+{y}")
+        self._launcher_press = (event.x_root, event.y_root)
+
+    def _on_launcher_release(self, _event) -> None:
+        if not self._launcher_moved:
+            self._activate_launcher()
+            return
+        x, y = self.root.winfo_x(), self.root.winfo_y()
+        work = bubble_geometry.get_monitor_work_rect(x + 26, y + 26)
+        x, y = bubble_geometry.clamp_rect(x, y, 52, 52, work)
+        self.root.geometry(f"52x52+{x}+{y}")
+        # Launcher motion must not resize/reload the full artwork or replace
+        # the full-window position retained for the next expansion.
+        update_overlay_state_async(lambda state: state.update({"launcher_window": {"x": x, "y": y, "width": 52, "height": 52, "work_area": list(work)}}))
+        self._launcher_press = None
+
+    def _on_launcher_context_menu(self, event):
+        self._hide_launcher_tooltip()
+        self.external_context_menu(int(event.x_root), int(event.y_root))
+        return "break"
+
+    def _show_launcher_tooltip(self) -> None:
+        if self._launcher_tooltip is not None or self._launcher_canvas is None:
+            return
+        tip = tk.Toplevel(self.root)
+        tip.overrideredirect(True)
+        tip.attributes("-topmost", True)
+        tk.Label(tip, text="Engram 열기", bg="#111827", fg="#ffffff", padx=6, pady=3).pack()
+        tip.update_idletasks()
+        width, height = tip.winfo_reqwidth(), tip.winfo_reqheight()
+        lx, ly = self.root.winfo_x(), self.root.winfo_y()
+        work = bubble_geometry.get_monitor_work_rect(lx + 26, ly + 26)
+        x, y = launcher_tooltip_position(lx, ly, width, height, work)
+        tip.geometry(f"{width}x{height}+{x}+{y}")
+        self._launcher_tooltip = tip
+
+    def _set_launcher_hover(self, hovered: bool) -> None:
+        canvas = self._launcher_canvas
+        if canvas is None:
+            return
+        canvas.itemconfigure("launcher-face", fill="#7659cf" if hovered else "#5b3db7")
+        # A one-pixel lift reads as a button response without changing the
+        # host window rectangle used by drag/persistence.
+        offset = -1 if hovered else 1
+        canvas.move("launcher-face", 0, offset)
+        canvas.move("launcher-glyph", 0, offset)
+
+    def _hide_launcher_tooltip(self) -> None:
+        if getattr(self, "_launcher_tooltip", None) is not None:
+            self._launcher_tooltip.destroy()
+            self._launcher_tooltip = None
+
+    def get_presentation_rect(self, mode: str) -> tuple[int, int, int, int]:
+        """Return the independently persisted target rectangle for a presentation."""
+        saved = get_overlay_state()
+        if mode == "launcher":
+            record = saved.get("launcher_window") or {}
+            fallback = self.get_phys_rect()
+            return (int(record.get("x", fallback[0])), int(record.get("y", fallback[1])),
+                    int(record.get("width", 52)), int(record.get("height", 52)))
+        record = saved.get("overlay_window") or {}
+        fallback = self.get_bundled_phys_rect()
+        return (int(record.get("x", fallback[0])), int(record.get("y", fallback[1])),
+                int(record.get("width", fallback[2])), int(record.get("height", fallback[3])))
+
+    def launcher_full_target(self, external_size: tuple[int, int] | None = None) -> tuple[int, int, int, int]:
+        """Fresh full target from launcher plus the user's preferred drag offset.
+
+        First capable-renderer launch has no acknowledged rect, so bundled size
+        is the safe fallback until the renderer reports its actual geometry.
+        """
+        lx, ly = self.root.winfo_x(), self.root.winfo_y()
+        if external_size is not None:
+            width, height = max(1, int(external_size[0])), max(1, int(external_size[1]))
+        else:
+            try:
+                _x, _y, width, height = self.get_bundled_phys_rect()
+            except AttributeError:
+                _x, _y, width, height = self._full_rect
+        offset_x, offset_y = self._saved_launcher_offset()
+        preferred_x = lx + 26 - width // 2 + offset_x
+        preferred_y = ly + 26 - height + offset_y
+        # The preferred full layout may intentionally live on a different
+        # monitor from its launcher. Resolve/clamp against that full rectangle,
+        # while get_monitor_work_rect retains nearest-monitor fallback if the
+        # previously used monitor disappeared.
+        work = bubble_geometry.get_monitor_work_rect(
+            preferred_x + width // 2,
+            preferred_y + height // 2,
+        )
+        x, y = bubble_geometry.clamp_rect(
+            preferred_x,
+            preferred_y,
+            width,
+            height,
+            work,
+        )
+        return x, y, width, height
+
+    def _saved_launcher_offset(self) -> tuple[int, int]:
+        state = get_overlay_state()
+        record = state.get("overlay_window") if isinstance(state, dict) else None
+        if not isinstance(record, dict):
+            return 0, 0
+        offset_x = record.get("launcher_offset_x")
+        offset_y = record.get("launcher_offset_y")
+        if (
+            not isinstance(offset_x, int) or isinstance(offset_x, bool)
+            or not isinstance(offset_y, int) or isinstance(offset_y, bool)
+            or not -1_000_000 <= offset_x <= 1_000_000
+            or not -1_000_000 <= offset_y <= 1_000_000
+        ):
+            return 0, 0
+        return offset_x, offset_y
+
+    def remember_launcher_relative_offset(self, x: int, y: int, width: int, height: int) -> tuple[int, int]:
+        """Persist full placement relative to launcher without moving launcher."""
+        anchor = getattr(self, "_launcher_expand_anchor", None)
+        if anchor is None:
+            state = get_overlay_state()
+            launcher = state.get("launcher_window") if isinstance(state, dict) else None
+            try:
+                anchor = (int(launcher["x"]), int(launcher["y"]))
+            except (KeyError, TypeError, ValueError):
+                # First-run full drag with no launcher state defines the
+                # current placement as nominal rather than inventing an offset.
+                anchor = (
+                    int(x) + int(width) // 2 - 26,
+                    int(y) + int(height) - 26,
+                )
+        lx, ly = anchor
+        nominal_x = lx + 26 - int(width) // 2
+        nominal_y = ly + 26 - int(height)
+        offset_x = max(-1_000_000, min(1_000_000, int(x) - nominal_x))
+        offset_y = max(-1_000_000, min(1_000_000, int(y) - nominal_y))
+
+        def update(state: dict) -> None:
+            previous = state.get("overlay_window")
+            record = dict(previous) if isinstance(previous, dict) else {}
+            record.update({"launcher_offset_x": offset_x, "launcher_offset_y": offset_y})
+            state["overlay_window"] = record
+
+        update_overlay_state_async(update)
+        return offset_x, offset_y
+
+    def capture_launcher_expand_anchor(self) -> tuple[int, int]:
+        """Remember the physical launcher position before a clamped full open."""
+        self._launcher_expand_anchor = (int(self.root.winfo_x()), int(self.root.winfo_y()))
+        return self._launcher_expand_anchor
+
+    def snapshot_launcher_anchor(self) -> tuple[int, int]:
+        """Persist the independent launcher anchor, never derive it from a full drag."""
+        if getattr(self, "_launcher_expand_anchor", None) is not None:
+            lx, ly = self._launcher_expand_anchor
+            work = bubble_geometry.get_monitor_work_rect(lx + 26, ly + 26)
+            lx, ly = bubble_geometry.clamp_rect(lx, ly, 52, 52, work)
+        else:
+            saved = get_overlay_state()
+            record = saved.get("launcher_window") if isinstance(saved, dict) else None
+            try:
+                lx, ly = int(record["x"]), int(record["y"])
+            except (KeyError, TypeError, ValueError):
+                # First-run migration only: without a launcher record or an
+                # expand capture, seed it once from the current full window.
+                x, y, width, height = self.get_phys_rect()
+                work = bubble_geometry.get_monitor_work_rect(x + width // 2, y + height // 2)
+                lx, ly = bubble_geometry.clamp_rect(
+                    x + width // 2 - 26, y + height - 26, 52, 52, work
+                )
+            else:
+                work = bubble_geometry.get_monitor_work_rect(lx + 26, ly + 26)
+                lx, ly = bubble_geometry.clamp_rect(lx, ly, 52, 52, work)
+        update_overlay_state_async(lambda state: state.update({"launcher_window": {"x": lx, "y": ly, "width": 52, "height": 52, "work_area": list(work)}}))
+        self._launcher_expand_anchor = None
+        return lx, ly
+
     def apply_external_geometry(
         self,
         x: int,
@@ -955,6 +1313,7 @@ class CharacterOverlay:
         *,
         preserve_position: bool = False,
         persist_position: bool = True,
+        presentation_mode: str = "full",
     ) -> tuple[int, int, int, int]:
         """Sync replacement geometry while keeping persisted startup x/y authoritative.
 
@@ -974,19 +1333,118 @@ class CharacterOverlay:
         work = bubble_geometry.get_monitor_work_rect(x + width // 2, y + height // 2)
 
         def update(state: dict) -> None:
-            state["overlay_window"] = {"x": x, "y": y, "work_area": list(work)}
+            key = "launcher_window" if presentation_mode == "launcher" else "overlay_window"
+            previous = state.get(key)
+            record = dict(previous) if isinstance(previous, dict) else {}
+            record.update({"x": x, "y": y, "width": width, "height": height, "work_area": list(work)})
+            state[key] = record
 
-        update_overlay_state(update)
+        update_overlay_state_async(update)
         return self._external_rect
 
     def external_activate(self) -> None:
         self._invoke_activate()
 
     def external_context_menu(self, x: int, y: int) -> None:
-        class _Event:
-            x_root = x
-            y_root = y
-        self._show_context_menu(_Event())
+        """Render the complete existing Tk menu model in a nonmodal host surface."""
+        self._dismiss_context_menu()
+        try:
+            # The host canvas survives while withdrawn, so the menu must not
+            # retain a full-overlay action when the launcher is later shown.
+            self._build_context_menu()
+            self._flip_var.set(self._flip_h)
+            self._rebuild_provider_menu()
+            menu = tk.Toplevel(self.root)
+            menu.overrideredirect(True)
+            menu.attributes("-topmost", True)
+            self._context_menu_open = True
+            self._external_context_surface = menu
+            holder = tk.Frame(menu, bg="#252a35", bd=1, relief="solid")
+            holder.pack(fill="both", expand=True)
+
+            def render(model, trail=()):
+                for child in holder.winfo_children():
+                    child.destroy()
+                if trail:
+                    tk.Button(holder, text="‹ 뒤로", command=lambda: render(trail[-1], trail[:-1]), anchor="w").pack(fill="x")
+                end = model.index("end")
+                for index in range(0 if end is None else end + 1):
+                    kind = model.type(index)
+                    if kind == "separator":
+                        tk.Frame(holder, height=1, bg="#4b5568").pack(fill="x", pady=3); continue
+                    label = model.entrycget(index, "label")
+                    state = model.entrycget(index, "state")
+                    if kind in {"checkbutton", "radiobutton"}:
+                        variable = model.entrycget(index, "variable")
+                        try:
+                            value = model.entrycget(index, "value") if kind == "radiobutton" else ""
+                            onvalue = model.entrycget(index, "onvalue") if kind == "checkbutton" else "1"
+                            selected = _menu_entry_is_selected(
+                                kind,
+                                self.root.getvar(variable),
+                                value=value,
+                                onvalue=onvalue,
+                            )
+                        except Exception:
+                            selected = False
+                        label = ("✓ " if selected else "   ") + label
+                    if kind == "cascade":
+                        path = model.entrycget(index, "menu")
+                        child = model.nametowidget(path)
+                        command = lambda m=child, t=trail + (model,): render(m, t)
+                        label += "  ›"
+                    else:
+                        command = lambda m=model, i=index: (self._dismiss_context_menu(), m.invoke(i))
+                    tk.Button(holder, text=label, command=command, state=state, anchor="w", relief="flat",
+                              bg="#252a35", fg="#edf1f7", activebackground="#3a4354",
+                              activeforeground="#ffffff", padx=12).pack(fill="x")
+
+            render(self._context_menu)
+            menu.bind("<Escape>", lambda _event: self._dismiss_context_menu())
+            def focus_out(_event):
+                menu.after_idle(lambda: self._dismiss_context_menu()
+                                if not _is_widget_descendant(menu.focus_displayof(), menu) else None)
+            menu.bind("<FocusOut>", focus_out)
+            menu.update_idletasks()
+            work = bubble_geometry.get_monitor_work_rect(int(x), int(y))
+            width, height, px, py = _clamp_menu_geometry(x, y, menu.winfo_reqwidth(), menu.winfo_reqheight(), work)
+            menu.geometry(f"{width}x{height}+{px}+{py}")
+            menu.focus_force()
+            self._start_context_menu_outside_poll(menu, (px, py, px + width, py + height))
+        except Exception:
+            self._dismiss_context_menu()
+
+    @staticmethod
+    def _left_button_pressed() -> bool:
+        """Read local button state without installing a system-wide observer."""
+        try:
+            return bool(ctypes.windll.user32.GetAsyncKeyState(0x01) & 0x8000)
+        except Exception:
+            return False
+
+    def _start_context_menu_outside_poll(self, surface, rect) -> None:
+        """Dismiss on the first outside left-button edge using Tk-thread polling."""
+        generation = int(getattr(self, "_context_menu_poll_generation", 0)) + 1
+        self._context_menu_poll_generation = generation
+        self._context_menu_left_down = self._left_button_pressed()
+
+        def poll() -> None:
+            if generation != getattr(self, "_context_menu_poll_generation", None):
+                return
+            if not self._context_menu_open or getattr(self, "_external_context_surface", None) is not surface:
+                return
+            down = self._left_button_pressed()
+            previous = bool(getattr(self, "_context_menu_left_down", False))
+            self._context_menu_left_down = down
+            if down and not previous and _point_outside_rect(self._pointer_screen_position() or rect[:2], rect):
+                self._dismiss_context_menu()
+                return
+            try:
+                self._context_menu_poll_after = self.root.after(20, poll)
+            except Exception:
+                self._dismiss_context_menu()
+
+        self._context_menu_poll_after = self.root.after(20, poll)
 
     def _bind_events(self):
         self._press_x = 0
@@ -1025,9 +1483,20 @@ class CharacterOverlay:
         self._context_menu.add_checkbutton(label="좌우 반전", variable=self._flip_var, command=self._toggle_flip)
         self._context_menu.add_separator()
         self._context_menu.add_command(label="설정", command=self._invoke_settings)
+        try:
+            launcher_mode = bool(self.is_launcher_mode and self.is_launcher_mode())
+        except Exception:
+            launcher_mode = False
+        action = presentation_menu_action(
+            launcher_mode,
+            can_collapse=self.on_collapse is not None,
+            can_hide_to_tray=self.on_hide_launcher is not None,
+        )
+        if action == ("런처로 접기", "collapse"):
+            self._context_menu.add_command(label=action[0], command=self.on_collapse)
+        elif action == ("트레이로 숨기기", "hide_to_tray"):
+            self._context_menu.add_command(label=action[0], command=self._invoke_hide_launcher)
         self._context_menu.add_command(label="재시작", command=self._invoke_restart)
-        self._context_menu.add_separator()
-        self._context_menu.add_command(label="종료", command=self._invoke_quit)
 
     def _get_ollama_model_value(self) -> str:
         if self.on_get_ollama_model is None:
@@ -1155,30 +1624,36 @@ class CharacterOverlay:
         self._set_frame(self._current_source)
 
     def _show_context_menu(self, event):
-        if self._context_menu_open:
-            return
+        self.external_context_menu(int(event.x_root), int(event.y_root))
 
-        self._flip_var.set(self._flip_h)
-        self._rebuild_provider_menu()
-        was_topmost = bool(self.root.attributes("-topmost"))
-        self._context_menu_open = True
+    @staticmethod
+    def _pointer_screen_position() -> "tuple[int, int] | None":
         try:
-            # popup 메뉴가 최상위로 유지되도록 오버레이 topmost를 잠시 양보한다.
-            if was_topmost:
-                self.root.attributes("-topmost", False)
-                self.root.update_idletasks()
-            self._context_menu.tk_popup(event.x_root, event.y_root)
-        finally:
-            try:
-                self._context_menu.grab_release()
-            except Exception:
-                pass
-            self._context_menu_open = False
-            if was_topmost:
-                self.root.attributes("-topmost", True)
-            self.root.lift()
+            point = wintypes.POINT()
+            if ctypes.windll.user32.GetCursorPos(ctypes.byref(point)):
+                return int(point.x), int(point.y)
+        except Exception:
+            pass
+        return None
 
     def _dismiss_context_menu(self):
+        log.debug("[overlay] context menu dismiss requested")
+        surface = getattr(self, "_external_context_surface", None)
+        self._context_menu_poll_generation = int(getattr(self, "_context_menu_poll_generation", 0)) + 1
+        after_id = getattr(self, "_context_menu_poll_after", None)
+        self._context_menu_poll_after = None
+        if after_id is not None:
+            try:
+                self.root.after_cancel(after_id)
+            except Exception:
+                pass
+        self._external_context_surface = None
+        if surface is not None:
+            try:
+                if surface.winfo_exists():
+                    surface.destroy()
+            except Exception:
+                pass
         def _close_once():
             for menu in (getattr(self, "_provider_menu", None), getattr(self, "_context_menu", None)):
                 if menu is None:
@@ -1278,6 +1753,15 @@ class CharacterOverlay:
             return
         try:
             self.on_restart()
+        except Exception:
+            self._log_overlay_exception()
+
+    def _invoke_hide_launcher(self):
+        self._dismiss_context_menu()
+        if self.on_hide_launcher is None:
+            return
+        try:
+            self.on_hide_launcher()
         except Exception:
             self._log_overlay_exception()
 
@@ -1422,15 +1906,24 @@ class CharacterOverlay:
                 self._sprite_choices.clear()
                 self._sprite_shuffle_orders.clear()
                 self._sprite_selection_epoch = self._sprite_model.epoch
-            index, bucket = select_sprite_frame(
-                spec,
-                self._sprite_model.state,
-                self._sprite_model.epoch,
-                elapsed,
-                self._sprite_choices,
-                self._sprite_rng,
-                self._sprite_shuffle_orders,
-            )
+            timeline_enabled = any(key in spec for key in ("durations_ms", "loop", "hold_ms", "layers"))
+            if timeline_enabled:
+                position = resolve_layered_timeline(
+                    spec, elapsed, seed=f"{self._sprite_model.state}:{self._sprite_model.epoch}"
+                )
+                indices = position.frames
+                bucket = position.frame_index
+            else:
+                index, bucket = select_sprite_frame(
+                    spec,
+                    self._sprite_model.state,
+                    self._sprite_model.epoch,
+                    elapsed,
+                    self._sprite_choices,
+                    self._sprite_rng,
+                    self._sprite_shuffle_orders,
+                )
+                indices = (index,)
             if len(self._sprite_choices) > 128:
                 self._sprite_choices.clear()
             if len(self._sprite_shuffle_orders) > 8:
@@ -1453,7 +1946,7 @@ class CharacterOverlay:
             flip = self._flip_h ^ idle_flip ^ hover_flip
             target_h = target_height_for_work_area(self._work_size, self._cfg["overlay"]["char_height_ratio"])
             old_width, old_height = self._img_w, self._img_h
-            self._base_image = self._sprite_image(index, target_h, flip)
+            self._base_image = self._sprite_layer_image(indices, target_h, flip)
             self._img_w, self._img_h = self._base_image.size
             phase = (elapsed % max(1, spec["frame_ms"])) / max(1, spec["frame_ms"])
             sx, sy = (1.0, 1.0)
@@ -1540,6 +2033,9 @@ class CharacterOverlay:
         if self._moved:
             self._reload_image_for_current_monitor()
             self._save_position()
+            self.remember_launcher_relative_offset(
+                self.root.winfo_x(), self.root.winfo_y(), self._img_w, self._img_h
+            )
             self._emit_pointer_event(
                 "drag_end", {"screen_x": self.root.winfo_x(), "screen_y": self.root.winfo_y()}
             )

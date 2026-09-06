@@ -1,5 +1,6 @@
 """Safe, manifest-based resolver for optional character asset packs."""
 
+import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -43,6 +44,136 @@ class ReactionPackResolution:
     mapping: dict[str, int] | None = None
     states: dict[str, dict] | None = None
     crop_y_offset_px: int = 0
+
+
+@dataclass(frozen=True)
+class TimelinePosition:
+    """Pure resolved timeline metadata; rendering remains host-owned."""
+
+    frames: tuple[int, ...]
+    frame_index: int
+    elapsed_in_frame_ms: int
+    holding: bool
+    completed: bool
+    cycle: int
+
+
+def _lcg_state(seed: object, cycle: int) -> int:
+    state = int.from_bytes(hashlib.sha256(str(seed).encode("utf-8")).digest()[:4], "big")
+    for _ in range(max(0, int(cycle)) + 1):
+        state = (1664525 * state + 1013904223) & 0xFFFFFFFF
+    return state
+
+
+def _hold_bounds(hold_ms: object) -> tuple[int, int] | None:
+    if not isinstance(hold_ms, (tuple, list)) or len(hold_ms) != 2:
+        return None
+    low, high = hold_ms
+    if any(isinstance(value, bool) or not isinstance(value, int) for value in (low, high)):
+        return None
+    low, high = max(0, low), max(0, high)
+    return (low, high) if low <= high else (high, low)
+
+
+def deterministic_hold_ms(hold_ms: object, seed: object, cycle: int = 0) -> int:
+    """Resolve an inclusive hold range using the per-cycle LCG draw."""
+    if isinstance(hold_ms, int) and not isinstance(hold_ms, bool):
+        return max(0, hold_ms)
+    bounds = _hold_bounds(hold_ms)
+    if bounds is None:
+        return 0
+    low, high = bounds
+    return low + _lcg_state(seed, cycle) % (high - low + 1)
+
+
+def _timeline_durations(spec: dict) -> tuple[int, ...]:
+    frames = tuple(spec.get("frames") or (0,))
+    default_duration = max(1, int(spec.get("frame_ms", 600)))
+    declared = spec.get("durations_ms")
+    values = tuple(declared) if isinstance(declared, (tuple, list)) and len(declared) == len(frames) else (default_duration,) * len(frames)
+    return tuple(max(1, int(value)) for value in values)
+
+
+def timeline_nominal_total_ms(spec: dict) -> int:
+    """Return one layer's nominal cycle duration using a ranged hold midpoint."""
+    durations = _timeline_durations(spec)
+    hold = spec.get("hold_ms")
+    if isinstance(hold, (tuple, list)) and len(hold) == 2:
+        low, high = sorted((max(0, int(hold[0])), max(0, int(hold[1]))))
+        first = (low + high) // 2
+    elif isinstance(hold, int) and not isinstance(hold, bool):
+        first = max(0, hold)
+    else:
+        first = durations[0]
+    return max(1, first + sum(durations[1:]))
+
+
+def resolve_timeline_position(spec: dict, elapsed_ms: float, *, seed: object = 0) -> TimelinePosition:
+    """Resolve duration boundaries, loop holds, and non-loop completion."""
+    frames = tuple(spec.get("frames") or (0,))
+    durations = _timeline_durations(spec)
+    has_hold = "hold_ms" in spec
+    loop = bool(spec.get("loop", spec.get("selection") != "sequence_once"))
+    elapsed = max(0, int(elapsed_ms))
+    cycle = 0
+    position = elapsed
+    variable_hold = has_hold and isinstance(spec["hold_ms"], (tuple, list))
+    if loop and not variable_hold:
+        first_duration = deterministic_hold_ms(spec["hold_ms"], seed, cycle) if has_hold else durations[0]
+        cycle_durations = (first_duration,) + durations[1:]
+        cycle_ms = max(1, sum(cycle_durations))
+        cycle, position = divmod(elapsed, cycle_ms)
+    else:
+        hold_bounds = _hold_bounds(spec["hold_ms"]) if variable_hold else None
+        hold_state = int.from_bytes(hashlib.sha256(str(seed).encode("utf-8")).digest()[:4], "big")
+        while True:
+            if hold_bounds is not None:
+                hold_state = (1664525 * hold_state + 1013904223) & 0xFFFFFFFF
+                first_duration = hold_bounds[0] + hold_state % (hold_bounds[1] - hold_bounds[0] + 1)
+            else:
+                first_duration = deterministic_hold_ms(spec["hold_ms"], seed, cycle) if has_hold else durations[0]
+            cycle_durations = (first_duration,) + durations[1:]
+            cycle_ms = max(1, sum(cycle_durations))
+            if not loop:
+                if position >= cycle_ms:
+                    return TimelinePosition((frames[-1],), len(frames) - 1, durations[-1], True, True, 0)
+                break
+            if position < cycle_ms:
+                break
+            position -= cycle_ms
+            cycle += 1
+    cursor = 0
+    for index, duration in enumerate(cycle_durations):
+        boundary = cursor + duration
+        if position < boundary:
+            return TimelinePosition((frames[index],), index, position - cursor, has_hold and index == 0, False, cycle)
+        cursor = boundary
+    return TimelinePosition((frames[-1],), len(frames) - 1, durations[-1], True, not loop, cycle)
+
+
+def resolve_layered_timeline(spec: dict, elapsed_ms: float, *, seed: object = 0) -> TimelinePosition:
+    """Resolve base plus optional declared layers as composition metadata."""
+    base = resolve_timeline_position(spec, elapsed_ms, seed=f"{seed}:base")
+    layers = [base.frames[0]]
+    timeline_specs = (spec,) + tuple(spec.get("layers") or ())
+    option_completes = any(not bool(layer.get("loop", layer.get("selection") != "sequence_once")) for layer in timeline_specs)
+    completed = option_completes and max(0, int(elapsed_ms)) >= max(timeline_nominal_total_ms(layer) for layer in timeline_specs)
+    holding = base.holding
+    for index, layer in enumerate(spec.get("layers") or ()):
+        position = resolve_timeline_position(layer, elapsed_ms, seed=f"{seed}:layer:{index}")
+        layers.append(position.frames[0])
+        holding = holding or position.holding
+    return TimelinePosition(tuple(layers), base.frame_index, base.elapsed_in_frame_ms, holding, completed, base.cycle)
+
+
+def rotation_value(options: tuple[int, ...], step: int, *, seed: object = 0) -> int:
+    """Return a deterministic rotation whose adjacent values never repeat."""
+    if not options:
+        raise ValueError("rotation requires at least one option")
+    if len(options) == 1:
+        return options[0]
+    offset = int.from_bytes(hashlib.sha256(str(seed).encode("utf-8")).digest()[:8], "big") % len(options)
+    return options[(offset + max(0, int(step))) % len(options)]
 
 
 _BUILTIN_STATE_TEMPLATE = {
@@ -329,24 +460,84 @@ def _read_reaction_manifest(root: Path, source: str, expected_id: str) -> Reacti
     if states_raw is not None:
         if not isinstance(states_raw, dict):
             return None
-        allowed_selection = {"random", "sequence", "sequence_once", "fixed", "shuffle"}
+        allowed_selection = {"random", "rotation", "sequence", "sequence_once", "fixed", "shuffle"}
+
+        def normalize_timeline(item: dict, *, require_frames: bool = True) -> dict | None:
+            frames = item.get("frames")
+            if require_frames and (not isinstance(frames, list) or not frames):
+                return None
+            if not isinstance(frames, list) or any(isinstance(v, bool) or not isinstance(v, int) or not 0 <= v < columns * rows for v in frames):
+                return None
+            timing = _positive_int(item.get("frame_ms", item.get("dwell_ms", 600)))
+            if timing is None:
+                return None
+            normalized: dict = {"frames": tuple(frames), "frame_ms": timing}
+            if "durations_ms" in item:
+                durations = item["durations_ms"]
+                if not isinstance(durations, list) or len(durations) != len(frames):
+                    return None
+                parsed = tuple(_positive_int(value) for value in durations)
+                if any(value is None or value > 60_000 for value in parsed):
+                    return None
+                normalized["durations_ms"] = parsed
+            if "loop" in item:
+                if not isinstance(item["loop"], bool):
+                    return None
+                normalized["loop"] = item["loop"]
+            if "hold_ms" in item:
+                hold = item["hold_ms"]
+                if isinstance(hold, int) and not isinstance(hold, bool) and 0 <= hold <= 60_000:
+                    normalized["hold_ms"] = hold
+                elif (isinstance(hold, list) and len(hold) == 2
+                      and all(isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 60_000 for value in hold)):
+                    normalized["hold_ms"] = tuple(hold)
+                else:
+                    return None
+            return normalized
+
         for name, item in states_raw.items():
             if not isinstance(name, str) or not isinstance(item, dict):
                 return None
-            frames = item.get("frames")
-            if not isinstance(frames, list) or not frames or any(isinstance(v, bool) or not isinstance(v, int) or not 0 <= v < columns * rows for v in frames):
+            timeline = normalize_timeline(item)
+            if timeline is None:
                 return None
+            frames = item["frames"]
             selection = item.get("selection", "fixed" if len(frames) == 1 else "random")
             transform = normalize_sprite_transform(item.get("transform", "none"))
             vfx = normalize_sprite_vfx(item.get("vfx", "none"))
             if selection not in allowed_selection or transform is None or vfx is None:
                 return None
-            timing = _positive_int(item.get("frame_ms", item.get("dwell_ms", 600)))
-            dwell = _positive_int(item.get("dwell_ms", timing))
-            if timing is None or dwell is None:
+            if selection == "rotation" and any(key in item for key in ("durations_ms", "loop", "hold_ms", "layers")):
                 return None
-            states[name] = {"frames": tuple(frames), "selection": selection, "transform": transform, "vfx": vfx,
-                            "frame_ms": timing, "dwell_ms": dwell}
+            layers: tuple[dict, ...] = ()
+            if "layers" in item:
+                if not isinstance(item["layers"], list) or not item["layers"]:
+                    return None
+                parsed_layers = []
+                for layer in item["layers"]:
+                    parsed = normalize_timeline(layer) if isinstance(layer, dict) else None
+                    if parsed is None:
+                        return None
+                    parsed_layers.append(parsed)
+                layers = tuple(parsed_layers)
+            timelines = (timeline,) + layers
+            completing_timelines = tuple(
+                part for part in timelines
+                if not bool(part.get("loop", part.get("selection") != "sequence_once"))
+            )
+            default_dwell = max(
+                timeline_nominal_total_ms(part)
+                for part in (timelines if completing_timelines else (timeline,))
+            )
+            dwell = _positive_int(item.get("dwell_ms", default_dwell))
+            if dwell is None:
+                return None
+            normalized = {"frames": tuple(frames), "selection": selection, "transform": transform, "vfx": vfx,
+                          "frame_ms": timeline["frame_ms"], "dwell_ms": dwell}
+            normalized.update({key: value for key, value in timeline.items() if key not in {"frames", "frame_ms"}})
+            if layers:
+                normalized["layers"] = layers
+            states[name] = normalized
     if not mapping and not states:
         return None
     return ReactionPackResolution(source, sheet, chroma_key, columns, rows, cell_width, cell_height, mapping, states, crop_y_offset_px)

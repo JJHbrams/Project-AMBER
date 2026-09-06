@@ -391,6 +391,27 @@ ssh -N -R 17386:127.0.0.1:17386 <ORCA가_붙는_그_대상>
 .\scripts\setup-remote.ps1 -Target <별칭>       # 전송 → 등록 → 실호출 검증
 ```
 
+Settings의 수동 **연결**도 같은 계약을 쓴다. 아직 배치 기록이 없는 호스트가 실제로
+`UP`이 된 뒤에만 첫 배치를 시작하며, 토큰이 하나면 자동 선택하고 여러 개면 name/scope
+목록에서 사용자가 고른다. 자동 시작·재연결은 계속 `BatchMode=yes` 키 인증만 사용하며
+토큰을 읽거나 전송하거나 프롬프트하지 않는다. 배치 상태는 값이 제거된 요약으로만 보인다.
+수동 reverse tunnel이 비밀번호로 연결됐더라도 그 비밀번호 세션을 별도의 SSH 배치 호출이
+재사용할 수는 없다. 따라서 첫 배치 전에 같은 별칭의 **키 인증**이 가능해야 하며, 아니면
+터널은 유지한 채 `첫 배치 보류 — SSH 키 등록 필요`로 표시한다. 실제 배치 실패는
+`~/.engram/logs/remote-provision-*.log`에 bearer 값을 제거한 진단을 남긴다.
+
+첫 배치는 Claude Code의 기존 `~/.claude.json` 등록과 함께, **원격에 Codex가 설치된 경우에만** Codex의
+`~/.codex/config.toml` `[mcp_servers.engram]` HTTP `url`/`http_headers`도 등록한다.
+둘 다 원격 사용자 설정이므로 backup-first, readback, 0600 보호를 적용하며, malformed
+설정은 덮어쓰지 않는다. bearer token은 SSH stdin으로만 이동하고 원격 provider 설정의
+보호된 credential header 외에는 argv·UI·로그·로컬 provision record에 저장하지 않는다.
+`tools/list` HTTP 200과 호출별 proof nonce가 일치하는 fresh local audit이 모두 확인되기
+전에는 provision record를 쓰지 않는다. 공용 named token을 여러 원격이 함께 쓰더라도 다른
+호스트의 동시 요청을 첫 배치 성공으로 오인하지 않는다. Claude는 MCP·SessionStart·skills·policy를 받는다. Codex는 설치된 경우 native MCP
+config와 `~/.agents/skills`를 받는다(원격 SessionStart는 보장하지 않는다). 기존 Engram-managed
+Codex policy hook은 compatibility/best-effort 경로로 유지하며 native provider 보장으로 표시하지
+않는다. 지원하지 않는 provider는 등록 성공으로 표시하지 않는다.
+
 | 단계 | 하는 일 |
 |---|---|
 | 로컬 점검 | 토큰 선택·scope 확인, `:17386` LISTENING |

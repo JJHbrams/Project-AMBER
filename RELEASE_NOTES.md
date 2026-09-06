@@ -1,5 +1,76 @@
 # Release Notes
 
+## 2026-09-07 - v1.5.12: External Overlay Event API v2 and a Responsive Bubble Chat
+
+> Patch release, folding in v1.5.9 through v1.5.12. Engram now hosts an authenticated
+> loopback Event API that independently started overlay renderers connect to, and the
+> bubble chat no longer stalls or hides behind the wrong window when one is in use.
+
+### Highlights
+
+- **External overlay Event API v2.** Engram hosts a token-authenticated JSONL API on
+  `127.0.0.1` and never launches or terminates a renderer process. Renderers read
+  `~/.engram/overlay-event-api-v2.json`, register, and reconnect with bounded backoff. A
+  single connection may advertise several logical renderers as a catalog. The published
+  policy is metadata-only: no prompts, thinking, tool I/O, paths, or memory contents.
+- **The bubble chat stays responsive under an external renderer.** Persisting renderer
+  geometry no longer performs a synchronous `fsync` on the Tk main thread, and publishing
+  events no longer performs a blocking `sendall` there. A one-second drag reporting 20
+  geometry updates went from roughly 980 ms of frozen UI and 20 disk writes to 1.209 ms
+  and a single write.
+- **Bubble z-order follows real input.** The answer bubble stays in front while the reply
+  is written and afterwards, wherever the user happens to be working, and steps behind the
+  window the user actually clicks. The input bar follows the same rule; under a replace
+  renderer the host never wins the OS foreground, so its previous focus-scoped rule could
+  never fire and the input bar opened underneath other windows.
+- **Declarative bundled sprite timelines.** First-cell hold substitution, loop and one-shot
+  completion, layered frames, deterministic ranged holds, and bucket rotation.
+- **Independent speech-tail direction.** The speech bubble's tail tip can be dragged apart
+  from the body; the normalized direction persists with existing bubble position state.
+
+### Fixed
+
+- Restarting the overlay returns to the presentation the user was in, without the renderer
+  playing an exit animation and immediately reappearing. The click is answered in about
+  176 ms instead of leaving a dead window painted for roughly ten seconds.
+- `Bash` was classified as `other` in `tool_category`; `PowerShell` matched `shell` while
+  `bash` contains none of the generic verbs. It is now `execute`.
+- A renderer's first geometry report no longer overwrites the persisted overlay position,
+  and launcher collapse/expand keeps its position independently.
+- The agent pretool policy classifies `git add` after resolving worktree and cwd, allows
+  bounded safe `git fetch` refspecs, and stays fail-closed on ambiguous or compound forms.
+- Console windows no longer flash when guards and policy hooks invoke `git` from
+  console-less GUI processes.
+
+### Impact
+
+- Existing installations keep working unchanged; the Event API is inert until a renderer
+  connects and an external renderer is selected in Settings.
+- Engram stores only a renderer's logical ID and mode. It does not read or record renderer
+  executables, arguments, working directories, manifests, or asset paths.
+- Legacy `command`-based external overlay configuration is diagnosed but never executed,
+  and the bundled renderer remains the fallback.
+- Subagent definitions moved from `config/skills/` to `config/agents/<provider>/`, deployed
+  by `installer/deploy_agent_definitions.ps1`.
+
+### Validation
+
+- AMBER release source: 755 tests passed. The remaining failures are outside this change
+  and reproduce on the unchanged baseline — most require the optional `kuzu` package, some
+  assert manual prose, two read the developer's own `overlay.user.yaml` (they pass under an
+  isolated profile), and one is a pre-existing tunnel mock.
+- The external renderer path was exercised against a live host with a real replace
+  renderer: input-to-reaction round trip p50 10.8 ms / p95 15.4 ms, and 1,049 broadcasts
+  pushed at a peer that had stopped reading left that round trip unchanged with no loss.
+- Z-order was confirmed on screen, not only by assertion: the answer bubble sits above the
+  active window while answering, is occluded by an application the user clicks, and returns
+  to the front when the character is clicked again.
+
+### Files
+
+- Source only. No installer was produced for this release; the most recent prebuilt
+  artifact remains the one listed under v1.5.8.
+
 ## 2026-09-01 - v1.5.8: Smaller Installer, Exact FP32 Semantics
 
 > Patch release. The main AMBER installer no longer carries the 470 MB FP32

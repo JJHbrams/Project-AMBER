@@ -17,6 +17,10 @@ from overlay.chat_window import terminal_font_size
 PLACEHOLDER = "말 걸어보기..."
 _MIN_RESIZE_WIDTH = 140
 FONT_FAMILY = "Noto Sans KR Medium"
+_INPUT_ACTIVITY_IDLE_MS = 700
+_INPUT_ACTIVITY_KEYSYMS = {
+    "BackSpace", "Delete", "Left", "Right", "Up", "Down", "Home", "End", "Prior", "Next",
+}
 
 
 class InputBar:
@@ -27,6 +31,8 @@ class InputBar:
         cfg_bubble: dict,
         terminal_cfg: "dict | None" = None,
         get_speech_rect: "Callable[[], tuple[int, int, int, int] | None] | None" = None,
+        external_replace_active: "Callable[[], bool] | None" = None,
+        on_input_activity: "Callable[[bool], None] | None" = None,
     ):
         self._root = root
         self._get_char_rect = get_char_rect
@@ -34,7 +40,8 @@ class InputBar:
         self._terminal_cfg = terminal_cfg or {}
         self._theme = {**shapes.DEFAULT_THEME, **(self._cfg.get("theme") or {})}
         self._get_speech_rect = get_speech_rect or (lambda: None)
-        self._bubble = BubbleWindow(root)
+        self._on_input_activity = on_input_activity or (lambda _active: None)
+        self._bubble = BubbleWindow(root, external_replace_active, keep_topmost=True)
         self._bubble.set_on_resize(self._on_resize)
         self._bubble.set_on_move_end(self._on_move_end)
         self._entry: Optional[tk.Entry] = None
@@ -42,6 +49,12 @@ class InputBar:
         self._on_close: Optional[Callable[[], None]] = None
         self._width_override: "int | None" = None  # 사용자가 grip으로 드래그한 폭 — 다음에 열 때도 유지
         self._body_h = 0
+        self._input_active = False
+        self._input_idle_after_id: "str | None" = None
+        self._input_activity_epoch = 0
+        self._focus_epoch = 0
+        self._focus_verify_after_id: "str | None" = None
+        self._focus_topmost_requested = False
         # 사용자가 통짜로 드래그해서 옮긴 뒤 "꼬리가 붙은 하단 코너"의 비율 오프셋 —
         # bubble_manager.py의 speech와 동일한 이유(리사이즈가 top-left를 고정점으로
         # 쓰면 항상 좌상단이 고정되고 우하단으로만 커지는 문제를 피하기 위함).
@@ -118,14 +131,137 @@ class InputBar:
         entry_bg = self._theme["input_bg"]
         self._entry = tk.Entry(
             canvas, font=font, relief="flat", bd=0,
-            bg=entry_bg, fg=shapes.SPEECH_FG, insertbackground=shapes.SPEECH_FG,
+            bg=entry_bg, fg=self._theme.get("speech_fg", shapes.SPEECH_FG),
+            insertbackground=self._theme.get("speech_fg", shapes.SPEECH_FG),
             highlightthickness=0,
         )
         self._entry.insert(0, "")
         self._layout(body_w, self._body_h)
-        self._entry.focus_set()
+        self._focus_epoch = getattr(self, "_focus_epoch", 0) + 1
+        focus_epoch = self._focus_epoch
+        entry = self._entry
+        self._entry.bind("<FocusIn>", lambda event: self._on_focus_in(event, entry, focus_epoch))
+        self._entry.bind("<FocusOut>", lambda event: self._on_focus_out(event, entry, focus_epoch))
+        self._entry.bind("<Unmap>", lambda event: self._on_focus_lost(event, entry, focus_epoch))
+        self._entry.bind("<Destroy>", lambda event: self._on_focus_lost(event, entry, focus_epoch))
+        self._entry.bind("<KeyPress>", self._on_key_press)
         self._entry.bind("<Return>", self._on_enter)
         self._entry.bind("<Escape>", lambda _e: self.hide())
+        self._entry.focus_set()
+        self._schedule_focus_verify(entry, focus_epoch, retries=1)
+
+    def set_overlay_foreground(self, foreground: bool, below_hwnd: int = 0) -> None:
+        """Follow the same z-order rule as the other bubbles.
+
+        The focus-scoped hold below can never fire under a replace renderer:
+        the renderer owns the OS foreground, so the host's Entry never reports
+        focus and the input bar would open beneath every other window.
+        """
+        self._bubble.set_overlay_foreground(foreground, below_hwnd)
+
+    def _is_current_entry(self, entry, epoch: int) -> bool:
+        return entry is self._entry and epoch == getattr(self, "_focus_epoch", 0)
+
+    def _entry_has_focus(self, entry) -> bool:
+        try:
+            return self._root.focus_get() is entry
+        except Exception:
+            return False
+
+    def _cancel_focus_verify(self) -> None:
+        if getattr(self, "_focus_verify_after_id", None) is not None:
+            try:
+                self._root.after_cancel(self._focus_verify_after_id)
+            except Exception:
+                pass
+            self._focus_verify_after_id = None
+
+    def _schedule_focus_verify(self, entry, epoch: int, retries: int) -> None:
+        self._cancel_focus_verify()
+        self._focus_verify_after_id = self._root.after_idle(
+            lambda: self._verify_focus(entry, epoch, retries)
+        )
+
+    def _verify_focus(self, entry, epoch: int, retries: int) -> None:
+        self._focus_verify_after_id = None
+        if not self._is_current_entry(entry, epoch):
+            return
+        if self._entry_has_focus(entry):
+            self._bubble.acquire_external_topmost()
+            self._focus_topmost_requested = True
+            return
+        self._release_focus_topmost()
+        if retries > 0:
+            try:
+                entry.focus_set()
+            except Exception:
+                return
+            self._schedule_focus_verify(entry, epoch, retries - 1)
+
+    def _on_focus_in(self, _event=None, entry=None, epoch: "int | None" = None) -> None:
+        entry = self._entry if entry is None else entry
+        epoch = self._focus_epoch if epoch is None else epoch
+        if not self._is_current_entry(entry, epoch):
+            return
+        self._schedule_focus_verify(entry, epoch, retries=0)
+
+    def _on_focus_out(self, _event=None, entry=None, epoch: "int | None" = None) -> None:
+        if entry is not None and epoch is not None and not self._is_current_entry(entry, epoch):
+            return
+        self._end_input_activity()
+        self._cancel_focus_verify()
+        self._release_focus_topmost()
+
+    def _on_focus_lost(self, event=None, entry=None, epoch: "int | None" = None) -> None:
+        self._on_focus_out(event, entry, epoch)
+
+    def _release_focus_topmost(self) -> None:
+        if not getattr(self, "_focus_topmost_requested", False):
+            return
+        self._focus_topmost_requested = False
+        self._bubble.release_external_topmost()
+
+    def _on_key_press(self, event) -> None:
+        keysym = str(getattr(event, "keysym", "") or "")
+        char = str(getattr(event, "char", "") or "")
+        if keysym in {"Return", "KP_Enter", "Escape"}:
+            return
+        if keysym not in _INPUT_ACTIVITY_KEYSYMS and not (char and char.isprintable()):
+            return
+        if not self._input_active:
+            self._input_active = True
+            self._on_input_activity(True)
+        self._input_activity_epoch += 1
+        epoch = self._input_activity_epoch
+        if self._input_idle_after_id is not None:
+            try:
+                self._root.after_cancel(self._input_idle_after_id)
+            except Exception:
+                pass
+        self._input_idle_after_id = self._root.after(
+            _INPUT_ACTIVITY_IDLE_MS,
+            lambda: self._on_input_idle_timeout(epoch),
+        )
+
+    def _on_input_idle_timeout(self, epoch: int) -> None:
+        if epoch != self._input_activity_epoch:
+            return
+        self._input_idle_after_id = None
+        if self._input_active:
+            self._input_active = False
+            self._on_input_activity(False)
+
+    def _end_input_activity(self) -> None:
+        self._input_activity_epoch += 1
+        if self._input_idle_after_id is not None:
+            try:
+                self._root.after_cancel(self._input_idle_after_id)
+            except Exception:
+                pass
+            self._input_idle_after_id = None
+        if self._input_active:
+            self._input_active = False
+            self._on_input_activity(False)
 
     def _layout(self, body_w: int, body_h: int) -> None:
         """말풍선 껍데기를 (다시) 그리고 그 위의 Entry 위치/크기를 맞춘다 — 드래그 리사이즈
@@ -193,7 +329,9 @@ class InputBar:
             self._entry.place(
                 x=pad,
                 y=pad,
-                width=max(20, w - pad * 2),
+                # Keep the Canvas-native send beacon clear while preserving
+                # Enter/Escape and the existing Entry lifecycle.
+                width=max(20, w - pad * 2 - 34),
                 height=max(16, h - pad * 2),
             )
 
@@ -251,6 +389,10 @@ class InputBar:
 
     def hide(self) -> None:
         was_showing = self._entry is not None
+        self._end_input_activity()
+        self._focus_epoch = getattr(self, "_focus_epoch", 0) + 1
+        self._cancel_focus_verify()
+        self._release_focus_topmost()
         if self._entry is not None:
             try:
                 self._entry.destroy()

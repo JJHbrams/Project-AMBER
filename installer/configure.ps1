@@ -21,6 +21,8 @@ param(
     [string]$CliProvider = "claude-code",
     [string]$OllamaModel = "",
     [string]$IdentityName = "",
+    [ValidateSet("none", "presets", "sdk")]
+    [string]$ExternalOverlayMode = "none",
     [switch]$EnableAutoStart,
     [switch]$LaunchNow,
     [switch]$Uninstall
@@ -60,6 +62,10 @@ $ConfigureLog = Join-Path $ConfigureLogDir ("configure-{0}.log" -f (Get-Date -Fo
 Start-Transcript -Path $ConfigureLog -Force | Out-Null
 $script:ConfigureTranscriptStarted = $true
 Write-Host "  Configure log: $ConfigureLog" -ForegroundColor DarkGray
+
+if ($ExternalOverlayMode -ne "none") {
+    Write-Warn "External overlay '$ExternalOverlayMode' was selected, but pinned public release v1.1.0.89 has no self-contained provider/SDK asset. Core AMBER setup will continue; external overlay was NOT installed."
+}
 
 function Stop-ConfigureTranscriptSafely {
     if (-not $script:ConfigureTranscriptStarted) { return }
@@ -504,6 +510,9 @@ if ($LaunchNow) {
 
 Write-Host ""
 Write-Host "  Configure 완료." -ForegroundColor Green
+if ($ExternalOverlayMode -ne "none") {
+    Write-Warn "Core AMBER configuration succeeded. External overlay '$ExternalOverlayMode' remains unavailable and was not installed."
+}
 Write-Host ""
 Exit-Configure 0
 } finally {

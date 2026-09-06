@@ -1,10 +1,12 @@
 """설정 로딩 — 기본값 + 사용자 오버라이드 + 런타임 상태를 순서대로 병합."""
 
+import atexit
 import copy
 import os
 import sys
 import tempfile
 import threading
+import time
 from pathlib import Path
 
 import yaml
@@ -92,6 +94,18 @@ def _deep_merge(base: dict, override: dict) -> dict:
 _USER_CONFIG_PATH = Path.home() / ".engram" / "overlay.user.yaml"
 _STATE_PATH = Path.home() / ".engram" / "overlay.state.yaml"
 _STATE_LOCK = threading.RLock()
+# Runtime-state writes that have not reached disk yet, replayed on every read so
+# an async write is never observable as a stale value.
+_STATE_PENDING: list = []
+_STATE_INFLIGHT: list = []
+# Disk access only. Held across the yaml round trip and fsync, never while a
+# caller is merely queueing, so an async write cannot stall the Tk main thread.
+_STATE_IO_LOCK = threading.Lock()
+_STATE_DIRTY = threading.Event()
+_STATE_FLUSHED = threading.Event()
+_STATE_FLUSHED.set()
+_STATE_WRITER: "threading.Thread | None" = None
+_STATE_WRITE_DELAY = 0.4
 _ENGRAM_USER_CONFIG_PATH = Path.home() / ".engram" / "user.config.yaml"
 _SUPPORTED_CLI_PROVIDERS = {"copilot", "antigravity", "codex", "claude-code", "claude-code-ollama", "ollama"}
 _SUPPORTED_CHAT_MODES = {"tui", "bubble"}
@@ -240,31 +254,128 @@ def _safe_load_yaml(path: Path, *, strict: bool = False) -> dict:
     return {}
 
 
+def _apply_state_mutator(state: dict, mutator) -> dict:
+    result = mutator(state)
+    return result if isinstance(result, dict) else state
+
+
+def _write_state_locked(state: dict) -> None:
+    """Durable replace of the state file. Caller must hold _STATE_LOCK."""
+    _STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix="overlay.state.", suffix=".tmp", dir=str(_STATE_PATH.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+            yaml.safe_dump(state, handle, sort_keys=False, allow_unicode=False)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, _STATE_PATH)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
 def get_overlay_state() -> dict:
-    """Return a defensive copy of the optional runtime state mapping."""
-    with _STATE_LOCK:
-        return copy.deepcopy(_safe_load_yaml(_STATE_PATH))
+    """Return a defensive copy of the optional runtime state mapping.
+
+    Mutations queued by update_overlay_state_async are replayed on top of the
+    on-disk mapping so a caller always observes its own most recent write, even
+    while the durable flush is still pending on the writer thread.
+    """
+    with _STATE_IO_LOCK:
+        state = _safe_load_yaml(_STATE_PATH)
+        with _STATE_LOCK:
+            queued = [*_STATE_INFLIGHT, *_STATE_PENDING]
+        for mutator in queued:
+            state = _apply_state_mutator(state, mutator)
+        return copy.deepcopy(state)
 
 
 def update_overlay_state(mutator) -> dict:
     """Atomically merge a small runtime-state update without clobbering peers."""
-    with _STATE_LOCK:
+    with _STATE_IO_LOCK:
         state = _safe_load_yaml(_STATE_PATH)
-        result = mutator(state)
-        if isinstance(result, dict):
-            state = result
-        _STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
-        fd, temporary = tempfile.mkstemp(prefix="overlay.state.", suffix=".tmp", dir=str(_STATE_PATH.parent))
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
-                yaml.safe_dump(state, handle, sort_keys=False, allow_unicode=False)
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(temporary, _STATE_PATH)
-        finally:
-            if os.path.exists(temporary):
-                os.unlink(temporary)
+        with _STATE_LOCK:
+            queued = [*_STATE_INFLIGHT, *_STATE_PENDING]
+            _STATE_INFLIGHT.clear()
+            _STATE_PENDING.clear()
+        for pending in queued:
+            state = _apply_state_mutator(state, pending)
+        state = _apply_state_mutator(state, mutator)
+        _write_state_locked(state)
+        _STATE_FLUSHED.set()
         return copy.deepcopy(state)
+
+
+def update_overlay_state_async(mutator) -> None:
+    """Queue a runtime-state update without blocking the caller on fsync.
+
+    Persisting overlay geometry costs tens of milliseconds (yaml round trip plus
+    an fsync). On the external-renderer path that cost lands on the Tk main
+    thread once per reported geometry change, which visibly stalls the bubble
+    UI. Queueing keeps the caller at microseconds; a single writer thread
+    coalesces everything that arrives inside _STATE_WRITE_DELAY into one flush.
+    """
+    with _STATE_LOCK:
+        _STATE_PENDING.append(mutator)
+        _STATE_FLUSHED.clear()
+        _ensure_state_writer_locked()
+        _STATE_DIRTY.set()
+
+
+def _ensure_state_writer_locked() -> None:
+    global _STATE_WRITER
+    if _STATE_WRITER is not None and _STATE_WRITER.is_alive():
+        return
+    _STATE_WRITER = threading.Thread(target=_state_writer_loop, daemon=True, name="overlay-state-writer")
+    _STATE_WRITER.start()
+
+
+def _state_writer_loop() -> None:
+    while True:
+        _STATE_DIRTY.wait()
+        # Trailing coalesce window: a drag reports geometry far faster than the
+        # disk can retire it, and only the final position has to survive.
+        time.sleep(_STATE_WRITE_DELAY)
+        _STATE_DIRTY.clear()
+        with _STATE_LOCK:
+            if not _STATE_PENDING:
+                if not _STATE_INFLIGHT:
+                    _STATE_FLUSHED.set()
+                continue
+            # Stay replayable for readers until the flush actually lands.
+            _STATE_INFLIGHT.extend(_STATE_PENDING)
+            _STATE_PENDING.clear()
+        try:
+            with _STATE_IO_LOCK:
+                state = _safe_load_yaml(_STATE_PATH)
+                with _STATE_LOCK:
+                    inflight = list(_STATE_INFLIGHT)
+                for mutator in inflight:
+                    try:
+                        state = _apply_state_mutator(state, mutator)
+                    except Exception:
+                        continue
+                _write_state_locked(state)
+                with _STATE_LOCK:
+                    del _STATE_INFLIGHT[:len(inflight)]
+        except Exception:
+            with _STATE_LOCK:
+                _STATE_INFLIGHT.clear()
+        with _STATE_LOCK:
+            if not _STATE_PENDING and not _STATE_INFLIGHT:
+                _STATE_FLUSHED.set()
+
+
+def flush_overlay_state(timeout: float = 5.0) -> bool:
+    """Block until queued state updates have been written. Returns success."""
+    with _STATE_LOCK:
+        if not _STATE_PENDING and not _STATE_INFLIGHT:
+            return True
+        _STATE_DIRTY.set()
+    return _STATE_FLUSHED.wait(timeout)
+
+
+atexit.register(lambda: flush_overlay_state(2.0))
 
 
 def _filter_runtime_state_overrides(state: dict, user: dict) -> dict:

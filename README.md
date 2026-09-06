@@ -455,12 +455,13 @@ Markdown 파일로 위키 노트를 작성하면 자동으로 KG에 반영되어
 
 ## 외부 오버레이 빠른 설정
 
-[engram-overlay](https://github.com/JJHbrams/engram-overlay)는 예제와 reference implementation을 제공한다. 해당 manifest 패키지를 `%USERPROFILE%/.engram/overlays/<id>/`에 설치한 뒤 **Settings GUI > 오버레이**에서 선택한다. `observer`는 번들 캐릭터를 유지하고, `replace`는 번들을 대체한다. 선택 후에는 **오버레이 재시작**이 필요하며, renderer 실패 시 번들 캐릭터로 자동 복구된다. 규약은 [외부 오버레이 Event API](docs/overlay-event-api-v1.md)를 참고한다.
+[engram-overlay](https://github.com/JJHbrams/engram-overlay)는 외부 renderer 예제를 제공한다. renderer는 독립적으로 시작해 loopback Event API에 연결하며, Engram은 인증되어 연결된 renderer의 ID와 `observer`/`replace` mode만 선택한다. `observer`는 번들 캐릭터를 유지하고, `replace`는 번들을 대체한다. 선택은 ready 상태에서 즉시 적용되고, 연결 실패나 renderer 종료 시 번들 캐릭터로 복구된다. Engram은 renderer 프로세스를 실행하거나 종료하지 않으며 실행 파일·인자·manifest 경로를 저장하지 않는다. 규약은 [외부 오버레이 Event API v2](docs/overlay-event-api-v2.md)를 참고한다.
 
 ## 문서
 
 - 사용자 개요: 이 README
 - 오버레이 커스텀 팩: [docs/character-packs.md](docs/character-packs.md)
+- 외부 오버레이 규약: [docs/overlay-event-api-v2.md](docs/overlay-event-api-v2.md)
 - 기술 문서: [docs/dev/system-technical-reference.md](docs/dev/system-technical-reference.md)
 - 보조 문서: [docs/architecture.md](docs/architecture.md), [docs/memory-tiering.md](docs/memory-tiering.md)
 

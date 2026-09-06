@@ -122,6 +122,23 @@ class PolicyPreflightTests(unittest.TestCase):
         self.assertEqual(legacy["request"]["caller"], "claude-code")
         self.assertEqual(legacy["request"]["action"], "claude-pretool")
 
+    def test_git_add_is_classified_as_a_write_in_direct_change_directory_and_nested_shell_forms(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / ".git").mkdir()
+            nested = repo / "nested"
+            nested.mkdir()
+            for tool_name, command in (
+                ("Bash", "git add README.md"),
+                ("Bash", f"git -C {repo.as_posix()} add README.md"),
+                ("PowerShell", "powershell -Command git add README.md"),
+            ):
+                with self.subTest(command=command):
+                    result = classify_claude_pretool_payload(self._hook_payload(tool_name, command), str(nested))
+                    self.assertTrue(result["classified"])
+                    self.assertEqual(result["hook"]["git_write_subcommand"], "add")
+                    self.assertEqual(result["hook"]["git_worktree_root"], str(repo.resolve()))
+
     def test_nested_shell_git_write_commands_are_classified(self):
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
@@ -135,6 +152,46 @@ class PolicyPreflightTests(unittest.TestCase):
                     self.assertTrue(result["classified"])
                     self.assertEqual(result["hook"]["git_write_subcommand"], "commit")
                     self.assertEqual(result["hook"]["git_worktree_root"], str(repo.resolve()))
+
+    def test_safe_git_fetches_are_distinct_remote_ref_updates_and_stay_out_of_scope(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / ".git").mkdir()
+            for command in (
+                "git fetch origin",
+                "git fetch --prune --quiet origin main",
+                "git fetch -v -4 origin +refs/heads/main:refs/remotes/origin/main",
+                "git fetch origin refs/heads/main:refs/prefetch/origin/main",
+                "git fetch origin tag v1.2.3",
+            ):
+                with self.subTest(command=command):
+                    result = classify_claude_pretool_payload(self._hook_payload("Bash", command), str(repo))
+                    self.assertFalse(result["classified"])
+                    self.assertIn("bounded remote-ref update", result["reason"])
+
+    def test_unsafe_or_ambiguous_git_fetches_fail_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / ".git").mkdir()
+            for command in (
+                "git fetch --all",
+                "git fetch --upload-pack=evil origin",
+                "git fetch --refmap=refs/heads/*:refs/heads/* origin",
+                "git fetch origin https://example.invalid/repo.git",
+                "git fetch https://example.invalid/repo.git",
+                "git fetch origin main:refs/heads/main",
+                "git fetch origin main:refs/tags/v1",
+                "git fetch origin --",
+                "git fetch -P origin",
+                "git -c protocol.file.allow=always fetch origin",
+                "GIT_CONFIG_COUNT=1 git fetch origin",
+                "git fetch origin tag v1 extra",
+                "git fetch origin && git status",
+                "git fetch origin && git add README.md",
+            ):
+                with self.subTest(command=command):
+                    with self.assertRaises(HookPayloadError):
+                        classify_claude_pretool_payload(self._hook_payload("Bash", command), str(repo))
 
     def test_agent_merge_policy_requires_explicit_no_ff_and_rejects_ff_only(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -224,13 +281,20 @@ class PolicyPreflightTests(unittest.TestCase):
             for tool_name, command in (
                 ("Bash", "if git commit"),
                 ("Bash", "git ci"),
-                ("Bash", "git add README.md"),
                 ("Bash", "git branch feature/test"),
                 ("Bash", "git branch -D feature/test"),
             ):
                 with self.subTest(command=command):
                     with self.assertRaises(HookPayloadError):
                         classify_claude_pretool_payload(self._hook_payload(tool_name, command), str(repo))
+
+    def test_unsupported_git_subcommand_error_is_provider_neutral(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / ".git").mkdir()
+            with self.assertRaisesRegex(HookPayloadError, "agent pretool policy") as raised:
+                classify_claude_pretool_payload(self._hook_payload("Bash", "git ci"), str(repo))
+        self.assertNotIn("Claude", str(raised.exception))
 
     def test_execution_capable_git_read_options_fail_closed(self):
         with tempfile.TemporaryDirectory() as tmp:

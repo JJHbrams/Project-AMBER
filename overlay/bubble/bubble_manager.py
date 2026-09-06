@@ -17,11 +17,12 @@ session.py의 on_event 콜백을 root.after(0, lambda: manager.handle_event(ev))
 연결해야 한다(이 클래스 자체는 스레드 세이프하지 않음 — tkinter 메인스레드에서만 호출).
 """
 
+import math
 import tkinter as tk
 from typing import Callable
 
 from overlay.bubble import events, geometry, shapes
-from overlay.bubble.bubble_window import BubbleWindow
+from overlay.bubble.bubble_window import BubbleWindow, normalize_tail_vector
 from overlay.chat_window import terminal_font_size
 from overlay.config import get_overlay_state, update_overlay_state
 
@@ -66,13 +67,15 @@ class BubbleManager:
         get_char_rect: Callable[[], tuple[int, int, int, int]],
         cfg_bubble: dict,
         terminal_cfg: dict | None = None,
+        external_replace_active: "Callable[[], bool] | None" = None,
     ):
         self._root = root
+        self._external_replace_active = external_replace_active
         self._get_char_rect = get_char_rect
         self._terminal_cfg = terminal_cfg or {}
         self._set_cfg(cfg_bubble)
 
-        self._speech = BubbleWindow(root)
+        self._speech = BubbleWindow(root, external_replace_active)
         self._speech.set_on_click(self._on_speech_click)
         self._speech.set_on_resize(self._on_speech_resize)
         self._speech.set_on_resize_h(self._on_speech_resize_h)
@@ -107,12 +110,16 @@ class BubbleManager:
         # 써야 "캐릭터에서 뻗어나온 상태를 유지하며 크기만 바뀌는" 느낌이 난다.
         self._speech_manual_pos: "tuple[float, float] | None" = None
         self._speech_tail_side = "left"  # manual_pos가 어느 쪽 하단 코너를 가리키는지
+        self._speech_tail_vector: "tuple[float, float] | None" = None
+        self._speech.set_tail_drag(None, self._on_speech_tail_drag, on_end=self._save_manual_positions)
         # 마지막으로 받은 텍스트 블록의 id(events.py의 "block-{index}") — 같은 턴 안에서도
         # 도구 호출 전/후처럼 블록이 바뀌면 이전 내용을 이어붙이지 않고 새로 시작한다.
         # (지난 응답은 히스토리에서 볼 수 있으니 화면엔 최신 블록만 남겨도 된다.)
         self._speech_block_id: "str | None" = None
+        self._speech_render_after_id: "str | None" = None
+        self._speech_render_token: "object | None" = None
 
-        self._thought = BubbleWindow(root)
+        self._thought = BubbleWindow(root, external_replace_active)
         self._thought.set_on_click(self._on_thought_click)
         self._thought.set_on_resize(self._on_thought_resize)
         self._thought.set_on_resize_h(self._on_thought_resize_h)
@@ -130,7 +137,7 @@ class BubbleManager:
         # 에코(사용자 메시지) 슬롯 — 입력창을 제출한 자리에 사용자가 방금 보낸 말을
         # 그대로 남긴다(응답 말풍선과 완전히 별개). 일정 시간(echo_dwell_ms) 유지 후
         # 사라지고, 다음 입력이 들어오면 즉시 교체된다.
-        self._echo = BubbleWindow(root)
+        self._echo = BubbleWindow(root, external_replace_active)
         self._echo.set_on_click(self._on_echo_click)
         self._echo_text = ""
         self._echo_rect: "tuple[int, int, int, int, str] | None" = None  # (x, y, w, h, tail_side)
@@ -144,6 +151,7 @@ class BubbleManager:
         self._tool_info: dict[str, dict] = {}
 
         self._approval_windows: list[BubbleWindow] = []
+        self._approval_requests: dict[BubbleWindow, object] = {}
 
     def _set_cfg(self, cfg_bubble: dict) -> None:
         self._cfg = {**_DEFAULTS, **(cfg_bubble or {})}
@@ -156,9 +164,10 @@ class BubbleManager:
         speech = saved.get("speech", {})
         thought = saved.get("thought", {})
         if isinstance(speech, dict):
+            self._speech_tail_side = speech.get("tail_side") if speech.get("tail_side") in {"left", "right"} else "left"
+            self._speech_tail_vector = normalize_tail_vector(speech.get("tail_dx", 0), speech.get("tail_dy", 0))
             try:
                 self._speech_manual_pos = (float(speech["x"]), float(speech["y"]))
-                self._speech_tail_side = speech.get("tail_side") if speech.get("tail_side") in {"left", "right"} else "left"
             except (KeyError, TypeError, ValueError):
                 pass
         if isinstance(thought, dict):
@@ -170,13 +179,33 @@ class BubbleManager:
     def _save_manual_positions(self) -> None:
         def update(state: dict) -> None:
             values = state.setdefault("bubble_positions", {})
-            if self._speech_manual_pos is not None:
-                values["speech"] = {"x": self._speech_manual_pos[0], "y": self._speech_manual_pos[1], "tail_side": self._speech_tail_side}
+            if self._speech_manual_pos is not None or self._speech_tail_vector is not None:
+                speech = {"tail_side": self._speech_tail_side}
+                if self._speech_manual_pos is not None:
+                    speech.update(x=self._speech_manual_pos[0], y=self._speech_manual_pos[1])
+                if self._speech_tail_vector is not None:
+                    speech.update(tail_dx=self._speech_tail_vector[0], tail_dy=self._speech_tail_vector[1])
+                values["speech"] = speech
             if self._thought_manual_pos is not None:
                 values["thought"] = {"x": self._thought_manual_pos[0], "y": self._thought_manual_pos[1]}
         update_overlay_state(update)
 
     # ── 공개 API ──────────────────────────────────────────────────────
+
+    def set_overlay_foreground(self, foreground: bool, below_hwnd: int = 0) -> None:
+        """Fan a real foreground decision out to every bubble.
+
+        Only relevant under an external replace renderer: its window is topmost
+        and owned by another process, so bubbles must be topmost to be seen at
+        all. Releasing the hold when the user moves to another application is
+        what lets them fall behind that application's windows — and releasing
+        alone is not enough, so `below_hwnd` restacks them under it.
+        """
+        for window in (self._speech, self._thought, self._echo, *self._approval_windows):
+            try:
+                window.set_overlay_foreground(foreground, below_hwnd)
+            except Exception:
+                continue
 
     def update_cfg(self, cfg_bubble: dict) -> None:
         """설정 창에서 저장한 뒤(main.py._reload_config) 색상 테마 등을 즉시 반영한다 —
@@ -214,6 +243,14 @@ class BubbleManager:
         self._tool_info.clear()
         self._render_thought()  # 생각풍선 상태만 갱신(응답 텍스트는 건드리지 않음)
 
+    def begin_input(self) -> None:
+        """Start a fresh input interaction without disturbing visible speech."""
+        self._echo.cancel_dismiss()
+        self._echo_text = ""
+        self._echo_rect = None
+        self._echo_anchor_offset = None
+        self._echo.hide()
+
     def show_echo(self, text: str, input_rect: "tuple[int, int, int, int, str] | None") -> None:
         """사용자가 방금 보낸 메시지를, 입력창이 있던 그 자리(input_rect)에 그대로 남긴다.
 
@@ -250,14 +287,16 @@ class BubbleManager:
             x = char_x + self._echo_anchor_offset[0]
             y = char_y + self._echo_anchor_offset[1]
         canvas = self._echo.ensure()
-        # 입력창과 같은 폭/색을 써서 "방금 그 입력창이 굳어 남은" 느낌 — 응답(speech)
-        # 색과 구분되게 input 팔레트를 쓴다.
+        # A warm amber offset chip marks the user's just-submitted signal;
+        # fallback to input tokens keeps older custom themes compatible.
         fixed_w = max(w0 - shapes.TAIL_REACH * 2, 60)
         font = (self._font_family(), self._font_size())
         # 먼저 크기만 구한 뒤 실제 최종 위치에서 모니터 하단 중앙을 향하도록 다시 그린다.
         w, h = shapes.draw_speech_bubble(
             canvas, self._echo_text, fixed_w, font=font, fixed_body_w=fixed_w,
-            fg=self._theme["speech_fg"], bg=self._theme["input_bg"], outline=self._theme["input_outline"],
+            fg=self._theme.get("echo_fg", self._theme["speech_fg"]),
+            bg=self._theme.get("echo_bg", self._theme["input_bg"]),
+            outline=self._theme.get("echo_outline", self._theme["input_outline"]),
         )
         # 입력창 바닥을 기준으로 위로 자라게 앵커(입력창은 화면 하단에 있었으므로).
         mon_rect = geometry.get_monitor_work_rect(char_x, char_y)
@@ -267,7 +306,9 @@ class BubbleManager:
         angle_rad = geometry.angle_to_point(nx + w / 2, ny + h / 2, target_x, target_y)
         w, h = shapes.draw_speech_bubble(
             canvas, self._echo_text, fixed_w, angle_rad=angle_rad, font=font, fixed_body_w=fixed_w,
-            fg=self._theme["speech_fg"], bg=self._theme["input_bg"], outline=self._theme["input_outline"],
+            fg=self._theme.get("echo_fg", self._theme["speech_fg"]),
+            bg=self._theme.get("echo_bg", self._theme["input_bg"]),
+            outline=self._theme.get("echo_outline", self._theme["input_outline"]),
         )
         self._echo.place(nx, ny, w, h)
 
@@ -286,7 +327,7 @@ class BubbleManager:
         self._render_speech()
         self._render_echo()
 
-    def replay_last(self) -> None:
+    def replay_last(self, *, include_echo: bool = True) -> None:
         """캐릭터를 클릭했을 때 마지막 교환을 되살린다 — 풍선이 페이드로 사라졌어도
         가장 최근 응답(+사용자 질문 에코)을 다시 띄운다. 이미 떠 있으면 건드리지 않는다.
 
@@ -308,7 +349,7 @@ class BubbleManager:
             )
             self._render_speech()  # 버튼 행도 _nudge_reply_cb 유무에 따라 함께 그려진다
             self._speech.schedule_dismiss(int(self._cfg.get("speech_dwell_ms", 20000)))
-        if self._echo_text and self._echo_rect is not None and not self._echo.is_visible():
+        if include_echo and self._echo_text and self._echo_rect is not None and not self._echo.is_visible():
             self._render_echo()
             if self._cfg.get("echo_fade", True):
                 self._echo.schedule_dismiss(int(self._cfg.get("echo_dwell_ms", 8000)))
@@ -352,7 +393,7 @@ class BubbleManager:
         ApprovalRequest) 허용/거부 버튼이 있는 풍선을 띄운다. auto 수준에서는 세션이
         이 콜백 자체를 안 부르므로 여기까지 오지 않는다.
         """
-        win = BubbleWindow(self._root)
+        win = BubbleWindow(self._root, self._external_replace_active)
         canvas = win.ensure()
         char_x, char_y, char_w, char_h = self._get_char_rect()
         max_width = self._default_width(char_x, char_y, char_w)
@@ -377,6 +418,7 @@ class BubbleManager:
         win.place(x, y, body_w, total_h)
         win.schedule_dismiss(65_000)  # approval.py 기본 타임아웃(60s)보다 살짜 여유
         self._approval_windows.append(win)
+        self._approval_requests[win] = request
 
     def _resolve_approval(self, win: BubbleWindow, request, allow: bool) -> None:
         if allow:
@@ -386,6 +428,7 @@ class BubbleManager:
         win.destroy()
         if win in self._approval_windows:
             self._approval_windows.remove(win)
+        self._approval_requests.pop(win, None)
 
     def clear_all(self) -> None:
         self._settle_nudge_outcome()  # 화면을 통째로 비우는 것도 반응 없이 끝난 경우
@@ -409,9 +452,16 @@ class BubbleManager:
         self._echo_anchor_offset = None
         self._tool_order.clear()
         self._tool_info.clear()
-        for win in self._approval_windows:
-            win.destroy()
+        # Collapsing the host must not strand a provider child waiting for an
+        # invisible approval. Resolve outstanding requests fail-closed first.
+        for win in list(self._approval_windows):
+            request = self._approval_requests.get(win)
+            if request is not None:
+                self._resolve_approval(win, request, False)
+            else:
+                win.destroy()
         self._approval_windows.clear()
+        self._approval_requests.clear()
 
     # ── 대화(speech) 슬롯 ────────────────────────────────────────────
 
@@ -564,6 +614,17 @@ class BubbleManager:
         self._speech_color_override = None
         self._clear_reply_hint()
 
+    def defer_nudge(self) -> bool:
+        """Remove a launcher-hidden nudge without firing its ignored callback."""
+        if not self._nudge_outcome_pending:
+            return False
+        self._nudge_outcome_pending = False
+        self._nudge_on_ignored = None
+        self._clear_nudge_state()
+        self._speech.hide()
+        self._speech_rect = None
+        return True
+
     def _on_speech_click(self) -> None:
         override = self._speech_on_click_override
         # 클릭은 무시가 아니다 — 마감 콜백이 돌지 않도록 잠금부터 푼다.
@@ -630,6 +691,14 @@ class BubbleManager:
         self._save_manual_positions()
         self._render_speech()  # 꼬리가 바뀌었을 수 있으니 다시 그려서 반영 + rect 갱신
 
+    def _on_speech_tail_drag(self, dx: float, dy: float) -> None:
+        """Persist a tail-only change without moving or resizing the speech body."""
+        vector = normalize_tail_vector(dx, dy)
+        if vector is None:
+            return
+        self._speech_tail_vector = vector
+        self._render_speech()
+
     def is_idle(self) -> bool:
         """화면에 떠 있는 풍선이 하나도 없는지 — initiative 엔진이 "지금 말 걸어도
         되나(화면이 비었나)" 판정할 때 쓴다. 승인 풍선이 떠 있으면 당연히 바쁜 상태."""
@@ -643,6 +712,41 @@ class BubbleManager:
         return self._speech_rect
 
     def _render_speech(self) -> None:
+        if self._speech_render_after_id is not None:
+            try:
+                self._root.after_cancel(self._speech_render_after_id)
+            except Exception:
+                pass
+            self._speech_render_after_id = None
+        self._speech_render_token = None
+        self._render_speech_now()
+
+    def _schedule_speech_render(self) -> None:
+        if self._speech_render_after_id is not None:
+            return
+        token = object()
+        self._speech_render_token = token
+        self._speech_render_after_id = self._root.after_idle(
+            lambda: self._flush_speech_render(token)
+        )
+
+    def _flush_speech_render(self, token: object) -> None:
+        if token is not self._speech_render_token:
+            return
+        self._speech_render_after_id = None
+        self._speech_render_token = None
+        self._render_speech_now()
+
+    def _render_speech_now(self) -> None:
+        try:
+            self._render_speech_transaction()
+        except BaseException:
+            # Measurement hides the live canvas. Any later geometry/tail/layout
+            # failure must restore the last visible content before propagating.
+            self._speech.resume_content()
+            raise
+
+    def _render_speech_transaction(self) -> None:
         if self._speech_dismissed or not self._speech_text:
             self._speech.hide()
             self._speech_rect = None
@@ -652,16 +756,20 @@ class BubbleManager:
         fixed_w = self._speech_width_override
         font = (self._font_family(), self._font_size())
         canvas = self._speech.ensure()
+        self._speech.suspend_content()
         speech_colors = self._speech_color_override or dict(
             fg=self._theme["speech_fg"], bg=self._theme["speech_bg"], outline=self._theme["speech_outline"],
         )
         max_body_h = (self._speech_max_h_override if self._speech_max_h_override is not None
                       else self._max_body_h(char_y, "speech_max_height_ratio"))
         # 각도는 아직 모르니 임시값(0)으로 그려서 크기만 잰다(폭/높이는 각도와 무관).
-        w, h = shapes.draw_speech_bubble(canvas, self._speech_text, max_width, font=font, fixed_body_w=fixed_w, max_body_h=max_body_h, **speech_colors)
+        w, h = self._draw_speech_frame(
+            canvas, self._speech_text, max_width, font=font,
+            fixed_body_w=fixed_w, max_body_h=max_body_h, **speech_colors,
+        )
         h += self._nudge_row_height()  # 버튼 행까지 포함한 높이로 위치를 잡아야 한다
 
-        if self._speech.is_moving():
+        if self._speech.is_moving() or self._speech.is_tail_dragging():
             # 사용자가 지금 이 풍선을 드래그/리사이즈하는 중 — 스트리밍 중 도착한 텍스트가
             # 위치를 자동 계산값으로 덮어써서 드래그와 충돌하면(창이 마우스 아래에서
             # 튕겨나감) release 시점에 델타 계산이 틀어져 저장되는 위치 자체가 잘못된다.
@@ -671,15 +779,20 @@ class BubbleManager:
                 cur_x, cur_y = win.winfo_x(), win.winfo_y()
                 tail_side = geometry.tail_side_toward_char(cur_x, w, char_x, char_w)
                 grip_corner = "top-left" if tail_side == "right" else "top-right"
-                angle_rad = geometry.angle_to_point(
-                    cur_x + w / 2, cur_y + h / 2, char_x + char_w / 2, char_y + char_h / 2
-                )
-                w, h = shapes.draw_speech_bubble(
+                angle_rad = (math.atan2(self._speech_tail_vector[1], self._speech_tail_vector[0])
+                             if self._speech_tail_vector is not None else geometry.angle_to_point(
+                                 cur_x + w / 2, cur_y + h / 2, char_x + char_w / 2, char_y + char_h / 2
+                             ))
+                w, h = self._draw_speech_frame(
                     canvas, self._speech_text, max_width, angle_rad=angle_rad, font=font,
                     fixed_body_w=fixed_w, grip_corner=grip_corner, max_body_h=max_body_h, **speech_colors,
                 )
+                shell_size = (w, h)
                 h = self._grow_for_nudge_row(canvas, w, h, tail_side)
-                win.geometry(f"{w}x{h}")
+                self._speech.set_tail_drag(
+                    angle_rad, self._on_speech_tail_drag, shell_size, self._save_manual_positions
+                )
+                self._speech.commit_size(w, h)
                 self._speech_rect = (cur_x, cur_y, w, h)
             return
 
@@ -707,15 +820,24 @@ class BubbleManager:
         self._speech.set_grip_corner(grip_corner)
         # 꼬리는 항상 몸통 중심→캐릭터 중심 방향의 실제 각도를 향한다(좌우 이진이 아니라
         # 대각선도 정확히 표현) — grip_corner/리사이즈 앵커만 tail_side(이진)를 그대로 쓴다.
-        angle_rad = geometry.angle_to_point(x + w / 2, y + h / 2, char_x + char_w / 2, char_y + char_h / 2)
-        w, h = shapes.draw_speech_bubble(
+        angle_rad = (math.atan2(self._speech_tail_vector[1], self._speech_tail_vector[0])
+                     if self._speech_tail_vector is not None else geometry.angle_to_point(
+                         x + w / 2, y + h / 2, char_x + char_w / 2, char_y + char_h / 2
+                     ))
+        w, h = self._draw_speech_frame(
             canvas, self._speech_text, max_width, angle_rad=angle_rad, font=font,
             fixed_body_w=fixed_w, grip_corner=grip_corner, max_body_h=max_body_h, **speech_colors,
         )
+        shell_size = (w, h)
         h = self._grow_for_nudge_row(canvas, w, h, tail_side)
-
+        self._speech.set_tail_drag(
+            angle_rad, self._on_speech_tail_drag, shell_size, self._save_manual_positions
+        )
         self._speech.place(x, y, w, h)
         self._speech_rect = (x, y, w, h)
+
+    def _draw_speech_frame(self, *args, **kwargs) -> tuple[int, int]:
+        return shapes.draw_speech_bubble(*args, **kwargs)
 
     def _avoid_thought_overlap(
         self, x: int, y: int, w: int, h: int, mon_rect: tuple[int, int, int, int]
@@ -810,7 +932,10 @@ class BubbleManager:
             # 마지막 응답 스냅샷 — 사용자 질문이 있었던 턴이므로 nudge 아님.
             self._last_speech_text = self._speech_text
             self._last_was_nudge = False
-            self._render_speech()
+            if is_delta:
+                self._schedule_speech_render()
+            else:
+                self._render_speech()
         else:  # "thought"
             if is_delta and block_id is not None and block_id != self._thought_block_id:
                 self._thought_text = ""

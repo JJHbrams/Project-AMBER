@@ -26,11 +26,8 @@ def _hex_to_rgb(hex_color: str) -> tuple:
 
 def _lighten_rgb(rgb: tuple, factor: float) -> tuple:
     r, g, b = rgb
-    return (
-        int(r + (255 - r) * factor),
-        int(g + (255 - g) * factor),
-        int(b + (255 - b) * factor),
-    )
+    return tuple(max(0, min(255, int(channel + (255 - channel) * factor)))
+                 for channel in (r, g, b))
 
 
 def _tail_exit_point(body_x0, body_y0, body_w, body_h, angle_rad):
@@ -130,14 +127,26 @@ def build_bubble_flat(
     outline_rgb = _hex_to_rgb(outline)
     img = Image.new("RGBA", size_s, (0, 0, 0, 0))
 
-    # 1) 글로우(후광) — 몸통 뒤에 깔아 가장자리 바깥으로만 은은하게 남게 한다.
+    # 1) Graphite glass gets depth from two restrained, theme-derived layers.
+    # 테마 outline에서 파생하므로 밝기/색상 커스터마이즈를 깨지 않는다.
+    shadow_offset = max(2 * S, 1)
+    shadow_mask = Image.new("L", size_s, 0)
+    shadow_mask.paste(mask.crop((0, 0, size_s[0], size_s[1] - shadow_offset)), (0, shadow_offset))
+    shadow_alpha = ImageChops.subtract(
+        shadow_mask.filter(ImageFilter.GaussianBlur(max(2 * S, 1))), mask
+    ).point(lambda v: int(v * 0.48))
+    shadow = Image.new("RGBA", size_s, (*_lighten_rgb(outline_rgb, -0.45), 0))
+    shadow.putalpha(shadow_alpha)
+    img = Image.alpha_composite(img, shadow)
+
+    # 2) A narrow edge-light — deliberately not a broad neon glow.
     if glow:
-        glow_alpha = mask.filter(ImageFilter.GaussianBlur(glow_radius * S)).point(lambda v: int(v * 0.7))
+        glow_alpha = mask.filter(ImageFilter.GaussianBlur(glow_radius * S)).point(lambda v: int(v * 0.28))
         glow_layer = Image.new("RGBA", size_s, (*_lighten_rgb(outline_rgb, 0.5), 0))
         glow_layer.putalpha(glow_alpha)
         img = Image.alpha_composite(img, glow_layer)
 
-    # 2) 몸통 채움(평면 bg — 위 텍스트 위젯 배경과 정확히 일치시켜 이음새 제거) +
+    # 3) 몸통 채움(평면 bg — 위 텍스트 위젯 배경과 정확히 일치시켜 이음새 제거) +
     #    가장자리 안쪽으로 살짝 어두운 비네트로 밋밋함만 덜어냄.
     fill = Image.new("RGBA", size_s, (*bg_rgb, 0))
     fill.putalpha(mask)
@@ -148,13 +157,38 @@ def build_bubble_flat(
     vignette.putalpha(edge_only.point(lambda v: int(v * 0.5)))
     img = Image.alpha_composite(img, vignette)
 
-    # 3) 외곽선 — 마스크에서 얇은 밴드를 추출해 몸통+꼬리를 하나의 연속 스트로크로.
+    # Fine top highlight: enough glass separation without changing the center
+    # fill behind a Tk text widget (which must remain seamless).
+    inner_band = ImageChops.subtract(mask, _erode(mask, max(S, 1)))
+    top_gate = Image.new("L", size_s, 0)
+    ImageDraw.Draw(top_gate).rectangle(
+        [0, 0, size_s[0], margin * S + max(body_h * S // 5, S)], fill=92
+    )
+    highlight_alpha = ImageChops.multiply(inner_band, top_gate)
+    highlight = Image.new("RGBA", size_s, (*_lighten_rgb(bg_rgb, 0.24), 0))
+    highlight.putalpha(highlight_alpha)
+    img = Image.alpha_composite(img, highlight)
+
+    # 4) 외곽선 — 마스크에서 얇은 밴드를 추출해 몸통+꼬리를 하나의 연속 스트로크로.
     outline_band = ImageChops.subtract(mask, _erode(mask, outline_w * S))
     outline_layer = Image.new("RGBA", size_s, (*outline_rgb, 0))
     outline_layer.putalpha(outline_band)
     img = Image.alpha_composite(img, outline_layer)
 
-    # 4) 다운스케일(여기서 안티에일리어싱) → 알파 셰이핑(fringing 완화) → 크로마 평탄화.
+    # The tail tip doubles as a quiet drag affordance.  It deliberately derives
+    # from the active outline rather than adding a second palette or a widget.
+    ex, ey, dx, dy = _tail_exit_point(margin * S, margin * S, body_w * S, body_h * S, angle_rad)
+    apex_x, apex_y = ex + dx * tail_len * S, ey + dy * tail_len * S
+    handle = Image.new("RGBA", size_s, (0, 0, 0, 0))
+    handle_draw = ImageDraw.Draw(handle)
+    handle_r = max(3 * S, 3)
+    handle_draw.ellipse(
+        [apex_x - handle_r, apex_y - handle_r, apex_x + handle_r, apex_y + handle_r],
+        outline=(*_lighten_rgb(outline_rgb, 0.35), 170), width=max(S, 1),
+    )
+    img = Image.alpha_composite(img, handle)
+
+    # 5) 다운스케일(여기서 안티에일리어싱) → 알파 셰이핑(fringing 완화) → 크로마 평탄화.
     img = img.resize((total_w, total_h), Image.LANCZOS)
     r, g, b, a = img.split()
     a = a.point(lambda v: 0 if v < glow_alpha_floor else v)

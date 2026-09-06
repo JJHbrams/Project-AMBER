@@ -76,6 +76,7 @@ Filename: "powershell.exe"; \
 var
   DirPage: TInputDirWizardPage;
   ProviderPage: TInputOptionWizardPage;
+  ExternalOverlayPage: TInputOptionWizardPage;
   QueryPage: TInputQueryWizardPage;
 
 function DefaultDbDir(): String;
@@ -170,12 +171,31 @@ begin
   ProviderPage.Add('Ollama (로컬)');
   ProviderPage.SelectedValueIndex := 3;
 
-  { 3) Ollama 모델 / Identity 이름 (선택) }
-  QueryPage := CreateInputQueryPage(ProviderPage.ID,
+  { 3) External overlay contract scaffold. v1.1.0.89 has no installable assets. }
+  ExternalOverlayPage := CreateInputOptionPage(ProviderPage.ID,
+    '외부 오버레이 (선택)', '외부 렌더러 구성 방식을 선택하세요',
+    '현재 고정 공개 릴리스 v1.1.0.89에는 self-contained preset/SDK asset이 없습니다. 선택 시 AMBER core만 설치됩니다.', True, False);
+  ExternalOverlayPage.Add('설치 안 함 (권장)');
+  ExternalOverlayPage.Add('Preset provider — 현재 릴리스에서 사용 불가');
+  ExternalOverlayPage.Add('Renderer SDK — 현재 릴리스에서 사용 불가');
+  ExternalOverlayPage.SelectedValueIndex := 0;
+
+  { 4) Ollama 모델 / Identity 이름 (선택) }
+  QueryPage := CreateInputQueryPage(ExternalOverlayPage.ID,
     '추가 설정 (선택)', '비워두면 기본값을 사용합니다',
     'Ollama 를 쓰는 경우 모델명을, engram 이름을 미리 정하려면 입력하세요.');
   QueryPage.Add('Ollama 모델명 (예: qwen3.5:4b) — 선택', False);
   QueryPage.Add('Engram Identity 이름 — 선택', False);
+end;
+
+function ExternalOverlayModeCode(): String;
+begin
+  case ExternalOverlayPage.SelectedValueIndex of
+    1: Result := 'presets';
+    2: Result := 'sdk';
+  else
+    Result := 'none';
+  end;
 end;
 
 function ProviderCode(): String;
@@ -202,6 +222,7 @@ begin
   R := R + ' -DbDir ' + Q + DirPage.Values[0] + Q;
   R := R + ' -WorkDir ' + Q + DirPage.Values[1] + Q;
   R := R + ' -CliProvider ' + ProviderCode();
+  R := R + ' -ExternalOverlayMode ' + ExternalOverlayModeCode();
   if Trim(QueryPage.Values[0]) <> '' then
     R := R + ' -OllamaModel ' + Q + Trim(QueryPage.Values[0]) + Q;
   if Trim(QueryPage.Values[1]) <> '' then
@@ -210,6 +231,22 @@ begin
     R := R + ' -EnableAutoStart';
   R := R + ' -LaunchNow';
   Result := R;
+end;
+
+function NextButtonClick(CurPageID: Integer): Boolean;
+begin
+  Result := True;
+  if (CurPageID = ExternalOverlayPage.ID) and
+     (ExternalOverlayPage.SelectedValueIndex <> 0) then
+    MsgBox('선택한 외부 오버레이 구성은 고정 공개 릴리스 v1.1.0.89에서 사용할 수 없습니다.' + #13#10 +
+      'AMBER core 설치는 계속되지만 외부 오버레이는 설치되지 않습니다.', mbInformation, MB_OK);
+end;
+
+procedure CurPageChanged(CurPageID: Integer);
+begin
+  if (CurPageID = wpFinished) and (ExternalOverlayPage.SelectedValueIndex <> 0) then
+    WizardForm.FinishedLabel.Caption := WizardForm.FinishedLabel.Caption + #13#10 + #13#10 +
+      '외부 오버레이: 선택한 구성은 현재 릴리스에서 사용할 수 없어 설치되지 않았습니다.';
 end;
 
 procedure RunConfigure;

@@ -3723,6 +3723,11 @@ class RemoteGuardMiddleware:
 
         # 1) bearer 인증
         headers = {k.decode("latin-1").lower(): v.decode("latin-1") for k, v in scope.get("headers") or []}
+        provision_nonce = headers.get("x-engram-provision-proof", "")
+        # An opaque, short, URL-safe nonce is audit correlation only; reject it
+        # from the audit detail unless it has the expected bounded shape.
+        if not re.fullmatch(r"[A-Za-z0-9_-]{16,64}", provision_nonce):
+            provision_nonce = ""
         auth = headers.get("authorization", "")
         token = auth[7:].strip() if auth[:7].lower() == "bearer " else ""
         principal = _REMOTE_PRINCIPALS.get(token) if token else None
@@ -3775,7 +3780,10 @@ class RemoteGuardMiddleware:
             _call_log.audit_remote(
                 principal=principal.name, action="allow",
                 tool=_tool_name_in_body(body), path=path,
-                detail=f"scope pinned to {principal.scope}" if pinned is not None else "",
+                detail="; ".join(value for value in (
+                    f"scope pinned to {principal.scope}" if pinned is not None else "",
+                    f"provision_nonce={provision_nonce}" if provision_nonce else "",
+                ) if value),
             )
 
             replayed = False

@@ -5,17 +5,81 @@ tkinter에서 안 되므로, fade는 Canvas.scale로 내용을 중심 기준 축
 줄여 "사라지는" 느낌을 낸다.
 """
 
+import ctypes
+import math
 import tkinter as tk
 from typing import Callable, Optional
 
 from overlay.bubble.shapes import GRIP_SIZE, TAIL_REACH
 
 _CHROMA = "#010101"
+_GA_ROOT = 2
+_SWP_NOSIZE_NOMOVE_NOACTIVATE = 0x0001 | 0x0002 | 0x0010
+
+
+def _toplevel_hwnd(win: tk.Misc) -> int:
+    """Real top-level HWND for a Tk window; winfo_id() can be an inner frame."""
+    try:
+        return int(ctypes.windll.user32.GetAncestor(int(win.winfo_id()), _GA_ROOT)) or int(win.winfo_id())
+    except Exception:
+        return 0
+
+
+def place_behind(win: tk.Misc, other_hwnd: int) -> bool:
+    """Insert `win` directly beneath `other_hwnd` in the z-order.
+
+    Clearing WS_EX_TOPMOST is not enough on Windows: the window is moved to the
+    top of the *non-topmost* band, which is still above the application the user
+    just activated. Stepping back means being restacked, not just untagged.
+    """
+    hwnd = _toplevel_hwnd(win)
+    if not hwnd or not other_hwnd:
+        return False
+    try:
+        return bool(ctypes.windll.user32.SetWindowPos(
+            hwnd, int(other_hwnd), 0, 0, 0, 0, _SWP_NOSIZE_NOMOVE_NOACTIVATE
+        ))
+    except Exception:
+        return False
+
+
+def normalize_tail_vector(dx: float, dy: float) -> "tuple[float, float] | None":
+    """Return a finite unit direction suitable for persisted speech-tail state."""
+    try:
+        dx, dy = float(dx), float(dy)
+    except (TypeError, ValueError):
+        return None
+    length = math.hypot(dx, dy)
+    if not math.isfinite(length) or length < 0.001:
+        return None
+    return dx / length, dy / length
+
+
+def tail_handle_point(width: int, height: int, angle_rad: float) -> tuple[float, float]:
+    """Return the rendered tail tip, which remains inside the TAIL_REACH margin."""
+    cx, cy = width / 2, height / 2
+    half_w = max(1.0, (width - 2 * TAIL_REACH) / 2)
+    half_h = max(1.0, (height - 2 * TAIL_REACH) / 2)
+    dx, dy = math.cos(angle_rad), math.sin(angle_rad)
+    scale = min(half_w / max(abs(dx), 1e-6), half_h / max(abs(dy), 1e-6))
+    return cx + dx * (scale + 16), cy + dy * (scale + 16)
 
 
 class BubbleWindow:
-    def __init__(self, root: tk.Tk):
+    def __init__(self, root: tk.Tk, external_replace_active: "Callable[[], bool] | None" = None, *, keep_topmost: bool = False):
         self._root = root
+        self._external_replace_active = external_replace_active or (lambda: False)
+        self._keep_topmost = keep_topmost
+        self._topmost_release_id: "str | None" = None
+        self._external_topmost_held = False
+        # Whether the overlay (bundled window, a bubble, or the external
+        # renderer) currently owns the foreground.  A replace renderer is a
+        # separate topmost process window, so a bubble has to be topmost to be
+        # visible at all — but only while the user is actually looking at the
+        # overlay.  The host drives this from a real foreground check instead of
+        # the timed pulse this used to be, which never released during streaming
+        # and then dropped the bubble abruptly once streaming stopped.
+        self._overlay_foreground = True
         self.win: "tk.Toplevel | None" = None
         self.canvas: "tk.Canvas | None" = None
         self._dismiss_after_id: "str | None" = None
@@ -35,6 +99,11 @@ class BubbleWindow:
         self._move_start: "tuple[int, int, int, int] | None" = None  # (mouse_x_root, mouse_y_root, win_x_at_press, win_y_at_press)
         self._dragged = False
         self._grip_corner = "top-right"  # shapes.draw_resize_grip과 반드시 같은 값을 써야 함
+        self._tail_angle: float | None = None
+        self._on_tail_drag: Optional[Callable[[float, float], None]] = None
+        self._on_tail_drag_end: Optional[Callable[[], None]] = None
+        self._tail_dragging = False
+        self._tail_shell_size: "tuple[int, int] | None" = None
 
     def set_on_click(self, callback: "Callable[[], None] | None") -> None:
         """클릭하면 호출할 콜백 등록 — 호출부가 "클릭해서 닫기" 등을 구현할 때 사용.
@@ -66,6 +135,25 @@ class BubbleWindow:
         """"top-right" 또는 "top-left" — draw_*(..., grip_corner=...)로 그린 것과 맞춰야
         클릭 판정이 실제 그려진 손잡이 위치와 일치한다. place() 호출 전에 설정할 것."""
         self._grip_corner = corner
+
+    def set_tail_drag(
+        self,
+        angle_rad: float | None,
+        callback: "Callable[[float, float], None] | None",
+        shell_size: "tuple[int, int] | None" = None,
+        on_end: "Callable[[], None] | None" = None,
+    ) -> None:
+        """Speech-only independent tail endpoint affordance; vector is normalized."""
+        self._tail_angle, self._on_tail_drag = angle_rad, callback
+        self._tail_shell_size = shell_size
+        self._on_tail_drag_end = on_end
+
+    def _in_tail_zone(self, x: int, y: int) -> bool:
+        if self._tail_angle is None or self._on_tail_drag is None:
+            return False
+        shell_w, shell_h = self._tail_shell_size or (self._current_w, self._current_h)
+        tx, ty = tail_handle_point(shell_w, shell_h, self._tail_angle)
+        return (x - tx) ** 2 + (y - ty) ** 2 <= 9 ** 2
 
     def ensure(self) -> tk.Canvas:
         if self.win is None or not self.win.winfo_exists():
@@ -108,6 +196,10 @@ class BubbleWindow:
         "항상 좌상단이 고정되고 우하단으로만 커지는" 버그가 된다."""
         return self._move_start is not None
 
+    def is_tail_dragging(self) -> bool:
+        """Tail endpoint interaction also requires streaming renders to keep the body fixed."""
+        return self._tail_dragging
+
     def _in_grip_zone(self, x: int, y: int) -> bool:
         """shapes.draw_resize_grip이 실제로 그린(불투명한 몸통 모서리 안쪽, TAIL_REACH만큼
         캔버스 가장자리에서 들어온) 자리와 히트존을 맞춘다 — margin 없이 캔버스 맨 끝(0)
@@ -123,6 +215,9 @@ class BubbleWindow:
         )
 
     def _handle_press(self, event) -> None:
+        if self._in_tail_zone(event.x, event.y):
+            self._tail_dragging = True
+            return
         if self._in_grip_zone(event.x, event.y):
             self._resize_start = (event.x_root, self._current_w, event.y_root, self._current_h)
             return
@@ -131,6 +226,13 @@ class BubbleWindow:
             self._dragged = False
 
     def _handle_drag(self, event) -> None:
+        if self._tail_dragging:
+            shell_w, shell_h = self._tail_shell_size or (self._current_w, self._current_h)
+            dx, dy = event.x - shell_w / 2, event.y - shell_h / 2
+            vector = normalize_tail_vector(dx, dy)
+            if vector is not None and self._on_tail_drag is not None:
+                self._on_tail_drag(*vector)
+            return
         if self._resize_start is not None:
             start_x_root, start_w, start_y_root, start_h = self._resize_start
             dx = event.x_root - start_x_root
@@ -154,6 +256,11 @@ class BubbleWindow:
         self.win.geometry(f"+{win_x + dx}+{win_y + dy}")
 
     def _handle_release(self, _event=None) -> None:
+        if self._tail_dragging:
+            self._tail_dragging = False
+            if self._on_tail_drag_end is not None:
+                self._on_tail_drag_end()
+            return
         if self._resize_start is not None:
             self._resize_start = None
             return
@@ -178,8 +285,115 @@ class BubbleWindow:
             return
         self._current_w, self._current_h = w, h
         self.win.geometry(f"{w}x{h}+{x}+{y}")
+        if getattr(self, "canvas", None) is not None:
+            self.canvas.pack()
         self.win.deiconify()
         self.win.lift()
+        # The input bar used to be excluded here because the old timed pulse
+        # would have fought its focus-scoped hold. There is no pulse now, and
+        # under a replace renderer the host never wins the OS focus the input
+        # bar was waiting for — so it has to take topmost the same way the
+        # other bubbles do, or it opens underneath whatever is on screen.
+        self._raise_above_external_replace()
+
+    def set_overlay_foreground(self, foreground: bool, below_hwnd: int = 0) -> None:
+        """Hold or drop the external-replace topmost according to real focus.
+
+        `below_hwnd` is the window the user just activated. Dropping topmost
+        alone leaves this window at the top of the non-topmost band — still in
+        front of that window — so it also has to be restacked beneath it.
+        """
+        changed = bool(foreground) != self._overlay_foreground
+        self._overlay_foreground = bool(foreground)
+        if self._overlay_foreground:
+            if changed and self.is_visible():
+                self.acquire_external_topmost()
+            return
+        if changed:
+            self.release_external_topmost()
+        if below_hwnd and self.win is not None and self.is_visible():
+            place_behind(self.win, below_hwnd)
+
+    def acquire_external_topmost(self) -> None:
+        """Hold this window above an external replace renderer during interaction."""
+        if self.win is None or not self._external_replace_active():
+            return
+        if self._topmost_release_id is not None:
+            try:
+                self._root.after_cancel(self._topmost_release_id)
+            except Exception:
+                pass
+            self._topmost_release_id = None
+        self.win.attributes("-topmost", True)
+        self.win.lift()
+        self._external_topmost_held = True
+
+    def release_external_topmost(self) -> None:
+        """Release both an interaction hold and any pending transient release."""
+        if self._topmost_release_id is not None:
+            try:
+                self._root.after_cancel(self._topmost_release_id)
+            except Exception:
+                pass
+            self._topmost_release_id = None
+        if getattr(self, "_external_topmost_held", False):
+            self._external_topmost_held = False
+            self._set_external_topmost(False)
+
+    def suspend_content(self) -> None:
+        """Hide live children while a new speech geometry is measured."""
+        if self.canvas is not None:
+            try:
+                self.canvas.pack_forget()
+            except Exception:
+                pass
+
+    def resume_content(self) -> None:
+        """Remap content after an aborted measurement without changing geometry."""
+        if self.canvas is not None:
+            try:
+                self.canvas.pack()
+            except Exception:
+                pass
+
+    def commit_size(self, w: int, h: int) -> None:
+        """Resize the outer shell before remapping its already-rendered children."""
+        if self.win is None:
+            return
+        self.win.geometry(f"{w}x{h}")
+        if self.canvas is not None:
+            self.canvas.pack()
+
+    def _raise_above_external_replace(self) -> None:
+        """Sit above a separate-process topmost replace renderer while focused.
+
+        This used to be a 350ms pulse re-armed by every render. Streaming
+        renders arrive faster than that, so the release never fired and the
+        bubble stayed permanently topmost over unrelated applications; when
+        streaming stopped it dropped behind the renderer all at once. The hold
+        now follows set_overlay_foreground, which the host drives from an actual
+        foreground-window check. Interactive input keeps its own focus-scoped
+        hold for the lifetime of its Entry.
+        """
+        if self.win is None or not self._external_replace_active():
+            return
+        if not self._overlay_foreground:
+            self.release_external_topmost()
+            return
+        self.acquire_external_topmost()
+
+    def _release_external_topmost(self) -> None:
+        self._topmost_release_id = None
+        if getattr(self, "_external_topmost_held", False):
+            self._external_topmost_held = False
+            self._set_external_topmost(False)
+
+    def _set_external_topmost(self, enabled: bool) -> None:
+        if self.win is not None:
+            try:
+                self.win.attributes("-topmost", enabled)
+            except Exception:
+                pass
 
     def _set_hover(self, hovering: bool) -> None:
         self._hover = hovering
@@ -247,6 +461,7 @@ class BubbleWindow:
         self._cancel_fade()
         if self.win is not None:
             try:
+                self.release_external_topmost()
                 self.win.withdraw()
             except Exception:
                 pass
