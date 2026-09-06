@@ -68,8 +68,14 @@
 
 ### Files
 
-- Source only. No installer was produced for this release; the most recent prebuilt
-  artifact remains the one listed under v1.5.8.
+- `AMBER_1.5.12.661_x64-setup.exe` (199,920,978 bytes),
+  SHA-256 `6f40260fb31de9c21281808157b43f7614f0205405f98f7b5b0693994592e50d`.
+- The optional FP32 ModelPack is unchanged since v1.5.8: `core/install/model_manifest.py`
+  and `resource/embedding-model/` are byte-identical, so
+  `AMBER_1.5.8.552_FP32_ModelPack.zip` from that release imports into v1.5.12 as-is. It is
+  not duplicated here.
+- Built with `installer/build-installer.ps1 -FreshBuild -Release`, which this release
+  changes to invalidate PyInstaller's analysis/PYZ cache rather than reuse the workpath.
 
 ## 2026-09-01 - v1.5.8: Smaller Installer, Exact FP32 Semantics
 
