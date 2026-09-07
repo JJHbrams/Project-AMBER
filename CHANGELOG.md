@@ -4,6 +4,22 @@ All notable changes to this project are documented in this file.
 
 ## Unreleased
 
+## [1.5.13] — 2026-09-07
+
+### Fixed
+
+- subagent 정의 배치가 사용자가 소유한 파일을 덮어쓰던 문제. `planner`/`coder`/
+  `servant` 는 아무나 쓸 이름이라 사용자가 같은 이름으로 자기 에이전트를 만들어
+  두었을 수 있는데, `Copy-Item -Force` 로 무조건 덮어써서 백업도 경고도 없이
+  지웠다. 노출 범위는 소스에서 `INSTALL.ps1` 로 설치·재설치한 경우다 —
+  이 배치는 `modules/07_shims.ps1` 에서만 호출되므로 AMBER installer 로 설치한
+  사용자는 이 경로를 타지 않았다.
+
+  이제 배치한 내용의 SHA-256 을 `~/.engram/agent-definitions.json` 에 기록하고,
+  현재 파일이 그 기록과 다르면(= 사용자가 만들었거나 고쳤으면) 건너뛰고 그
+  사실을 출력한다. 한 파일이 사용자 것이어도 나머지는 정상 배치된다.
+  `-Force` 는 덮어쓰되 `.engram-bak` 으로 먼저 백업한다.
+
 ## [1.5.12] — 2026-09-07
 
 ### Fixed
