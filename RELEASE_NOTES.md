@@ -1,5 +1,42 @@
 # Release Notes
 
+## 2026-09-07 - v1.5.13: Managed Agent Definitions No Longer Overwrite Yours
+
+> Hotfix. Deploying the managed `planner`/`coder`/`servant` subagent definitions
+> could destroy an agent of the same name that the user had written themselves.
+
+### Fixed
+
+- The deployer copied with `-Force` unconditionally, so a file it had never written was
+  overwritten with no backup and no warning. `planner`, `coder`, and `servant` are ordinary
+  names; a user may well own one already.
+- It now records the SHA-256 of what it wrote in `~/.engram/agent-definitions.json` and
+  replaces a file only when the file on disk still matches that record. Anything else — a
+  file the user authored, or one of ours they have since edited — is skipped, and the skip
+  is printed rather than passed over in silence. One skipped file does not stop the rest.
+- `-Force` still overwrites, but backs the file up to `.engram-bak` first. An irreversible
+  action leaves a way back.
+
+### Impact
+
+- **Who was exposed:** installs and reinstalls run from source with `INSTALL.ps1`. The
+  deployer was only ever invoked from `modules/07_shims.ps1`, so machines set up with the
+  AMBER installer never took this path.
+- Managed definitions still update normally on reinstall, because their recorded hash
+  matches. Nothing about the provider-specific formats or destinations changed.
+
+### Validation
+
+- The three new regressions were checked against the pre-fix script: they fail there and
+  pass after, so they count the cause rather than the symptom.
+- Reproduced the original loss in an isolated profile first — a hand-written `coder.md`
+  disappeared in a single deployment run.
+
+### Files
+
+- Source only. Install with the `AMBER_1.5.12.661_x64-setup.exe` asset from v1.5.12; this
+  hotfix changes an installer-side script and carries no new binary.
+
 ## 2026-09-07 - v1.5.12: External Overlay Event API v2 and a Responsive Bubble Chat
 
 > Patch release, folding in v1.5.9 through v1.5.12. Engram now hosts an authenticated

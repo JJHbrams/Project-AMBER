@@ -66,7 +66,12 @@ def test_07_shims_uses_provider_specific_agent_deployment():
     assert "config\\skills" not in shims
     assert "config\\skills" not in common
     assert "Remove-Item" not in helper
-    assert helper.count("Copy-Item") == 1
+    # planner/coder/servant 는 아무나 쓸 이름이라, 무조건 복사는 사용자가 같은
+    # 이름으로 만든 에이전트를 백업도 없이 지운다. provenance 해시로 우리가 쓴
+    # 내용인지 판정하고, 아닐 때는 건드리지 않는다.
+    assert "Get-FileHash" in helper
+    assert "provenance" in helper.lower()
+    assert "agent-definitions.json" in helper
     assert "-LiteralPath $source -Destination $destination -Force" in helper
     for provider, destination, extension in (
         ("claude", ".claude\\agents", ".md"),
@@ -165,8 +170,9 @@ def test_windows_agent_deployment_can_repair_only_claude():
             for role in ROLES:
                 managed = destination / f"{role}{extension}"
                 managed.write_text(f"preexisting {provider} {role}", encoding="utf-8")
-                if provider != "claude":
-                    untouched_hashes[managed] = hashlib.sha256(managed.read_bytes()).hexdigest()
+                # 내용을 모르는 기존 파일은 provenance 에 없으므로 어느 공급자든
+                # 보존돼야 한다. 이게 이 배치의 새 계약이다.
+                untouched_hashes[managed] = hashlib.sha256(managed.read_bytes()).hexdigest()
 
         env = os.environ.copy()
         env["USERPROFILE"] = str(user_profile)
@@ -194,10 +200,95 @@ def test_windows_agent_deployment_can_repair_only_claude():
         )
         assert result.returncode == 0, result.stderr or result.stdout
 
-        claude_destination, claude_extension = mappings["claude"]
-        for role in ROLES:
-            assert (claude_destination / f"{role}{claude_extension}").read_bytes() == (
-                AGENTS_ROOT / "claude" / f"{role}{claude_extension}"
-            ).read_bytes()
+        # 알 수 없는 내용의 기존 파일은 하나도 바뀌지 않는다.
         for path, expected_hash in untouched_hashes.items():
-            assert hashlib.sha256(path.read_bytes()).hexdigest() == expected_hash
+            assert hashlib.sha256(path.read_bytes()).hexdigest() == expected_hash, (
+                f"{path} was overwritten; the installer must not clobber files it did not write"
+            )
+        assert "SKIP" in result.stdout, "건너뛴 사실을 사용자에게 말해야 한다"
+
+
+def _run_deploy(profile: Path, *extra: str):
+    powershell = shutil.which("pwsh") or shutil.which("powershell")
+    return subprocess.run(
+        [powershell, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+         "-File", str(ROOT / "installer" / "deploy_agent_definitions.ps1"),
+         "-ProjectRoot", str(ROOT), "-UserProfile", str(profile),
+         "-Provider", "Claude", *extra],
+        capture_output=True, text=True, timeout=60,
+    )
+
+
+def test_a_user_authored_agent_of_the_same_name_survives_install():
+    """planner/coder/servant are ordinary names; a user may already own one.
+
+    Before provenance the deployer did Copy-Item -Force unconditionally, so an
+    install silently destroyed the user's own agent with no backup.
+    """
+    powershell = shutil.which("pwsh") or shutil.which("powershell")
+    if os.name != "nt" or not powershell:
+        pytest.skip("Windows PowerShell runtime is required")
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        profile = Path(temp_dir) / "profile"
+        agents = profile / ".claude" / "agents"
+        agents.mkdir(parents=True)
+        mine = agents / "coder.md"
+        mine.write_text("# my own coder\nprecious prompt", encoding="utf-8")
+        before = hashlib.sha256(mine.read_bytes()).hexdigest()
+
+        result = _run_deploy(profile)
+        assert result.returncode == 0, result.stderr or result.stdout
+
+        assert hashlib.sha256(mine.read_bytes()).hexdigest() == before
+        assert "SKIP" in result.stdout
+        # 나머지는 정상 배치된다 — 하나 때문에 전체가 멈추지 않는다.
+        assert (agents / "planner.md").is_file()
+        assert (agents / "servant.md").is_file()
+
+
+def test_our_own_previous_file_is_updated_on_reinstall():
+    powershell = shutil.which("pwsh") or shutil.which("powershell")
+    if os.name != "nt" or not powershell:
+        pytest.skip("Windows PowerShell runtime is required")
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        profile = Path(temp_dir) / "profile"
+        assert _run_deploy(profile).returncode == 0
+        planner = profile / ".claude" / "agents" / "planner.md"
+        source = (AGENTS_ROOT / "claude" / "planner.md").read_bytes()
+        assert planner.read_bytes() == source
+
+        # 우리가 쓴 그대로면 두 번째 설치도 조용히 갱신한다(멱등).
+        result = _run_deploy(profile)
+        assert result.returncode == 0
+        assert planner.read_bytes() == source
+        assert "SKIP" not in result.stdout
+
+
+def test_edits_to_our_file_are_preserved_and_force_backs_them_up():
+    powershell = shutil.which("pwsh") or shutil.which("powershell")
+    if os.name != "nt" or not powershell:
+        pytest.skip("Windows PowerShell runtime is required")
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        profile = Path(temp_dir) / "profile"
+        assert _run_deploy(profile).returncode == 0
+        planner = profile / ".claude" / "agents" / "planner.md"
+        planner.write_text(planner.read_text(encoding="utf-8") + "\n# tuned by the user",
+# tuned by the user",
+                           encoding="utf-8")
+        edited = hashlib.sha256(planner.read_bytes()).hexdigest()
+
+        assert _run_deploy(profile).returncode == 0
+        assert hashlib.sha256(planner.read_bytes()).hexdigest() == edited, (
+            "once the user edits it, it is theirs"
+        )
+
+        # -Force 는 덮어쓰되 되돌릴 수 있게 남긴다.
+        result = _run_deploy(profile, "-Force")
+        assert result.returncode == 0
+        backup = planner.with_suffix(".md.engram-bak")
+        assert backup.is_file(), "an irreversible overwrite must leave a way back"
+        assert hashlib.sha256(backup.read_bytes()).hexdigest() == edited
+        assert "BACKUP" in result.stdout
