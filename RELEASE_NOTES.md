@@ -1,5 +1,43 @@
 # Release Notes
 
+## 2026-09-07 - v1.5.14: The Hotfix No Longer Freezes Managed Definitions
+
+> Follow-up to v1.5.13. That release decided ownership from the provenance record alone, so
+> definitions deployed before it existed were all classified as the user's and skipped —
+> which meant they would never receive a future improvement.
+
+### Fixed
+
+- Ownership now has a second, safe signal: if the file on disk is byte-identical to the
+  definition we ship, it is not the user's work — the record is simply missing. Those files
+  are adopted and kept up to date. Anything whose content differs is still left alone,
+  exactly as in v1.5.13.
+
+### How to apply this hotfix
+
+- **Installed from source with `INSTALL.ps1`** — this is the only path that was affected.
+  `git pull`, then run `INSTALL.ps1` again. The deployer runs straight from the checkout,
+  so there is nothing else to do.
+- **Installed with the AMBER installer** — nothing to do. The deployer is invoked only from
+  `modules/07_shims.ps1`, so an installed copy never took this path. The fix ships with the
+  next installer release.
+- **Files already overwritten are not recovered.** Before v1.5.13 no backup was taken —
+  that was the defect. If you have ever installed from source and owned a `planner`,
+  `coder`, or `servant` definition, check whether it is still yours.
+- To deliberately reset the managed definitions to current, pass `-Force`. That backs each
+  file up to `.engram-bak` before overwriting.
+
+### Validation
+
+- The adoption regression was run against the v1.5.13 script: it fails there and passes
+  here, and it is the only one that changes state — the user-authored protections still
+  hold in both.
+
+### Files
+
+- Source only, as in v1.5.13. Install with the `AMBER_1.5.12.661_x64-setup.exe` asset from
+  v1.5.12.
+
 ## 2026-09-07 - v1.5.13: Managed Agent Definitions No Longer Overwrite Yours
 
 > Hotfix. Deploying the managed `planner`/`coder`/`servant` subagent definitions
