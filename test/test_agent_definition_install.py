@@ -292,3 +292,62 @@ def test_edits_to_our_file_are_preserved_and_force_backs_them_up():
         assert backup.is_file(), "an irreversible overwrite must leave a way back"
         assert hashlib.sha256(backup.read_bytes()).hexdigest() == edited
         assert "BACKUP" in result.stdout
+
+
+def test_files_from_before_provenance_are_adopted_not_frozen():
+    """v1.5.13 이전 배치가 깔아둔 파일에는 provenance 기록이 없다.
+
+    기록만 보고 판정하면 그 파일들이 전부 "사용자 것"으로 분류되어 SKIP 되고,
+    앞으로 정의를 개선해도 소스 설치 사용자에게 도달하지 않는다. 디스크 내용이
+    배포 원본과 바이트 동일하면 사용자 작업물이 아니므로 입양한다.
+    """
+    powershell = shutil.which("pwsh") or shutil.which("powershell")
+    if os.name != "nt" or not powershell:
+        pytest.skip("Windows PowerShell runtime is required")
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        profile = Path(temp_dir) / "profile"
+        agents = profile / ".claude" / "agents"
+        agents.mkdir(parents=True)
+        # 예전 배치 상태를 재현: 원본과 동일한 내용, provenance 없음
+        for role in ROLES:
+            shutil.copyfile(AGENTS_ROOT / "claude" / f"{role}.md", agents / f"{role}.md")
+        assert not (profile / ".engram" / "agent-definitions.json").exists()
+
+        result = _run_deploy(profile)
+        assert result.returncode == 0, result.stderr or result.stdout
+        assert "SKIP" not in result.stdout, (
+            "unmodified managed files must be adopted, not frozen out of future updates"
+        )
+        assert (profile / ".engram" / "agent-definitions.json").is_file()
+
+        # 입양 뒤에는 사용자 수정이 정상적으로 보호된다.
+        planner = agents / "planner.md"
+        planner.write_text(planner.read_text(encoding="utf-8") + "\n# mine",
+                           encoding="utf-8")
+        edited = hashlib.sha256(planner.read_bytes()).hexdigest()
+        second = _run_deploy(profile)
+        assert second.returncode == 0
+        assert hashlib.sha256(planner.read_bytes()).hexdigest() == edited
+        assert "SKIP" in second.stdout
+
+
+def test_adoption_never_swallows_a_user_authored_file():
+    """입양은 '원본과 동일할 때만' 이다. 내용이 다르면 여전히 사용자 것이다."""
+    powershell = shutil.which("pwsh") or shutil.which("powershell")
+    if os.name != "nt" or not powershell:
+        pytest.skip("Windows PowerShell runtime is required")
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        profile = Path(temp_dir) / "profile"
+        agents = profile / ".claude" / "agents"
+        agents.mkdir(parents=True)
+        mine = agents / "coder.md"
+        mine.write_text("# my own coder", encoding="utf-8")
+        before = hashlib.sha256(mine.read_bytes()).hexdigest()
+
+        result = _run_deploy(profile)
+        assert result.returncode == 0
+        assert hashlib.sha256(mine.read_bytes()).hexdigest() == before
+        assert "SKIP" in result.stdout
+

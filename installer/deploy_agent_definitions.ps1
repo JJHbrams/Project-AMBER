@@ -83,7 +83,16 @@ foreach ($providerSpec in $providers) {
         }
 
         $currentHash = Get-ContentHash $destination
+        $sourceHash = Get-ContentHash $source
         $recordedHash = if ($provenance.ContainsKey($destination)) { $provenance[$destination] } else { "" }
+
+        # provenance 가 없던 시절에 우리가 깔아둔 파일을 입양한다. 디스크 내용이
+        # 배포 원본과 바이트 동일하면 사용자 작업물이 아니다 — 기록만 없을 뿐이다.
+        # 이 입양이 없으면 기존 설치본의 정의가 SKIP 으로 얼어붙어, 앞으로 정의를
+        # 개선해도 소스 설치 사용자에게 도달하지 않는다.
+        if ($currentHash -and -not $recordedHash -and $currentHash -eq $sourceHash) {
+            $recordedHash = $currentHash
+        }
 
         if ($currentHash -and $currentHash -ne $recordedHash) {
             # 우리가 쓴 내용이 아니다. 사용자의 것이거나 다른 도구의 것이다.
