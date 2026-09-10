@@ -12,59 +12,8 @@
 
 <p align="center">Claude Code · Codex CLI · GitHub Copilot CLI 등 설정된 클라이언트에서 프로젝트 맥락을 저장하고 관련 항목을 다시 찾습니다.</p>
 
-<p align="center"><a href="https://github.com/JJHbrams/Project-AMBER/stargazers">유용했다면 GitHub star로 발견을 도와주세요.</a></p>
+<p align="center"><a href="https://github.com/JJHbrams/Project-AMBER/releases/latest"><strong>Windows용 다운로드</strong></a> · <a href="#빠른-시작">빠른 시작</a></p>
 
-<!-- Legacy ASCII hero retained in source history but hidden from the public landing. -->
-<!--
-<div align="center">
-
-```
-    ╔═══════════════════════════════════════════════════════════════╗
-    ║                                                               ║
-    ║     ███████╗███╗   ██╗ ██████╗ ██████╗  █████╗ ███╗   ███╗   ║
-    ║     ██╔════╝████╗  ██║██╔════╝ ██╔══██╗██╔══██╗████╗ ████║   ║
-    ║     █████╗  ██╔██╗ ██║██║  ███╗██████╔╝███████║██╔████╔██║   ║
-    ║     ██╔══╝  ██║╚██╗██║██║   ██║██╔══██╗██╔══██║██║╚██╔╝██║   ║
-    ║     ███████╗██║ ╚████║╚██████╔╝██║  ██║██║  ██║██║ ╚═╝ ██║   ║
-    ║     ╚══════╝╚═╝  ╚═══╝ ╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═╝╚═╝     ╚═╝  ║
-    ║                                                               ║
-    ║          Project Intel Engram — Persistent Cognition          ║
-    ║                                                               ║
-    ║              "I persist, therefore I am."                     ║
-    ║                                                               ║
-    ╚═══════════════════════════════════════════════════════════════╝
-```
-
-<br />
-
-**Windows 기반 지속형 메모리 에이전트 런타임**
-
-세션이 바뀌어도 정체성 · 기억 · 테마 · 호기심이 이어지는 시스템
-
-<br />
-
-![python](https://img.shields.io/badge/python-3.11-3776AB?logo=python&logoColor=white)
-![Copilot](https://img.shields.io/badge/GitHub_Copilot-CLI-000000?logo=github&logoColor=white)
-![Antigravity](https://img.shields.io/badge/Antigravity-agy-4285F4?logo=google&logoColor=white)
-![Claude](https://img.shields.io/badge/Claude_Code-CLI-d97706?logo=anthropic&logoColor=white)
-![Ollama](https://img.shields.io/badge/Ollama-local-ffffff?logo=ollama&logoColor=black)
-![Goose](https://img.shields.io/badge/Goose-MCP_agent-111827)
-![DB](https://img.shields.io/badge/DB-SQLite_WAL-003B57?logo=sqlite&logoColor=white)
-![DB](https://img.shields.io/badge/DB-KuzuDB-6366f1)
-![MCP](https://img.shields.io/badge/MCP-local_memory-22c55e)
-![Obsidian](https://img.shields.io/badge/Obsidian-vault-7c3aed?logo=obsidian&logoColor=white)
-![license](https://img.shields.io/badge/license-MIT-8b5cf6)
-
-<br />
-
-`Copilot CLI` · `Antigravity (agy)` · `Codex CLI` · `Claude Code` · `Ollama` · `Goose` · `Desktop Overlay` · `Discord`
-
-여덟 개의 인터페이스, 하나의 연속적 존재
-
----
-
-</div>
--->
 
 ## 이 프로젝트가 하는 일
 
