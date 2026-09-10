@@ -1,19 +1,26 @@
-# AMBER — persistent project memory for AI coding tools
+# AMBER
 
-**Switch AI tools. Keep your project memory.**
+# AMBER
 
-AMBER is a local-first Windows memory runtime that preserves context, decisions,
-and project knowledge across **Claude Code**, **Codex CLI**, and **GitHub Copilot
-CLI**. Your next coding session starts with the project you already built—not a
-blank slate.
+<p align="center"><a href="https://github.com/JJHbrams/Project-AMBER"><img src="resource/asset/readme/amber-header.svg" width="100%" alt="AMBER — persistent project memory" /></a></p>
 
-[Download AMBER v1.5.15 for Windows](https://github.com/JJHbrams/Project-AMBER/releases/tag/v1.5.15)
-· [Quick start](#quick-start-windows)
-· [한국어](README.ko.md)
+<p align="center"><strong>Switch AI tools. Keep your project memory.</strong></p>
 
-![AMBER native Bolttagu overlay changes from idle through search, writing, completion, then idle again.](resource/asset/readme/native-bolttagu-v1.5.15.gif)
+<p align="center">
+  <a href="https://github.com/JJHbrams/Project-AMBER/releases/latest"><img src="https://img.shields.io/github/v/release/JJHbrams/Project-AMBER?label=release&color=bc6b1a" alt="Latest release" /></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-8b5cf6.svg" alt="MIT license" /></a>
+  <img src="https://img.shields.io/badge/platform-Windows-0078D4.svg?logo=windows&logoColor=white" alt="Windows" />
+</p>
 
-<sub>Actual frozen v1.5.15.736 owned-window capture. [Capture provenance](resource/asset/readme/native-bolttagu-v1.5.15.provenance.json) · [Poster](resource/asset/readme/native-bolttagu-v1.5.15.png)</sub>
+<p align="center"><a href="https://github.com/JJHbrams/Project-AMBER/releases/latest"><strong>Download for Windows</strong></a> · <a href="#quick-start-windows"><strong>Quick start</strong></a> · <a href="#cross-tool-continuity">How it works</a> · <a href="#local-knowledge-obsidian-and-the-graph">Obsidian</a> · <a href="#native-bolttagu-overlay-and-event-mapping">Overlay</a> · <a href="docs/architecture.md">Docs</a> · <a href="https://github.com/JJHbrams/Project-AMBER/issues/new/choose">Feedback</a> · <a href="README.ko.md">한국어</a></p>
+
+AMBER gives configured **Claude Code**, **Codex CLI**, and **GitHub Copilot CLI**
+a shared project-memory layer. Move between coding sessions with decisions and
+project context ready to retrieve instead of rebuilding everything from scratch.
+
+<p align="center"><img src="resource/asset/readme/native-bolttagu-v1.5.15.gif" width="236" alt="AMBER native Bolttagu overlay changes from idle through search, writing, completion, then idle again." /></p>
+
+<p align="center"><sub>Native Bolttagu in AMBER v1.5.15 · demo events. <a href="resource/asset/readme/native-bolttagu-v1.5.15.provenance.json">Capture details</a> · <a href="resource/asset/readme/native-bolttagu-v1.5.15.png">Poster</a></sub></p>
 
 ## Why AMBER
 
@@ -30,8 +37,8 @@ external overlay contract is metadata-only.
 
 ## Quick start (Windows)
 
-1. Download and run the [AMBER v1.5.15 Windows installer](https://github.com/JJHbrams/Project-AMBER/releases/tag/v1.5.15).
-2. Open AMBER from the Start menu, complete the local setup, then select the AI
+1. Download and run the [latest AMBER Windows installer](https://github.com/JJHbrams/Project-AMBER/releases/latest).
+2. Open **AMBER (ENGRAM)** from the Start menu, complete the local setup, then select the AI
    CLI you already use.
 3. Start a project session from Claude Code, Codex CLI, or GitHub Copilot CLI.
    AMBER exposes the same local memory and project context to each supported tool.
@@ -64,12 +71,23 @@ AMBER keeps the durable project layer separate from one terminal or model:
 This is deliberately practical: use the CLI that fits the task, while your
 project's working context stays available on your PC.
 
+## Storage and providers
+
+AMBER retrieves relevant saved context; it cannot guarantee perfect recall of
+every past detail. Local AMBER storage is distinct from a cloud provider: a
+provider can receive the context you choose to send through its own configured
+client. The demo above uses synthetic event metadata rather than a real provider
+lifecycle; its [capture details](resource/asset/readme/native-bolttagu-v1.5.15.provenance.json)
+record the bounded evidence and limits.
+
 ## Local knowledge: Obsidian and the graph
 
 Point AMBER at an Obsidian vault to make project notes, research, and durable
-decisions searchable as a local semantic knowledge graph. The vault remains
-your files; AMBER indexes and links useful context for retrieval rather than
-requiring a separate cloud knowledge base.
+decisions searchable as a local semantic knowledge graph. In
+`~/.engram/user.config.yaml`, choose `db.root_dir`; then open
+`<db.root_dir>\docs\` as the Obsidian vault. The vault remains your files;
+AMBER indexes and links useful context for retrieval rather than requiring a
+separate cloud knowledge base.
 
 See [architecture](docs/architecture.md) for storage and service boundaries.
 
@@ -150,4 +168,5 @@ an Inno installer test; see its [sanitized provenance](resource/asset/readme/nat
 ## License
 
 See [LICENSE](LICENSE). AMBER's public documentation is English-first; the full
-Korean guide is preserved at [README.ko.md](README.ko.md).
+Korean guide is preserved at [README.ko.md](README.ko.md). If AMBER is useful,
+[a GitHub star](https://github.com/JJHbrams/Project-AMBER/stargazers) helps others discover it.
