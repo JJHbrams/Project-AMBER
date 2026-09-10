@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="320" viewBox="0 0 1200 320" role="img" aria-labelledby="title desc">
+  <title id="title">AMBER</title><desc id="desc">An amber geometric motif beside the AMBER wordmark.</desc>
+  <defs><linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#17130e"/><stop offset="1" stop-color="#342310"/></linearGradient><linearGradient id="amber" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#ffd66b"/><stop offset=".48" stop-color="#e89425"/><stop offset="1" stop-color="#9d4811"/></linearGradient></defs>
+  <rect width="1200" height="320" rx="28" fill="url(#bg)"/><g fill="none" stroke="#f5c35b" opacity=".16"><path d="M0 70H1200M0 160H1200M0 250H1200"/><path d="M130 0v320M300 0v320M470 0v320M640 0v320M810 0v320M980 0v320"/></g>
+  <g transform="translate(78 58)"><path d="M102 0 204 59v118l-102 59L0 177V59Z" fill="url(#amber)"/><path d="m102 27 77 44v94l-77 44-77-44V71Z" fill="#211609" opacity=".74"/><path d="m102 27 77 44-77 44-77-44Z" fill="#ffe29a" opacity=".7"/><circle cx="102" cy="118" r="24" fill="#fff1bd" opacity=".9"/><path d="m102 94 21 36-21 36-21-36Z" fill="#b95d14"/></g>
+  <text x="350" y="145" fill="#fff8e9" font-family="Arial, Helvetica, sans-serif" font-size="96" font-weight="700" letter-spacing="12">AMBER</text><text x="356" y="202" fill="#f0c46b" font-family="Arial, Helvetica, sans-serif" font-size="25" letter-spacing="2">PERSISTENT PROJECT MEMORY</text>
+</svg>

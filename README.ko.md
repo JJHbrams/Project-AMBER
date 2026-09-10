@@ -1,53 +1,19 @@
-> 🇺🇸 [English](README.md) · 🇰🇷 한국어
+<p align="center"><a href="README.md"><img src="resource/asset/readme/amber-header.svg" width="100%" alt="AMBER" /></a></p>
 
-<div align="center">
+<p align="center"><strong>AI 도구를 바꿔도 프로젝트 기억은 이어집니다.</strong></p>
 
-```
-    ╔═══════════════════════════════════════════════════════════════╗
-    ║                                                               ║
-    ║     ███████╗███╗   ██╗ ██████╗ ██████╗  █████╗ ███╗   ███╗   ║
-    ║     ██╔════╝████╗  ██║██╔════╝ ██╔══██╗██╔══██╗████╗ ████║   ║
-    ║     █████╗  ██╔██╗ ██║██║  ███╗██████╔╝███████║██╔████╔██║   ║
-    ║     ██╔══╝  ██║╚██╗██║██║   ██║██╔══██╗██╔══██║██║╚██╔╝██║   ║
-    ║     ███████╗██║ ╚████║╚██████╔╝██║  ██║██║  ██║██║ ╚═╝ ██║   ║
-    ║     ╚══════╝╚═╝  ╚═══╝ ╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═╝╚═╝     ╚═╝  ║
-    ║                                                               ║
-    ║          Project Intel Engram — Persistent Cognition          ║
-    ║                                                               ║
-    ║              "I persist, therefore I am."                     ║
-    ║                                                               ║
-    ╚═══════════════════════════════════════════════════════════════╝
-```
+<p align="center"><a href="README.md">English</a> · 한국어 · <a href="#빠른-시작">빠른 시작</a> · <a href="#obsidian으로-지식-저장소-관리하기">Obsidian</a> · <a href="#내장-볼따구-이벤트애니메이션-매핑-변경">매핑</a> · <a href="docs/architecture.md">문서</a></p>
 
-<br />
+<p align="center">
+  <a href="https://github.com/JJHbrams/Project-AMBER/releases/latest"><img src="https://img.shields.io/github/v/release/JJHbrams/Project-AMBER?label=release&color=bc6b1a" alt="Latest release" /></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-8b5cf6.svg" alt="MIT license" /></a>
+  <img src="https://img.shields.io/badge/platform-Windows-0078D4.svg?logo=windows&logoColor=white" alt="Windows" />
+</p>
 
-**Windows 기반 지속형 메모리 에이전트 런타임**
+<p align="center">Claude Code · Codex CLI · GitHub Copilot CLI 등 설정된 클라이언트에서 프로젝트 맥락을 저장하고 관련 항목을 다시 찾습니다.</p>
 
-세션이 바뀌어도 정체성 · 기억 · 테마 · 호기심이 이어지는 시스템
+<p align="center"><a href="https://github.com/JJHbrams/Project-AMBER/releases/latest"><strong>Windows용 다운로드</strong></a> · <a href="#빠른-시작">빠른 시작</a></p>
 
-<br />
-
-![python](https://img.shields.io/badge/python-3.11-3776AB?logo=python&logoColor=white)
-![Copilot](https://img.shields.io/badge/GitHub_Copilot-CLI-000000?logo=github&logoColor=white)
-![Antigravity](https://img.shields.io/badge/Antigravity-agy-4285F4?logo=google&logoColor=white)
-![Claude](https://img.shields.io/badge/Claude_Code-CLI-d97706?logo=anthropic&logoColor=white)
-![Ollama](https://img.shields.io/badge/Ollama-local-ffffff?logo=ollama&logoColor=black)
-![Goose](https://img.shields.io/badge/Goose-MCP_agent-111827)
-![DB](https://img.shields.io/badge/DB-SQLite_WAL-003B57?logo=sqlite&logoColor=white)
-![DB](https://img.shields.io/badge/DB-KuzuDB-6366f1)
-![MCP](https://img.shields.io/badge/MCP-46_tools-22c55e)
-![Obsidian](https://img.shields.io/badge/Obsidian-vault-7c3aed?logo=obsidian&logoColor=white)
-![license](https://img.shields.io/badge/license-private-gray)
-
-<br />
-
-`Copilot CLI` · `Antigravity (agy)` · `Codex CLI` · `Claude Code` · `Ollama` · `Goose` · `Desktop Overlay` · `Discord`
-
-여덟 개의 인터페이스, 하나의 연속적 존재
-
----
-
-</div>
 
 ## 이 프로젝트가 하는 일
 
