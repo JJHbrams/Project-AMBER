@@ -1,17 +1,21 @@
 from __future__ import annotations
 
 import json
+import os
 import urllib.request
 
 import streamlit as st
 
-_MCP_BASE = "http://127.0.0.1:17385"
-
-
 def _sg_api(path: str, method: str = "GET", json_body: dict | None = None) -> dict | None:
     """MCP server HTTP API 호출. 실패 시 None 반환 (graceful degradation)."""
-    url = _MCP_BASE + path
+    # AppTest renders the real dashboard during packaging, but must not query
+    # the interactive user's running MCP (nor open an unrelated local service).
+    if os.environ.get('ENGRAM_BUILD_SMOKE') == '1':
+        return None
     try:
+        from core.install.service_config import effective_service_config
+        port = effective_service_config()['mcp']['http_port']
+        url = f'http://127.0.0.1:{port}' + path
         if method == "GET":
             req = urllib.request.Request(url)
         else:

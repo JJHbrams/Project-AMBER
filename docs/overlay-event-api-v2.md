@@ -20,7 +20,7 @@ The renderer reads discovery itself, connects, and sends this as its first line 
 {"schema_version":2,"type":"overlay.register","payload":{"token":"value-read-from-discovery","instance_id":"current-instance-id","renderer_id":"vendor.renderer","name":"Vendor Renderer","supported_modes":["observer","replace"],"capabilities":["overlay.presentation"]}}
 ```
 
-All shown values are placeholders. Required payload fields are `token`, `instance_id`, `renderer_id`, `name`, and `supported_modes`; `capabilities` is optional. `renderer_id` is 1–64 ASCII letters, digits, `.`, `_`, or `-`; `name` is a non-empty control-character-free string of at most 128 characters. Modes are a non-empty, duplicate-free list containing only `observer` and/or `replace`. Capabilities, when present, are a duplicate-free list of at most 32 non-empty control-character-free strings, each at most 128 characters. A bad token, stale instance, duplicate ID, malformed identity/capability, invalid or duplicate mode, or registration timeout closes the socket. Known capabilities are `overlay.presentation` and `overlay.set_size`; unknown bounded string capabilities are retained for forward compatibility but do not activate host behavior.
+All shown values are placeholders. Required payload fields are `token`, `instance_id`, `renderer_id`, `name`, and `supported_modes`; `capabilities` is optional. `renderer_id` is 1–64 ASCII letters, digits, `.`, `_`, or `-`; `name` is a non-empty control-character-free string of at most 128 characters. Modes are a non-empty, duplicate-free list containing only `observer` and/or `replace`. Capabilities, when present, are a duplicate-free list of at most 32 non-empty control-character-free strings, each at most 128 characters. A bad token, stale instance, duplicate ID, malformed identity/capability, invalid or duplicate mode, or registration timeout closes the socket. Known capabilities are `overlay.presentation`, `overlay.set_size`, and `session_stack`; unknown bounded string capabilities are retained for forward compatibility but do not activate host behavior.
 
 ### Optional catalog provider
 
@@ -49,6 +49,63 @@ Semantic events include generation, tool, provider, conversation, pointer, speec
 `overlay.show`, `overlay.hide`, `overlay.set_position {x,y}`, and `overlay.set_size {width,height}` are controls sent only to the selected replace owner. Presentation requires `overlay.presentation`; size requests require `overlay.set_size`. For a catalog provider, these checks use the active item's capabilities rather than the provider envelope. On collapse Engram sends `overlay.hide` first and does not reveal the launcher until `overlay.visibility_changed {visible:false}`; a bounded timeout restores the host launcher as an escape hatch while continuing to suppress late renderer pointer input until the authoritative acknowledgment. `overlay.show`/`hide` otherwise preserve the renderer presentation transition and visibility acknowledgment ordering. Control messages carry the current resolved `display_hint` and never reset visual work state. Other semantic events may be broadcast to all registered clients.
 
 ## Renderer messages
+
+### Optional session stack extension
+
+A renderer opts in with the `session_stack` capability. Catalog providers must
+advertise it on the active logical item; the provider envelope is insufficient.
+Pending catalog assignments receive no session events until matching
+`renderer.ready`. Legacy clients retain their exact existing handshake and events.
+
+Opted-in clients receive these schema-2 events after initial assignment, on ready
+or reassignment, and whenever the corresponding public metadata changes:
+
+- `session.stack_changed`: `{sessions, total_count, truncated}`. `sessions` is in
+  stable first-seen order. Each item has `provider`, `session_id`, `label`
+  (public alias or null), `state`, `subagent_count`, and boolean `selected`.
+  Optional `project_name` is a validated 1–64 character display name; it is
+  omitted when unavailable. Consumers must tolerate this additive field.
+  Optional `agent_name` is an allowlisted participating-client display claim
+  (`Claude`, `Codex`, `Copilot`, `Antigravity`, `MCP`). It does not authenticate
+  a provider or grant ownership: `provider` and opaque connection identity stay
+  unchanged. Generic MCP presence alone never claims to be Claude.
+- `session.state_changed`: `{session}` containing that same selected item, or
+  null when no session is selected. This is a full selected-state replacement.
+
+Both use `display_hint: idle`; their state is in the payload, not a replacement
+for the existing character semantic stream. Clocks, acknowledgement, paths,
+conversation/thinking text, tool input/output and tokens are never included.
+Provider/state/ID/label/count bounds match authenticated `/state` validation.
+Snapshots contain at most 64 rows and stay below the existing 65,536-byte line
+limit, including JSON escaping. `total_count` reports the source count;
+`truncated` explicitly identifies row/byte overflow or rejected metadata.
+Heartbeat-only changes do not emit session events.
+
+Project metadata is supplied by the connected caller, never the server working
+directory. The identity-free MCP tool `engram_report_session_project` accepts
+`project_name` (preferred) or `cwd`; only a textual Windows/POSIX directory
+basename crosses the reporting boundary. Paths, controls, empty names, roots,
+and overlong display names are rejected. `engram_get_context_once` also reports
+explicit `project_name`, otherwise a valid display-shaped caller `project_key`,
+otherwise caller `cwd`,
+before its cached-context return. A caller project key is display metadata, not
+a filesystem lookup. `/state/project` is authenticated and updates only an
+existing row's project name, never state, title, selection or acknowledgement.
+Reconnect creates a fresh live identity; metadata must be supplied again.
+Welcome and assignment are queued atomically before their session replay, so
+concurrent refresh cannot overtake the handshake or an assignment. Queued full
+snapshots of the same kind are coalesced to the newest value. If a stalled
+connection fills the outbound queue entirely with non-droppable controls, the
+host closes that connection rather than growing an unbounded queue; host stack
+ownership resumes immediately and the renderer can reconnect normally.
+
+Only the connected, assigned, ready **replace owner** with `session_stack` may
+draw the stack in place of the host. Observers may consume events but must not
+draw a competing stack. Legacy replace, pending assignment, disconnection, or
+`truncated: true` retain/restore the host stack. A capable renderer receiving a
+truncated snapshot must defer stack display to the host. This prevents bounded
+transport from silently making sessions inaccessible. Reconnection replays the
+latest snapshot and selected item. No new renderer-to-host controls are added.
 
 Only these exact schema-2 payloads are accepted; extra or nested fields are rejected:
 

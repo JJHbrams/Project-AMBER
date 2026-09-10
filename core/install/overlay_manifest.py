@@ -143,10 +143,12 @@ def make_manifest(
     if not inputs:
         raise ValueError("overlay build manifest cannot be written without inputs")
     version = resolve_version(root)
+    from core.install.service_lifecycle import repository_fingerprint
     return {
         "schema_version": 1,
         "mode": mode,
         "version": version.to_dict(),
+        "source_repository": repository_fingerprint(root),
         "environment": environment_metadata(),
         "inputs": inputs,
         "embedding_model": {

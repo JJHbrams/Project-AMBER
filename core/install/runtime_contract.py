@@ -34,7 +34,7 @@ def evaluate_runtime_contract() -> dict[str, Any]:
     import overlay.main as overlay_main
     from overlay.config import load_cfg, resolve_path
 
-    cfg = load_cfg()
+    cfg = load_cfg(strict=True, create_user_config=False)
     if not isinstance(cfg, dict):
         raise RuntimeError("overlay configuration did not load as a mapping")
 
@@ -52,6 +52,7 @@ def evaluate_runtime_contract() -> dict[str, Any]:
     frozen = bool(getattr(sys, "frozen", False))
     source_root = "" if frozen else str(Path(__file__).resolve().parents[2])
     version = resolve_version()
+    from core.install.service_config import service_config_provenance
     return {
         "contract_version": 1,
         "runtime": "frozen" if frozen else "source",
@@ -62,11 +63,13 @@ def evaluate_runtime_contract() -> dict[str, Any]:
         "pid": os.getpid(),
         "python": str(Path(sys.executable).resolve()),
         "source_root": source_root,
+        "service_config": service_config_provenance(),
         "project_root": str(Path(overlay_main.PROJECT_ROOT).resolve()),
         "stm_port": int(overlay_cfg.get("stm_server_port", 17384)),
         "mcp_port": int(mcp_cfg.get("http_port", 17385)),
         "dashboard_enabled": bool(dashboard_cfg.get("enabled", True)),
         "dashboard_port": int(dashboard_cfg.get("port", 8501)),
+        "selected_renderer_id": str((overlay_cfg.get('external_renderer') or {}).get('selected_renderer_id', '')),
         "resources": resolved_resources,
     }
 

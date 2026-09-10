@@ -1,7 +1,11 @@
 #Requires -Version 5
 
 function Get-EngramSha256([string]$Path) {
-    return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+    $stream = [IO.File]::OpenRead($Path)
+    $hasher = [Security.Cryptography.SHA256]::Create()
+    try {
+        return ([BitConverter]::ToString($hasher.ComputeHash($stream))).Replace('-', '').ToLowerInvariant()
+    } finally { $stream.Dispose(); $hasher.Dispose() }
 }
 
 function Get-EngramInstallerInputFiles([string]$Root, [string]$DistDir) {
@@ -10,6 +14,16 @@ function Get-EngramInstallerInputFiles([string]$Root, [string]$DistDir) {
         "installer\engram-overlay.iss",
         "installer\configure.ps1",
         "installer\stop-engram-processes.ps1",
+        "installer\joint-startup.ps1",
+        "installer\external-wheel.ps1",
+        "installer\external-overlay.ps1",
+        "installer\external-components.ps1",
+        "installer\external-components.pin",
+        "installer\component-status.ps1",
+        "installer\build-components.ps1",
+        "installer\external-bundle.ps1",
+        "installer\external-overlay.pin",
+        "installer\external-overlay.whl",
         "config\overlay.yaml",
         "config\config.yaml",
         "config\clients\copilot.md",
@@ -27,6 +41,10 @@ function Get-EngramInstallerInputFiles([string]$Root, [string]$DistDir) {
     if (Test-Path -LiteralPath $templateDir) {
         Get-ChildItem -LiteralPath $templateDir -File -Recurse |
             ForEach-Object { $files.Add($_.FullName) }
+    }
+    $componentDir = Join-Path $Root 'installer\external-components'
+    if (Test-Path -LiteralPath $componentDir) {
+        Get-ChildItem -LiteralPath $componentDir -File -Recurse | ForEach-Object { $files.Add($_.FullName) }
     }
     $buildManifest = Join-Path $DistDir "build-manifest.json"
     if (Test-Path -LiteralPath $buildManifest -PathType Leaf) {

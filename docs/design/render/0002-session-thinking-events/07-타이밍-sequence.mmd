@@ -1,0 +1,11 @@
+sequenceDiagram
+  participant P as Provider
+  participant A as MetadataAdapter
+  participant R as Reducer
+  participant O as Overlay
+  P->>A: reasoning start
+  A->>R: epoch turn item sequence kind
+  R->>O: thought
+  P->>A: tool starts or reasoning completes
+  A->>R: next metadata event
+  R->>O: next valid state

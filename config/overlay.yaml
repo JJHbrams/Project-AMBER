@@ -12,8 +12,12 @@ overlay:
   # 6) resource/overlay.png → 최종 fallback
   # 번호 프레임이 있으면 0(없으면 최소 index) 프레임을 기본 이미지로 사용
   character:
-    # static | sequence | sprite_grid. Built-in Engram uses its states.png body frames.
-    source_mode: "sprite_grid"
+    # native_bolttagu | static | sequence | sprite_grid. Legacy artwork is retained.
+    source_mode: "native_bolttagu"
+    bolttagu:
+      face_pointer: true
+      show_floor: false
+      mapping_path: ""
     # 유효한 manifest set은 name이 비어 있거나 set과 같을 때 base/VFX 우선 후보가 된다.
     set: "engram"
     name: "engram"

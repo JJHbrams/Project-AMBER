@@ -27,6 +27,7 @@ if (-not (Test-Path $ProcessStopHelper)) {
     throw "Engram process stop helper not found: $ProcessStopHelper"
 }
 . $ProcessStopHelper
+. (Join-Path $PSScriptRoot 'smoke-profile.ps1')
 
 function Write-OverlayStep([string]$Message) {
     Write-Host "`n==> $Message" -ForegroundColor Cyan
@@ -115,38 +116,32 @@ function Invoke-OverlayRole {
         [string]$ModelCacheDir = ""
     )
 
-    $smokeLog = Join-Path ([IO.Path]::GetTempPath()) `
+    $savedProfile = Enter-EngramBuildSmokeProfile
+    $smokeLog = Join-Path $script:EngramBuildSmokeProfile `
         ("engram-smoke-" + [Guid]::NewGuid().ToString("N") + ".log")
     $previousLog = $env:ENGRAM_SMOKE_LOG
-    $previousSmokeDb = $env:ENGRAM_SMOKE_DB_DIR
     $previousModelCache = $env:ENGRAM_MODEL_CACHE_DIR
-    $smokeDb = $null
     $env:ENGRAM_SMOKE_LOG = $smokeLog
     if ($ModelCacheDir) {
         $env:ENGRAM_MODEL_CACHE_DIR = $ModelCacheDir
     }
-    if ($Role -eq "smoke-check") {
-        $smokeDb = Join-Path ([IO.Path]::GetTempPath()) `
-            ("engram-smoke-db-" + [Guid]::NewGuid().ToString("N"))
-        New-Item -ItemType Directory -Path $smokeDb -Force | Out-Null
-        $env:ENGRAM_SMOKE_DB_DIR = $smokeDb
-    }
     try {
         $process = Start-Process -FilePath $Executable `
             -ArgumentList @("--role", $Role) `
-            -Wait -PassThru -WindowStyle Hidden
+            -PassThru -WindowStyle Hidden
+        if (-not $process.WaitForExit(600000)) {
+            $process.Kill()
+            $process.WaitForExit()
+            throw "Build role timed out: $Role"
+        }
         if ($process.ExitCode -ne 0 -and (Test-Path $smokeLog)) {
             Write-OverlayWarn (Get-Content $smokeLog -Raw)
         }
         return [int]$process.ExitCode
     } finally {
         $env:ENGRAM_SMOKE_LOG = $previousLog
-        $env:ENGRAM_SMOKE_DB_DIR = $previousSmokeDb
         $env:ENGRAM_MODEL_CACHE_DIR = $previousModelCache
-        if ($smokeDb) {
-            Remove-Item $smokeDb -Recurse -Force -ErrorAction SilentlyContinue
-        }
-        Remove-Item $smokeLog -Force -ErrorAction SilentlyContinue
+        Exit-EngramBuildSmokeProfile $savedProfile
     }
 }
 
@@ -159,14 +154,21 @@ function Invoke-DashboardSmoke {
         return 1
     }
 
-    $smokeLog = Join-Path ([IO.Path]::GetTempPath()) `
+    $savedProfile = Enter-EngramBuildSmokeProfile
+    try {
+    $smokeLog = Join-Path $script:EngramBuildSmokeProfile `
         ("engram-dashboard-smoke-" + [Guid]::NewGuid().ToString("N") + ".log")
     $previousLog = $env:ENGRAM_SMOKE_LOG
     $env:ENGRAM_SMOKE_LOG = $smokeLog
     try {
         $render = Start-Process -FilePath $dashboardExe `
             -ArgumentList @("--smoke-check") `
-            -Wait -PassThru -WindowStyle Hidden
+            -PassThru -WindowStyle Hidden
+        if (-not $render.WaitForExit(120000)) {
+            $render.Kill()
+            $render.WaitForExit()
+            throw 'Dashboard render smoke timed out'
+        }
         if ($render.ExitCode -ne 0) {
             if (Test-Path $smokeLog) {
                 Write-OverlayWarn (Get-Content $smokeLog -Raw)
@@ -176,7 +178,6 @@ function Invoke-DashboardSmoke {
         }
     } finally {
         $env:ENGRAM_SMOKE_LOG = $previousLog
-        Remove-Item $smokeLog -Force -ErrorAction SilentlyContinue
     }
 
     $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
@@ -198,7 +199,9 @@ function Invoke-DashboardSmoke {
             try {
                 $response = Invoke-WebRequest -Uri "http://127.0.0.1:$port/_stcore/health" `
                     -TimeoutSec 2 -UseBasicParsing
-                if ($response.StatusCode -eq 200 -and $response.Content.Trim() -eq "ok") {
+                $owners = @(Get-NetTCPConnection -State Listen -LocalPort $port -ErrorAction Stop | Select-Object -ExpandProperty OwningProcess -Unique)
+                if ($response.StatusCode -eq 200 -and $response.Content.Trim() -eq "ok" -and
+                    $owners.Count -eq 1 -and $owners[0] -eq $server.Id -and -not $server.HasExited) {
                     return 0
                 }
             } catch {}
@@ -208,9 +211,11 @@ function Invoke-DashboardSmoke {
         return 1
     } finally {
         if ($server -and -not $server.HasExited) {
-            Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue
+            $server.Kill()
+            $server.WaitForExit()
         }
     }
+    } finally { Exit-EngramBuildSmokeProfile $savedProfile }
 }
 
 function Publish-OverlayArtifact {
@@ -272,7 +277,21 @@ function Get-LastOutput([object[]]$Output) {
 
 function Invoke-SourceRuntimeContract([string]$Python) {
     $entry = Join-Path $Root "engram_overlay_entry.py"
-    $result = Invoke-OverlayPython $Python @($entry, "--role", "runtime-contract")
+    $savedProfile = Enter-EngramBuildSmokeProfile
+    try {
+        $stdout = Join-Path $script:EngramBuildSmokeProfile 'source-contract.stdout.log'
+        $stderr = Join-Path $script:EngramBuildSmokeProfile 'source-contract.stderr.log'
+        $process = Start-Process -FilePath $Python -ArgumentList @(('"' + $entry + '"'), '--role', 'runtime-contract') `
+            -WorkingDirectory $Root -RedirectStandardOutput $stdout -RedirectStandardError $stderr -PassThru -WindowStyle Hidden
+        if (-not $process.WaitForExit(120000)) {
+            $process.Kill()
+            $process.WaitForExit()
+            throw 'Source runtime contract timed out'
+        }
+        $result = [PSCustomObject]@{ ExitCode = [int]$process.ExitCode; Output = @(Get-Content -LiteralPath $stdout) }
+        if ($result.ExitCode -ne 0) { Write-OverlayWarn (Get-Content -LiteralPath $stderr -Raw) }
+    }
+    finally { Exit-EngramBuildSmokeProfile $savedProfile }
     if ($result.ExitCode -ne 0) {
         Write-OverlayWarn "Source runtime contract failed: $(Get-LastOutput $result.Output)"
         return 1

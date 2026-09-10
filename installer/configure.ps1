@@ -21,14 +21,24 @@ param(
     [string]$CliProvider = "claude-code",
     [string]$OllamaModel = "",
     [string]$IdentityName = "",
-    [ValidateSet("none", "presets", "sdk")]
-    [string]$ExternalOverlayMode = "none",
+    # 'none' 설치 안 함 | 'later' 설치하되 선택은 비움 | 그 외는 renderer id
+    [ValidateSet('none','reuse','bolttagu-2d','later')][string]$ExternalOverlayMode = "none",
+    [string]$ExternalOverlayComponents = '',
+    [string]$ExternalComponentManifestPath = '',
+    [ValidateSet("yes", "no")]
+    [string]$ExternalOverlaySdk = "no",
     [switch]$EnableAutoStart,
+    [ValidateSet('preserve','on','off')][string]$AutoStart = 'preserve',
+    [ValidateSet('start','skip')][string]$ExternalOverlay = 'start',
+    [switch]$NoStart,
     [switch]$LaunchNow,
     [switch]$Uninstall
 )
 
 $ErrorActionPreference = "Stop"
+if ($EnableAutoStart) { $AutoStart = 'on' }
+if ($NoStart -and $AutoStart -ne 'preserve') { throw '-NoStart requires -AutoStart preserve.' }
+. (Join-Path $PSScriptRoot 'joint-startup.ps1')
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()
 
 # One-release non-interactive compatibility only; the GUI and docs expose
@@ -63,9 +73,11 @@ Start-Transcript -Path $ConfigureLog -Force | Out-Null
 $script:ConfigureTranscriptStarted = $true
 Write-Host "  Configure log: $ConfigureLog" -ForegroundColor DarkGray
 
-if ($ExternalOverlayMode -ne "none") {
-    Write-Warn "External overlay '$ExternalOverlayMode' was selected, but pinned public release v1.1.0.89 has no self-contained provider/SDK asset. Core AMBER setup will continue; external overlay was NOT installed."
-}
+$ExternalOverlayHelper = Join-Path $PSScriptRoot "external-overlay.ps1"
+if (Test-Path -LiteralPath $ExternalOverlayHelper) { . $ExternalOverlayHelper }
+$PinnedExternalOverlayVersion = if (Get-Command Get-PinnedExternalOverlayVersion -ErrorAction SilentlyContinue) {
+    Get-PinnedExternalOverlayVersion -InstallerDir $PSScriptRoot
+} else { "unpinned" }
 
 function Stop-ConfigureTranscriptSafely {
     if (-not $script:ConfigureTranscriptStarted) { return }
@@ -245,7 +257,9 @@ function Remove-EngramManagedCodexHooks {
 try {
 if ($Uninstall) {
     Write-Step "Uninstall — 바로가기/환경변수 정리 (DB·config 보존)"
-    Get-Process -Name "engram-overlay" -ErrorAction SilentlyContinue | Stop-Process -Force
+    . (Join-Path $PSScriptRoot 'stop-engram-processes.ps1')
+    Stop-EngramArtifactProcesses -ArtifactDir (Split-Path $DistExe) | Out-Null
+    Set-EngramJointStartup -Mode off -HostExecutable $DistExe
     Remove-EngramManagedClaudeHooks
     Remove-EngramManagedCodexHooks
     foreach ($lnk in @(
@@ -282,6 +296,8 @@ Write-Host "  Provider   : $providerLabel" -ForegroundColor DarkGray
 Write-Host ""
 
 # ── 1. DB / Wiki / Directives bootstrap ─────────────────────
+$serviceConfig = Get-EngramLaunchContract -Executable $DistExe -Role service-config
+$MCP_HTTP_PORT = [int]$serviceConfig.mcp_port
 # Keep this before config migration and external CLI/MCP registration.  A
 # legacy user may have a valid selected DB/wiki directory but malformed client
 # config; managed manuals must still be repaired before those fallible steps.
@@ -391,6 +407,19 @@ if (Merge-JsonMcp -Path (Join-Path $env:USERPROFILE ".copilot\mcp-config.json") 
 # Claude Code (~/.claude.json) : mcpServers
 if (Merge-JsonMcp -Path (Join-Path $env:USERPROFILE ".claude.json") -ServersKey "mcpServers" -Entry $httpEntry) { Write-Ok "Claude Code" }
 # ~/.engram/claude-mcp.json
+Write-Step "Claude session lifecycle hooks (compatible CLI only)"
+$claudeHooks = Get-EngramLaunchContract -Executable $DistExe -Role claude-monitor-hooks
+Write-Host ("  Claude hooks: applied={0}, changed={1}, count={2}, reason={3}" -f $claudeHooks.applied, $claudeHooks.changed, $claudeHooks.hook_count, $claudeHooks.reason)
+Write-Step "Codex session lifecycle hooks (existing roots only)"
+$codexHooks = Get-EngramLaunchContract -Executable $DistExe -Role codex-monitor-hooks
+Write-Host ("  Codex hooks: applied={0}, changed={1}, roots={2}, review_required={3}" -f $codexHooks.applied, $codexHooks.changed, $codexHooks.root_count, $codexHooks.trust_required)
+if ($codexHooks.trust_required) { Write-Warn 'Codex: review the changed hooks with /hooks in each affected CLI/Orca configuration. Trust is not automatically granted.' }
+foreach ($codexRoot in @($codexHooks.roots)) {
+    Write-Host ("  Codex root: {0}; status={1}; reason={2}" -f $codexRoot.root, $codexRoot.status, $codexRoot.reason)
+    if ($codexRoot.status -ne 'ready') { Write-Warn $codexRoot.review_instruction }
+}
+if ($codexHooks.title_policy_review_required) { Write-Warn $codexHooks.title_policy_notice }
+
 [System.IO.File]::WriteAllText((Join-Path $ShimDir "claude-mcp.json"), (@{ mcpServers = @{ engram = $httpEntry } } | ConvertTo-Json -Depth 6), $Utf8NoBom)
 # VSCode global (%APPDATA%/Code/User/mcp.json) : servers
 if (Merge-JsonMcp -Path (Join-Path $env:APPDATA "Code\User\mcp.json") -ServersKey "servers" -Entry $httpEntry) { Write-Ok "VSCode (global)" }
@@ -488,31 +517,56 @@ if (Test-Path $legacyStartMenu) { Remove-Item $legacyStartMenu -Force }
 Write-Ok $startMenu
 $startupLnk = Join-Path ([Environment]::GetFolderPath("Startup")) "AMBER (ENGRAM).lnk"
 $legacyStartupLnk = Join-Path ([Environment]::GetFolderPath("Startup")) "engram-overlay.lnk"
-if ($EnableAutoStart) {
-    New-Lnk $startupLnk "AMBER (ENGRAM) — Auto Start"
-    if (Test-Path $legacyStartupLnk) { Remove-Item $legacyStartupLnk -Force }
-    Write-Ok "자동시작 등록: $startupLnk"
-} else {
-    foreach ($link in @($startupLnk, $legacyStartupLnk)) {
-        if (Test-Path $link) { Remove-Item $link -Force }
+# Runtime setup and login registration happen after external installation.
+
+# ── 공급자별 subagent 정의 ────────────────────────────────────────
+# planner/coder/servant 는 공급자마다 형식과 경로가 다르다(.md / .agent.md / .toml).
+# 이 배치는 소스 설치 경로(modules/07_shims.ps1)에만 배선돼 있어서 설치본 사용자는
+# 받지 못했다. 진입점이 둘이면 양쪽에 배선해야 한다.
+$AgentDefinitionsInstaller = Join-Path $PSScriptRoot "deploy_agent_definitions.ps1"
+if (Test-Path -LiteralPath $AgentDefinitionsInstaller) {
+    Write-Step "Subagent 정의 (Claude Code / Copilot CLI / Codex)"
+    try {
+        & $AgentDefinitionsInstaller -ProjectRoot $InstallDir -UserProfile $env:USERPROFILE |
+            ForEach-Object { Write-Ok $_ }
+    } catch {
+        # core 설치를 세우지 않는다. 무엇이 빠졌는지만 말한다.
+        Write-Warn "Subagent 정의를 배치하지 못했습니다: $($_.Exception.Message)"
     }
-    Write-Ok "자동시작 해제"
 }
 
-# ── 10. 실행 ─────────────────────────────────────────────────
-if ($LaunchNow) {
-    Write-Step "engram-overlay 실행"
-    Get-Process -Name "engram-overlay" -ErrorAction SilentlyContinue | Stop-Process -Force
-    Start-Sleep -Milliseconds 800
-    Start-Process -FilePath $DistExe -WorkingDirectory $exeDir
-    Write-Ok "실행됨"
+# ── 외부 오버레이(캐릭터) ─────────────────────────────────────────
+# Explicit external requests are a required setup outcome: failure preserves
+# the installed core files but returns failure instead of claiming completion.
+Initialize-EngramExternalRuntime -Mode $ExternalOverlayMode -HostExecutable $DistExe -WheelPath (Join-Path $PSScriptRoot 'external-overlay.whl')
+if ($ExternalOverlayComponents) {
+    Write-Step "External components v$PinnedExternalOverlayVersion"
+    if (-not $ExternalComponentManifestPath) {
+        . (Join-Path $PSScriptRoot 'external-bundle.ps1')
+        $existingComponents = (Get-EngramInstalledComponents).InstalledComponents
+        $requestedComponents = @(@($ExternalOverlayComponents.Split(',')) + @($existingComponents) | Where-Object { $_ } | Sort-Object -Unique) -join ','
+        $ExternalComponentManifestPath = Resolve-EngramComponentBundle -Components $requestedComponents -Sdk:($ExternalOverlaySdk -eq 'yes')
+    }
+    Install-EngramExternalComponents -ManifestPath $ExternalComponentManifestPath -Components $ExternalOverlayComponents -UpdateStartup:(-not $NoStart) | Out-Host
+}
+if (-not $NoStart) {
+    Set-EngramJointStartup -Mode $AutoStart -HostExecutable $DistExe -HostOnly:($ExternalOverlayMode -eq 'none')
+}
+if ($LaunchNow -and -not $NoStart) {
+    Invoke-EngramInstalledLaunch -Executable $DistExe -ExternalOverlay $ExternalOverlay -RequireExternal:($ExternalOverlayMode -ne 'none')
+}
+
+if ($ExternalOverlaySdk -eq "yes") {
+    if (-not $ExternalComponentManifestPath) {
+        . (Join-Path $PSScriptRoot 'external-bundle.ps1')
+        $ExternalComponentManifestPath = Resolve-EngramComponentBundle -Sdk
+    }
+    $sdkPath = Install-EngramOverlaySdk -ManifestPath $ExternalComponentManifestPath
+    Write-Ok "External overlay SDK: $sdkPath"
 }
 
 Write-Host ""
 Write-Host "  Configure 완료." -ForegroundColor Green
-if ($ExternalOverlayMode -ne "none") {
-    Write-Warn "Core AMBER configuration succeeded. External overlay '$ExternalOverlayMode' remains unavailable and was not installed."
-}
 Write-Host ""
 Exit-Configure 0
 } finally {

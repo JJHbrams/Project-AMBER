@@ -25,6 +25,7 @@ from claude_code_sdk.types import (
     ClaudeCodeOptions,
     ResultMessage,
     StreamEvent,
+    SystemMessage,
     UserMessage,
 )
 
@@ -45,6 +46,7 @@ logger = logging.getLogger(__name__)
 _PASSTHROUGH_TYPES = frozenset({"rate_limit_event"})
 _MAX_ATTEMPTS = 3  # 최초 시도 + 동일 세션 재시도 1회 + 새 세션 재시도 1회
 _RETRY_BACKOFF_SECS = 2.0
+_STATE_HEARTBEAT_SECS = 30.0
 
 # 말풍선 모드 전용 출력 스타일 가이드 — append_system_prompt로만 붙이므로 전역
 # CLAUDE.md/기본 시스템 프롬프트는 그대로 두고 "이 세션에서의 표현 방식"만 덧댄다.
@@ -76,6 +78,8 @@ class BubbleSessionManager:
         stm_bridge: Any = None,
         thinking_tokens: int = 0,
         bootstrap_prompt: Optional[str] = None,
+        state_controller: Any = None,
+        on_title_checkpoint: Optional[Callable[[Any], None]] = None,
     ):
         self._cwd = cwd
         self._env_overrides = dict(env_overrides or {})
@@ -85,6 +89,19 @@ class BubbleSessionManager:
         self._resume_session_id = resume_session_id
         self._on_session_id = on_session_id
         self._stm_bridge = stm_bridge
+        self._state_controller = state_controller
+        self._on_title_checkpoint = on_title_checkpoint
+        self._attempt_generation = 0
+        self._stopping = threading.Event()
+        if state_controller is not None:
+            self._env_overrides.update(state_controller.env_overrides)
+            state_controller.set_project(cwd=cwd)
+
+        def request_approval(request):
+            if state_controller is not None:
+                state_controller.approval_requested(request.id)
+            if on_approval_request is not None:
+                on_approval_request(request)
 
         self._permission_level = normalize_permission_level(permission_level)
         if self._permission_level == "auto":
@@ -97,7 +114,10 @@ class BubbleSessionManager:
             # 원인 미해결 — 다음 유력 후보는 이 작업 디렉토리 자체의 CLI "trust" 상태가
             # permission_mode/canUseTool보다 우선해서 전부 자동 승인시키는 경우.
             self._permission_mode = "default"
-            broker = ToolApprovalBroker(self._permission_level, on_request=on_approval_request, timeout=approval_timeout)
+            broker = ToolApprovalBroker(self._permission_level,
+                                        on_request=request_approval if on_approval_request is not None else None,
+                                        timeout=approval_timeout,
+                                        on_settled=state_controller.approval_settled if state_controller is not None else None)
             self._can_use_tool = broker.can_use_tool
 
         self._loop: Optional[asyncio.AbstractEventLoop] = None
@@ -137,13 +157,20 @@ class BubbleSessionManager:
             logger.warning("[bubble] send() 호출됐지만 세션이 준비되지 않음 — 무시: %r", text)
             return
         self._turn_seq += 1
+        if self._state_controller is not None:
+            self._state_controller.event('submit')
         turn_seq = self._turn_seq
         payload = {"type": "user", "message": {"role": "user", "content": text}}
         self._loop.call_soon_threadsafe(self._prompt_queue.put_nowait, (turn_seq, payload))
 
     def stop(self, timeout: float = 5.0) -> None:
+        self.retire_state()
+        self._stopping.set()
         if self._loop is not None:
-            self._loop.call_soon_threadsafe(self._cancel_consume_task)
+            try:
+                self._loop.call_soon_threadsafe(self._cancel_consume_task)
+            except RuntimeError:
+                pass  # The provider loop already exited.
         if self._thread is not None:
             self._thread.join(timeout=timeout)
             if self._thread.is_alive():
@@ -164,7 +191,36 @@ class BubbleSessionManager:
             self._consume_task.cancel()
 
     def _thread_main(self) -> None:
-        run_in_proactor(self._run_forever())
+        try:
+            run_in_proactor(self._run_lifetime())
+        finally:
+            self._alive.clear()
+            self.retire_state()
+
+    def retire_state(self) -> None:
+        checkpoint = self._state_controller.retire() if self._state_controller is not None else None
+        if checkpoint is not None and self._on_title_checkpoint is not None:
+            try:
+                self._on_title_checkpoint(checkpoint)
+            except Exception:
+                logger.warning("[bubble] title checkpoint unavailable")
+
+    async def _heartbeat_state(self):
+        while not self._stopping.is_set():
+            if self._state_controller is not None:
+                self._state_controller.heartbeat()
+            await asyncio.sleep(_STATE_HEARTBEAT_SECS)
+
+    async def _run_lifetime(self):
+        heartbeat = asyncio.create_task(self._heartbeat_state())
+        try:
+            await self._run_forever()
+        finally:
+            heartbeat.cancel()
+            try:
+                await heartbeat
+            except asyncio.CancelledError:
+                pass
 
     async def _run_forever(self) -> None:
         self._loop = asyncio.get_event_loop()
@@ -174,7 +230,15 @@ class BubbleSessionManager:
 
         attempts = [self._resume_session_id, self._resume_session_id, None][:_MAX_ATTEMPTS]
         for attempt_idx, resume_id in enumerate(attempts):
+            if self._stopping.is_set():
+                break
             self._resume_session_id = resume_id
+            self._attempt_generation += 1
+            if self._state_controller is not None:
+                self._state_controller.prepare_attempt(resume_id)
+                self._env_overrides.update(self._state_controller.env_overrides)
+            if attempt_idx and self._state_controller is not None:
+                self._state_controller.event('retry')
             try:
                 self._consume_task = asyncio.ensure_future(self._consume())
                 await self._consume_task
@@ -192,11 +256,12 @@ class BubbleSessionManager:
         self._alive.clear()
 
     async def _consume(self) -> None:
+        generation = self._attempt_generation
         options = self._build_options()
         prompt_gen = self._prompt_generator()
         transport = make_transport(prompt_gen, options, _PASSTHROUGH_TYPES)
         async for msg in _sdk_query(prompt=prompt_gen, options=options, transport=transport):
-            self._handle_message(msg)
+            self._handle_message(msg, generation=generation)
 
     async def _prompt_generator(self):
         assert self._prompt_queue is not None
@@ -212,6 +277,8 @@ class BubbleSessionManager:
             yield payload
 
     def _build_options(self) -> ClaudeCodeOptions:
+        if self._state_controller is not None:
+            self._env_overrides.update(self._state_controller.env_overrides)
         env = {**os.environ, **self._env_overrides}
         # 확장 사고(extended thinking) 예산을 켜서 실제 추론 텍스트가 thinking_delta로
         # 스트리밍되게 한다 — 예산이 0이면 CLI가 추론을 거의 안 하고 estimated_tokens
@@ -234,6 +301,24 @@ class BubbleSessionManager:
         append_prompt = _BUBBLE_STYLE_PROMPT
         if self._bootstrap_prompt:
             append_prompt = f"{_BUBBLE_STYLE_PROMPT}\n\n{self._bootstrap_prompt}"
+        append_prompt += ("\n\nBubble monitor title policy: the host fixes this card's title to "
+            "오버레이 세션. Do not generate or report a session title for this bubble, even on "
+            "resume or retry. This overrides any earlier bootstrap title-generation instruction "
+            "only; do not repeat engram_get_context_once or other context bootstrap.")
+        mcp_servers = {}
+        if self._state_controller is not None:
+            from overlay.config import load_cfg
+            try:
+                port = int((load_cfg().get('mcp') or {}).get('http_port', 17385))
+            except (TypeError, ValueError, AttributeError):
+                port = 0
+            if 1 <= port <= 65535:
+                # Per-invocation Engram override; other inherited MCP entries
+                # remain loaded by the CLI. No global settings are rewritten.
+                mcp_servers['engram'] = {
+                    'type': 'http', 'url': f'http://127.0.0.1:{port}/mcp',
+                    'headers': {'x-engram-bubble-owner': self._state_controller.session_id},
+                }
         return ClaudeCodeOptions(
             resume=self._resume_session_id,
             cwd=self._cwd,
@@ -243,11 +328,17 @@ class BubbleSessionManager:
             include_partial_messages=True,
             append_system_prompt=append_prompt,
             extra_args=extra_args,
+            mcp_servers=mcp_servers,
         )
 
-    def _handle_message(self, msg: Any) -> None:
+    def _handle_message(self, msg: Any, *, generation=None) -> None:
+        if self._stopping.is_set() or (generation is not None and generation != self._attempt_generation):
+            return
         turn_seq = self._current_turn_seq
-        if isinstance(msg, StreamEvent):
+        if isinstance(msg, SystemMessage):
+            if msg.subtype == 'init' and isinstance(msg.data, dict) and msg.data.get('session_id'):
+                self._persist_session_id(msg.data['session_id'])
+        elif isinstance(msg, StreamEvent):
             for ev in stream_event_to_bubble_events(msg, turn_seq):
                 self._emit(ev)
         elif isinstance(msg, AssistantMessage):
@@ -260,6 +351,8 @@ class BubbleSessionManager:
             for ev in user_message_to_bubble_events(msg, turn_seq):
                 self._emit(ev)
         elif isinstance(msg, ResultMessage):
+            if self._state_controller is not None:
+                self._state_controller.event('turn_end', is_error=bool(msg.is_error))
             if msg.session_id:
                 self._persist_session_id(msg.session_id)
             final_text = "".join(self._assistant_text_buf)
@@ -272,14 +365,29 @@ class BubbleSessionManager:
         # SystemMessage 등은 무시
 
     def _persist_session_id(self, session_id: str) -> None:
-        self._resume_session_id = session_id
+        if self._stopping.is_set() or (self._state_controller is not None and not self._state_controller.active):
+            return
+        from overlay.state_api import validate_payload
+        _, error = validate_payload({'provider':'claude', 'session_id':session_id, 'state':'unknown'})
+        if error:
+            return
         if self._on_session_id is not None:
             try:
-                self._on_session_id(session_id)
+                if self._on_session_id(session_id) is False:
+                    return
             except Exception:
                 logger.exception("[bubble] session_id 콜백 실패")
+                return
+        if self._state_controller is not None:
+            self._state_controller.bind_provider_session(session_id)
+            self._env_overrides.update(self._state_controller.env_overrides)
+        self._resume_session_id = session_id
 
     def _emit(self, event: dict) -> None:
+        if self._stopping.is_set():
+            return
+        if self._state_controller is not None and event.get('kind') != 'turn_end':
+            self._state_controller.event(event.get('kind'), is_error=bool(event.get('is_error')))
         try:
             self._on_event(event)
         except Exception:

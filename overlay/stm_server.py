@@ -13,9 +13,13 @@ overlay.exe가 실행 중일 때 localhost:PORT에 바인딩하여
 """
 
 import json
+import errno
 import logging
 import os
+import socket
 import threading
+import time
+from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Optional
 from urllib.parse import parse_qs, urlparse
@@ -25,6 +29,11 @@ from core.graph.semantic import checkpoint_open_session
 from core.memory import close_session as _close_session, save_message
 from core.memory.store import session_has_external_journal_eligibility
 from core.config.runtime_config import get_cfg_value
+from overlay.session_registry import SessionStateRegistry
+from overlay.state_api import (authorized, new_credentials, publish_discovery,
+                               remove_discovery_if_owner, state_discovery_file,
+                               validate_payload, validate_presence, validate_title_payload, validate_project_payload,
+                               validate_lifecycle_payload)
 
 logger = logging.getLogger(__name__)
 
@@ -111,12 +120,8 @@ def _explicit_session_status(session_id: object, scope_key: Optional[str]) -> st
 
 
 def _get_port() -> int:
-    try:
-        from core.config.runtime_config import get_cfg_value
-
-        return int(get_cfg_value("overlay.stm_server_port", DEFAULT_PORT))
-    except Exception:
-        return DEFAULT_PORT
+    from core.install.service_config import effective_service_config
+    return int(effective_service_config()['overlay']['stm_server_port'])
 
 
 def _dedup(request_id: Optional[str]) -> bool:
@@ -139,11 +144,13 @@ class _STMHandler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):  # noqa: N802
         logger.debug("STM HTTP: " + fmt, *args)
 
-    def _send_json(self, data: dict, status: int = 200):
+    def _send_json(self, data: dict, status: int = 200, *, extra_headers=None):
         body = json.dumps(data, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
+        for name, value in (extra_headers or {}).items():
+            self.send_header(name, value)
         self.end_headers()
         self.wfile.write(body)
 
@@ -157,11 +164,27 @@ class _STMHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         path = parsed.path
 
-        if path == "/health":
+        if path == "/state":
+            if not self._state_authorized():
+                return
+            self._send_json({"sessions": self.server.state_registry.snapshot()})
+
+        elif path == "/state/renderers":
+            if not self._state_authorized():
+                return
+            from overlay.event_api import renderer_startup_snapshot
+            self._send_json({'pid': os.getpid(), 'instance_id': self.server.state_instance_id,
+                             **renderer_startup_snapshot()})
+
+        elif path == "/health":
             # ENGRAM_RUNTIME_ROLE="overlay" → overlay 내장 STM (기존 overlay 종료 감지 대상)
             # 그 외 (dev_backend 등 standalone) → "stm-broker" 반환, shutdown 대상 아님
             role = "overlay-stm" if os.environ.get("ENGRAM_RUNTIME_ROLE") == "overlay" else "stm-broker"
-            self._send_json({"status": "ok", "pid": os.getpid(), "role": role})
+            import sys
+            from core.install.service_config import service_config_provenance
+            self._send_json({"status": "ok", "pid": os.getpid(), "role": role,
+                             "runtime": "frozen" if getattr(sys, "frozen", False) else "source",
+                             "service_config": service_config_provenance()})
 
         elif path == "/stm/messages":
             qs = parse_qs(parsed.query)
@@ -182,6 +205,100 @@ class _STMHandler(BaseHTTPRequestHandler):
     def do_POST(self):  # noqa: N802
         parsed = urlparse(self.path)
         path = parsed.path
+
+        if path == '/state/presence':
+            if not self._state_authorized():
+                return
+            try:
+                length = int(self.headers.get('Content-Length', '0'))
+                if not 0 < length <= 2048:
+                    raise ValueError('invalid size')
+                payload, error = validate_presence(self._read_body())
+            except Exception:
+                payload, error = None, 'invalid presence payload'
+            if error:
+                self._send_json({'error': error}, 400)
+                return
+            if self.headers.get("X-Engram-Lifecycle") == "claude" and payload.get("ended") and payload.get("provider") == "mcp":
+                self.server.state_registry.end_lifecycle(payload['provider'], payload['session_id'])
+                self._send_json({'session': None})
+            else:
+                row = self.server.state_registry.presence(payload)
+                self._send_json({'session': row}, extra_headers={
+                    "X-Engram-Title-Missing": "1" if row and not row.get("label") else "0"})
+            return
+
+        if path == "/state":
+            if not self._state_authorized():
+                return
+            try:
+                body = self._read_body()
+            except Exception:
+                self._send_json({"error": "invalid state payload"}, 400)
+                return
+            lifecycle_agent = {"claude": "Claude", "codex": "Codex"}.get(self.headers.get("X-Engram-Lifecycle"))
+            semantic = None
+            if lifecycle_agent:
+                payload, semantic, error = validate_lifecycle_payload(body, lifecycle_agent)
+            else:
+                payload, error = validate_payload(body)
+            if error:
+                self._send_json({"error": error}, 400)
+                return
+            lifecycle_agent = {"claude": "Claude", "codex": "Codex"}.get(self.headers.get("X-Engram-Lifecycle"))
+            hook = (lifecycle_agent is not None
+                    and payload.get("agent_name") == lifecycle_agent and payload.get("provider") == "mcp")
+            row = (self.server.state_registry.upsert_lifecycle(payload, semantic=semantic) if hook
+                   else self.server.state_registry.upsert(payload))
+            if hook and semantic is not None and row is None:
+                self._send_json({'error': 'stale lifecycle sequence'}, 409)
+                return
+            self._send_json({"session": row}, extra_headers={
+                "X-Engram-Title-Missing": "1" if row and not row.get("label") else "0"})
+            return
+
+        if path == "/state/project":
+            if not self._state_authorized():
+                return
+            try:
+                length = int(self.headers.get('Content-Length','0'))
+                if not 0 < length <= 2048:
+                    raise ValueError('invalid size')
+                body = self._read_body()
+            except Exception:
+                self._send_json({"error":"invalid project payload"},400)
+                return
+            payload,error = validate_project_payload(body)
+            if error:
+                self._send_json({"error":error},400)
+                return
+            if not self.server.state_registry.set_project_name(payload['provider'],payload['session_id'],payload['project_name']):
+                self._send_json({"error":"unknown session"},404)
+                return
+            self._send_json({"accepted":True})
+            return
+
+        if path == "/state/title":
+            if not self._state_authorized():
+                return
+            try:
+                length = int(self.headers.get('Content-Length', '0'))
+                if not 0 < length <= 2048:
+                    raise ValueError('invalid size')
+                body = self._read_body()
+            except Exception:
+                self._send_json({"error": "invalid title payload"}, 400)
+                return
+            payload, error = validate_title_payload(body)
+            if error:
+                self._send_json({"error": error}, 400)
+                return
+            if not self.server.state_registry.set_producer_label(
+                    payload["provider"], payload["session_id"], payload["title"]):
+                self._send_json({"error": "unknown session"}, 404)
+                return
+            self._send_json({"accepted": True})
+            return
 
         try:
             body = self._read_body()
@@ -298,8 +415,6 @@ class _STMHandler(BaseHTTPRequestHandler):
             # graceful shutdown 요청 — 응답 후 앱 종료 트리거
             self._send_json({"status": "shutting_down", "pid": os.getpid()})
             if _shutdown_callback is not None:
-                import threading
-
                 threading.Thread(target=_shutdown_callback, daemon=True).start()
 
         elif path == "/bubble/new":
@@ -314,22 +429,57 @@ class _STMHandler(BaseHTTPRequestHandler):
         else:
             self._send_json({"error": "not found"}, 404)
 
+    def _state_authorized(self) -> bool:
+        token = getattr(self.server, "state_token", None)
+        if token and authorized(self.headers.get("Authorization"), token):
+            return True
+        self.send_response(401)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("WWW-Authenticate", "Bearer")
+        body = b'{"error":"unauthorized"}'
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+        return False
+
+
+class _ExclusiveHTTPServer(ThreadingHTTPServer):
+    allow_reuse_address = False
+
+    def server_bind(self):
+        if os.name == 'nt':
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
+
 
 class STMServer:
     """overlay.exe 내 상주 STM HTTP 서버."""
 
     def __init__(self, port: Optional[int] = None, shutdown_callback: "Optional[callable]" = None,
-                 new_session_callback: "Optional[callable]" = None):
+                 new_session_callback: "Optional[callable]" = None, *,
+                 state_registry: Optional[SessionStateRegistry] = None,
+                 state_discovery_path: Optional[Path] = None):
         global _shutdown_callback, _new_session_callback
-        self._port = port or _get_port()
+        self._port = _get_port() if port is None else port
         self._server: Optional[ThreadingHTTPServer] = None
         self._thread: Optional[threading.Thread] = None
+        self._state_registry = state_registry or SessionStateRegistry()
+        self._state_discovery_path = state_discovery_path or state_discovery_file()
+        self._state_instance_id, self._state_token = new_credentials()
         _shutdown_callback = shutdown_callback
         _new_session_callback = new_session_callback
 
     def start(self):
         try:
-            self._server = ThreadingHTTPServer(("127.0.0.1", self._port), _STMHandler)
+            self._server = self._bind_listener()
+            self._server.state_registry = self._state_registry
+            self._server.state_token = self._state_token
+            self._server.state_instance_id = self._state_instance_id
+            self._server.state_discovery_path = self._state_discovery_path
+            actual_port = self._server.server_address[1]
+            publish_discovery(self._state_discovery_path, port=actual_port,
+                              instance_id=self._state_instance_id, token=self._state_token)
+            self._port = actual_port
             self._thread = threading.Thread(
                 target=self._server.serve_forever,
                 daemon=True,
@@ -338,11 +488,16 @@ class STMServer:
             self._thread.start()
             logger.info("STM HTTP 서버 시작: port=%d", self._port)
         except OSError as e:
-            # 포트 충돌 — /health로 점유 주체 확인
-            try:
-                import urllib.request as _ureq, json as _json
-                with _ureq.urlopen(f"http://127.0.0.1:{self._port}/health", timeout=2) as _r:
-                    info = _json.loads(_r.read().decode())
+            # A listener that bound successfully but could not publish its private
+            # discovery record must not remain reachable without discoverable auth.
+            if self._server is not None:
+                self._server.server_close()
+                self._server = None
+                raise
+            # The bounded bind loop already checked ownership. Do not add a
+            # second blocking probe after its one-second handoff deadline.
+            info = getattr(self, '_bind_owner_info', None)
+            if info is not None:
                 role = info.get("role", "unknown")
                 if role in ("overlay-stm", "stm-broker"):
                     logger.info("STM 포트 %d 이미 engram STM 점유 (role=%s, pid=%s) — 재사용",
@@ -350,18 +505,62 @@ class STMServer:
                 else:
                     logger.error("STM 포트 %d 비-engram 프로세스 점유 (role=%s) — STM 비활성화: %s",
                                  self._port, role, e)
-            except Exception:
+            else:
                 logger.error("STM 포트 %d 점유 주체 불명 (health 응답 없음) — STM 비활성화: %s",
                              self._port, e)
+
+    def _bind_listener(self):
+        """Allow a departing owner's close to finish without taking its port."""
+        self._bind_owner_info = None
+        deadline = time.monotonic() + 1.0
+        for attempt in range(10):
+            try:
+                return _ExclusiveHTTPServer(('127.0.0.1', self._port), _STMHandler)
+            except OSError as error:
+                retryable = error.errno in (errno.EADDRINUSE, 10048) or getattr(error, 'winerror', None) == 10048
+                remaining = deadline - time.monotonic()
+                if not retryable or remaining <= 0:
+                    raise
+                self._bind_owner_info = self._probe_bind_owner(min(.05, remaining))
+                if self._bind_owner_info is not None:
+                    raise  # Any responding owner is authoritative, even non-Engram.
+                remaining = deadline - time.monotonic()
+                if attempt == 9 or remaining <= 0:
+                    raise
+                time.sleep(min(.1, remaining))
+
+    def _probe_bind_owner(self, timeout):
+        from http.client import HTTPException
+        from urllib.error import HTTPError
+        from urllib.request import build_opener, ProxyHandler, HTTPRedirectHandler
+
+        class NoRedirect(HTTPRedirectHandler):
+            def redirect_request(self, *args, **kwargs):
+                return None
+
+        try:
+            opener = build_opener(ProxyHandler({}), NoRedirect())
+            with opener.open(f'http://127.0.0.1:{self._port}/health', timeout=timeout):
+                return {}  # Headers establish ownership; never wait for a body.
+        except HTTPError:
+            return {}  # A live owner returning 404/401 must not trigger retries.
+        except (OSError, ValueError, HTTPException):
+            return None
 
     def stop(self):
         if self._server:
             self._server.shutdown()
+            self._server.server_close()
             self._server = None
         if self._thread:
             self._thread.join(timeout=5)
             self._thread = None
+        remove_discovery_if_owner(self._state_discovery_path, self._state_instance_id)
         logger.info("STM HTTP 서버 종료")
+
+    @property
+    def listening(self) -> bool:
+        return self._server is not None and self._thread is not None and self._thread.is_alive()
 
     @property
     def port(self) -> int:

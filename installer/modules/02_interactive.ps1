@@ -216,6 +216,38 @@ if ($SelectedOllamaModel) { $_providerSummary += " (ollama: $SelectedOllamaModel
 Write-Ok "기본 CLI provider: $_providerSummary"
 
 # ── 자동시작 설정 ─────────────────────────────────────────
+if ($ExternalOverlayMode -eq 'none' -and -not $ExternalOverlayComponents) {
+    $_componentManifest = Join-Path $PSScriptRoot '..\external-components\engram-overlay-components.json'
+    if (-not (Test-Path -LiteralPath $_componentManifest)) {
+        $_fetchComponents = Select-WithArrowKeys -Items @('내장 볼따구만 (네트워크 요청 없음)', '외부 오버레이/SDK 선택 목록 가져오기') -DefaultIndex 0 -Prompt '선택 구성요소'
+        if ($_fetchComponents -like '외부*') {
+            . (Join-Path $PSScriptRoot '..\external-bundle.ps1')
+            $_componentManifest = Resolve-EngramComponentBundle
+        }
+    }
+    if (Test-Path -LiteralPath $_componentManifest) {
+        $_catalog = (Get-EngramComponentPlan -ManifestPath $_componentManifest).Manifest
+        Write-Host '  내장 볼따구가 기본입니다. 외부 항목을 설치해도 현재 캐릭터는 바뀌지 않습니다.'
+        foreach ($_group in @('2D','3D')) {
+            Write-Host "  [$_group]"
+            foreach ($_component in $_catalog.components | Where-Object { $_.group -eq $_group }) {
+                Write-Host "    $($_component.id) — $($_component.display_name)"
+            }
+        }
+        $_componentChoice = (Read-Host '설치할 ID를 쉼표로 구분 (all=전체, Enter=추가 없음)').Trim()
+        if ($_componentChoice -eq 'all') { $_componentChoice = @($_catalog.components | ForEach-Object { $_.id }) -join ',' }
+        $_componentPlan = Get-EngramComponentPlan -ManifestPath $_componentManifest -Components $_componentChoice
+        $ExternalOverlayComponents = $_componentPlan.InstalledComponents -join ','
+        if ($ExternalOverlayComponents) {
+            Write-Ok "선택: $ExternalOverlayComponents"
+            Write-Host "  공통/의존 리소스: $($_componentPlan.InstalledPayloads -join ', ')"
+        }
+        if ($ExternalOverlaySdk -eq 'no') {
+            $_sdkChoice = Select-WithArrowKeys -Items @('추가 안 함', 'SDK 안내와 실행 가능한 예제') -DefaultIndex 0 -Prompt '개발자 SDK (캐릭터 선택과 독립)'
+            if ($_sdkChoice -like 'SDK*') { $ExternalOverlaySdk = 'yes' }
+        }
+    } else { Write-Warn '선택 구성요소 번들이 없습니다. 내장 볼따구는 그대로 설치할 수 있습니다.' }
+}
 $_startupDir = [Environment]::GetFolderPath("Startup")
 $_existingStartupLinks = @(
     (Join-Path $_startupDir "AMBER (ENGRAM).lnk"),
@@ -223,12 +255,18 @@ $_existingStartupLinks = @(
 )
 $_autoStartDefault = if ($_existingStartupLinks | Where-Object { Test-Path $_ } | Select-Object -First 1) { 0 } else { 1 }
 Write-Host ""
-Write-Host "  [설정] Windows 시작 시 자동실행 — 재부팅 후 overlay가 자동으로 켜집니다" -ForegroundColor White
+Write-Host "  [설정] Windows 시작 시 Engram + 설치된 외부 오버레이 함께 자동실행" -ForegroundColor White
+if ($AutoStart -eq 'preserve' -and -not $NoStart) {
 $_autoStartChoice = Select-WithArrowKeys `
-    -Items @("예 — 시작 시 자동실행 등록", "아니오 — 수동 실행만") `
-    -DefaultIndex $_autoStartDefault `
+    -Items @("함께 — Engram + 설치된 외부 오버레이", "Engram만 — 외부 자동시작은 유지", "아니오 — 수동 실행만") `
+    -DefaultIndex $(if ($_autoStartDefault -eq 0) { 1 } else { 2 }) `
     -Prompt "자동시작"
-$EnableAutoStart = $_autoStartChoice -like "예*"
+$EnableAutoStart = $_autoStartChoice -notlike "아니오*"
+$JointStartupHostOnly = $_autoStartChoice -like 'Engram*'
+$AutoStart = if ($EnableAutoStart) { 'on' } else { 'off' }
+} else {
+    $EnableAutoStart = $AutoStart -eq 'on'
+}
 Write-Ok "자동시작: $(if ($EnableAutoStart) { '활성화' } else { '비활성화' })"
 
 Write-Host ""

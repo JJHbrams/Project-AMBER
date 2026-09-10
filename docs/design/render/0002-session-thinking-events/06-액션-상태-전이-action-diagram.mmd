@@ -1,0 +1,14 @@
+stateDiagram-v2
+  [*] --> Idle
+  Idle --> Generating: prompt
+  Generating --> Thinking: observed reasoning start
+  Thinking --> Generating: matching reasoning end
+  Thinking --> Tool: direct tool start
+  Generating --> Tool: direct tool start
+  Tool --> Generating: all direct tools complete
+  Tool --> NeedsInput: approval
+  Thinking --> NeedsInput: approval
+  NeedsInput --> Generating: authorized continuation
+  Generating --> Idle: stop
+  Thinking --> Idle: stop or disconnect
+  Tool --> Idle: stop or disconnect

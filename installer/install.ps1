@@ -2,6 +2,12 @@
 .SYNOPSIS
     Engram Installer — 오케스트레이터
     Install: .\install.ps1
+    Joint login startup: -AutoStart on|off|preserve (default preserve)
+    External runtime: -ExternalOverlayMode none|reuse|bolttagu-2d|later (default none)
+    Selective install: -ExternalOverlayComponents rabbit-2d,robot-arm-3d-v3
+    Independent authoring guide/example: -ExternalOverlaySdk yes (default no)
+    Immediate external renderer: -ExternalOverlay start|skip (default start)
+    -NoStart skips final launches and login registration; build/install phases still run.
     Install (overlay build mode): .\install.ps1 -OverlayBuildMode auto|rebuild|clean|skip
     Install (설정 TUI 다시 보기): .\install.ps1 -Reconfigure
     Remove:  .\install.ps1 -Uninstall
@@ -28,10 +34,19 @@ param(
     [switch]$Uninstall,
     [ValidateSet("auto", "rebuild", "clean", "skip")]
     [string]$OverlayBuildMode = "auto",
-    [switch]$Reconfigure
+    [switch]$Reconfigure,
+    [ValidateSet('preserve','on','off')][string]$AutoStart = 'preserve',
+    [ValidateSet('start','skip')][string]$ExternalOverlay = 'start',
+    [ValidateSet('none','reuse','bolttagu-2d','later')][string]$ExternalOverlayMode = 'none',
+    [string]$ExternalOverlayComponents = '',
+    [ValidateSet('yes','no')][string]$ExternalOverlaySdk = 'no',
+    [switch]$NoStart
 )
 
 $ErrorActionPreference = "Stop"
+$JointStartupHostOnly = $false
+if ($NoStart -and $AutoStart -ne 'preserve') { throw '-NoStart requires -AutoStart preserve; no startup changes requested.' }
+. "$PSScriptRoot\joint-startup.ps1"
 
 # ── 공유 변수/함수/Python 탐지 로드 ───────────────────────
 . "$PSScriptRoot\common.ps1"
@@ -246,9 +261,9 @@ for ($i = 0; $i -lt $installPhases.Count; $i++) {
 }
 
 # ── Auto-launch overlay ──────────────────────────────────────
-if (-not $Uninstall -and (Test-Path $DistExe)) {
+if (-not $NoStart -and -not $Uninstall -and (Test-Path $DistExe)) {
     Write-Host "  Launching engram-overlay..." -ForegroundColor DarkGray
-    Start-Process -FilePath $DistExe -WindowStyle Normal
+    Invoke-EngramInstalledLaunch -Executable $DistExe -ExternalOverlay $ExternalOverlay -RequireExternal:($ExternalOverlayMode -ne 'none')
 }
 
 # ── Done ───────────────────────────────────────────────────

@@ -11,6 +11,8 @@ class BubbleBootstrapTests(unittest.TestCase):
         self.assertIn("engram_get_context_once", prompt)
         self.assertIn("caller='claude-code'", prompt)
         self.assertIn("cwd='C:/workspace/project'", prompt)
+        self.assertIn("engram_report_session_title", prompt)
+        self.assertIn("first substantive user request", prompt)
 
 
 if __name__ == "__main__":

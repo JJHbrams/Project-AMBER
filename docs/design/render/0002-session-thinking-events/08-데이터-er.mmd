@@ -1,0 +1,16 @@
+erDiagram
+  CONNECTION ||--o{ TURN : owns
+  TURN ||--o{ REASONING_ITEM : scopes
+  CONNECTION {
+    string epoch PK
+  }
+  TURN {
+    string digest PK
+    string epoch FK
+  }
+  REASONING_ITEM {
+    string digest PK
+    string turn_digest FK
+    int sequence
+    string phase
+  }

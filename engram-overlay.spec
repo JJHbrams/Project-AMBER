@@ -162,7 +162,7 @@ a = Analysis(
         *_tcl_tk_datas,
         *_tk_python_datas,
     ],
-    hiddenimports=['core.context.context_builder', 'core.storage.db', 'core.identity', 'core.memory', 'core.context.directives', 'core.identity.reflection', 'core.identity.curiosity', 'core.common.sanitizer', 'core.memory.bus', 'core.config.runtime_config', 'core.config.remote_tokens', 'core.graph.semantic', 'core.graph.semantic.stm_promoter', 'core.install.bootstrap', 'core.install.model_manifest', 'core.observability.activity', 'core.context.project_scope', 'core.dashboard.app', 'discord_bot', 'discord_bot.bot', 'tkinterweb', 'tkinterweb_tkhtml', 'mcp_server', 'kg_watcher', 'scripts.kg.kg_lint', 'sentence_transformers', 'transformers', 'torch', 'huggingface_hub', *_streamlit_hiddenimports, *_mcp_hiddenimports],
+    hiddenimports=['core.context.context_builder', 'core.storage.db', 'core.identity', 'core.memory', 'core.context.directives', 'core.identity.reflection', 'core.identity.curiosity', 'core.common.sanitizer', 'core.memory.bus', 'core.config.runtime_config', 'core.config.remote_tokens', 'core.graph.semantic', 'core.graph.semantic.stm_promoter', 'core.install.bootstrap', 'core.install.model_manifest', 'core.observability.activity', 'core.context.project_scope', 'core.dashboard.app', 'discord_bot', 'discord_bot.bot', 'tkinterweb', 'tkinterweb_tkhtml', 'mcp_server', 'kg_watcher', 'scripts.kg.kg_lint', 'sentence_transformers', 'transformers', 'torch', 'huggingface_hub', 'overlay.bolttagu_editor', 'overlay.native_bolttagu', 'overlay.bolttagu_mapping', *_streamlit_hiddenimports, *_mcp_hiddenimports],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=['installer\\pyi_rth_engram_tk.py'],

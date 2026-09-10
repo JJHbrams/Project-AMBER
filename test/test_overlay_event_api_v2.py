@@ -360,6 +360,7 @@ def test_controls_and_layer_removal_emit_resolved_hint_not_idle():
     pub = OverlayEventPublisher()
     sent = []
     client = _Client(None, "r", "Replace", "replace", ("replace",), frozenset())
+    client.handshake_complete = True
     # Outbound is queued now so the Tk thread never touches the socket; capture
     # at the queue boundary instead of at sendall.
     client.enqueue = lambda message, *, droppable: sent.append(message)
@@ -386,3 +387,45 @@ def test_completed_tool_is_not_reported_as_still_active_in_a_later_snapshot():
     assert pub._resolved_hint() == "generating"
     assert pub._generation_active is True
     assert pub._tool_category is None
+
+
+def test_native_display_policy_survives_tool_and_layers_without_reasoning_event():
+    pub = OverlayEventPublisher()
+    pub.select_session_state('working', work_hint='thought')
+    assert pub._resolved_hint() == 'thought'
+    pub.publish('generation.started', 'thought')
+    assert pub._resolved_hint() == 'thought'
+    pub.publish('tool.started', 'generating', {'category': 'execute'})
+    assert pub._resolved_hint() == 'generating'
+    pub.publish('tool.completed', 'thought')
+    assert pub._resolved_hint() == 'thought'
+    pub.publish('tool.failed', 'error')
+    assert pub._resolved_hint() == 'thought'
+    pub.publish('pointer.entered', 'hover')
+    pub.publish('pointer.left', 'idle')
+    assert pub._resolved_hint() == 'thought'
+    pub.select_session_state('working')  # Switching to unknown/bubble work resets policy.
+    pub.publish('generation.started', 'generating')
+    assert pub._resolved_hint() == 'generating'
+    pub.publish('generation.thinking', 'thought')  # Real bubble thinking remains supported.
+    assert pub._resolved_hint() == 'thought'
+    pub.select_session_state('needs_input')
+    assert pub._resolved_hint() == 'idle'
+
+
+def test_native_pose_late_join_uses_real_socket_snapshot():
+    with tempfile.TemporaryDirectory() as td:
+        discovery = Path(td) / 'state.json'
+        pub = OverlayEventPublisher(discovery_path=discovery)
+        pub.select_session_state('working', work_hint='thought')
+        pub.publish('generation.started', 'thought')
+        pub.start()
+        sock = None
+        try:
+            sock, welcome, snapshot, assignment = _connect(discovery, 'observer', ['observer'])
+            assert welcome['display_hint'] == snapshot['display_hint'] == assignment['display_hint'] == 'thought'
+            assert snapshot['payload'] == {'generation_active': True, 'tool_category': None}
+        finally:
+            if sock:
+                sock.close()
+            pub.stop()

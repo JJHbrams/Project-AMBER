@@ -15,6 +15,8 @@ from PIL import Image, ImageTk
 import yaml
 
 from overlay.bubble import geometry as bubble_geometry
+from overlay.native_bolttagu import Bolttagu2dView
+from overlay.bolttagu_mapping import STATE_POSES
 
 from overlay.character_assets import (
     USER_CHARACTER_SETS_DIR,
@@ -203,6 +205,19 @@ def target_height_for_work_area(work_size: tuple[int, int], ratio: float) -> int
     """Calculate the shared static/sprite height from one monitor work area."""
     width, height = work_size
     return max(120, int(min(width, height) * ratio))
+
+
+def initial_character_work_size(saved: object, screen_size: tuple[int, int]) -> tuple[int, int]:
+    """Use the saved window's monitor Work area, exactly as drag-resizing does."""
+    x, y = screen_size[0] // 2, screen_size[1] // 2
+    if isinstance(saved, dict):
+        try:
+            x = int(saved['x']) + max(0, int(saved.get('width', 0))) // 2
+            y = int(saved['y']) + max(0, int(saved.get('height', 0))) // 2
+        except (KeyError, TypeError, ValueError):
+            x, y = screen_size[0] // 2, screen_size[1] // 2
+    left, top, right, bottom = bubble_geometry.get_monitor_work_rect(x, y)
+    return (right - left, bottom - top) if right > left and bottom > top else screen_size
 
 
 def file_fingerprint(path: Path) -> tuple[int, int] | None:
@@ -439,8 +454,9 @@ class _CharacterProfile:
         stored_source_mode = str(character_cfg.get("source_mode") or "").strip().lower()
         legacy_sequence = Path(self.name).is_dir() or resolve_bundled_character_source(self.name, "sequence") is not None
         self.source_mode = stored_source_mode or ("sequence" if legacy_sequence else "static")
-        if self.source_mode not in {"static", "sequence", "sprite_grid"}:
+        if self.source_mode not in {"static", "sequence", "sprite_grid", "native_bolttagu"}:
             self.source_mode = "static"
+        self.native_enabled = self.source_mode == "native_bolttagu"
         self.set_resolution = resolve_character_set(self.set_id)
         reactions_cfg = character_cfg.get("reactions", {})
         reactions_cfg = reactions_cfg if isinstance(reactions_cfg, dict) else {}
@@ -663,10 +679,15 @@ class CharacterOverlay:
 
         self._cfg = load_cfg()
         self._profile = _CharacterProfile(self._cfg)
-        self._work_size = (self.root.winfo_screenwidth(), self.root.winfo_screenheight())
+        self._work_size = initial_character_work_size(
+            get_overlay_state().get('overlay_window'),
+            (self.root.winfo_screenwidth(), self.root.winfo_screenheight()),
+        )
         self._current_source = self._profile.default_frame
         self._sequence_queue: list[Path] = []
         self._animation_after_id: str | None = None
+        self._topmost_after_id: str | None = None
+        self._closing = False
         self._click_started_ms: float | None = None
         self._effect_images: dict[str, Image.Image] = {}
         self._context_menu_open = False
@@ -679,14 +700,18 @@ class CharacterOverlay:
         self._sprite_rng = random.Random(time.time_ns())
         initial_ms = time.monotonic() * 1000
         self._sprite_model = SpriteStateMachine(
-            set(self._profile.reaction_pack.states or {}),
+            set(STATE_POSES) if self._profile.native_enabled else set(self._profile.reaction_pack.states or {}),
             started_ms=initial_ms,
         )
+        self._native_bolttagu = self._create_native_view(self._cfg, self._profile)
+        self._native_category: str | None = None
+        self._native_exit_deadline: float | None = None
+        self._native_has_been_expanded = False
         if self._profile.sprite_enabled:
             self._load_sprite_sheet()
 
         self._preload_effect_images()
-        self._load_image(source_path=self._current_source)
+        self._load_image(work_size=self._work_size, source_path=self._current_source)
         if not self._restore_position():
             self._place_default()
         self._bind_events()
@@ -699,6 +724,33 @@ class CharacterOverlay:
         self._watch_pending_signature = None
         self._watch_pending_at = 0.0
         self._schedule_config_watch()
+
+    @staticmethod
+    def _create_native_view(cfg: dict, profile: _CharacterProfile) -> Bolttagu2dView | None:
+        if not profile.native_enabled:
+            return None
+        options = cfg.get("overlay", {}).get("character", {}).get("bolttagu", {})
+        try:
+            mapping = options.get("mapping_path")
+            warned = False
+            def mapping_warning(_detail: str) -> None:
+                nonlocal warned
+                if not warned:
+                    log.warning('[overlay] native Bolttagu mapping could not be fully loaded; unsupported values use defaults')
+                    warned = True
+            return Bolttagu2dView(
+                launcher_managed=True,
+                face_pointer=options.get("face_pointer", True) is not False,
+                show_floor=options.get("show_floor", False) is True,
+                seed=random.randrange(233280),
+                mapping_path=Path(mapping) if mapping else None,
+                log=mapping_warning,
+            )
+        except Exception:
+            # Keep the host's operable label, input and menus even if atlas decode fails.
+            log.warning("[overlay] native Bolttagu unavailable; using retained legacy artwork", exc_info=True)
+            profile.native_enabled = False
+            return None
 
     @staticmethod
     def _decode_image(path: Path) -> Image.Image:
@@ -801,6 +853,16 @@ class CharacterOverlay:
             self._schedule_config_watch()
 
     def cancel_config_watch(self) -> None:
+        self._closing = True
+        self._native_exit_deadline = None
+        for name in ('_animation_after_id', '_topmost_after_id'):
+            pending = getattr(self, name, None)
+            if pending is not None:
+                try:
+                    self.root.after_cancel(pending)
+                except tk.TclError:
+                    pass
+            setattr(self, name, None)
         if self._watch_after_id is not None:
             try:
                 self.root.after_cancel(self._watch_after_id)
@@ -825,6 +887,7 @@ class CharacterOverlay:
             ):
                 raise ValueError("enabled sprite-grid configuration did not resolve a valid reaction pack")
             sheet = self._load_sprite_sheet_for(profile)
+            native = self._create_native_view(cfg, profile)
             effects = self._effect_images_for(profile)
             if not profile.sprite_enabled:
                 self._decode_image(profile.default_frame)
@@ -834,7 +897,7 @@ class CharacterOverlay:
 
         old_model = self._sprite_model
         now_ms = time.monotonic() * 1000
-        model = SpriteStateMachine(set(profile.reaction_pack.states or {}), started_ms=old_model.started_ms)
+        model = SpriteStateMachine(set(STATE_POSES) if profile.native_enabled else set(profile.reaction_pack.states or {}), started_ms=old_model.started_ms)
         model.hovered = old_model.hovered
         model.input_active = old_model.input_active
         model.work_state = model._available(old_model.work_state)
@@ -851,6 +914,8 @@ class CharacterOverlay:
         # static/sequence path here would make source selection appear ignored.
         current_source = profile.default_frame
         self._cfg, self._profile, self._sprite_sheet = cfg, profile, sheet
+        self._native_bolttagu = native
+        self._native_exit_deadline = None
         self._effect_images = effects
         self._sprite_cache = {}
         self._sprite_choices = {}
@@ -888,7 +953,7 @@ class CharacterOverlay:
         return states.get(state) or states.get("default") or {"frames": (0,), "selection": "fixed", "transform": "none", "vfx": "none", "frame_ms": 600, "dwell_ms": 600}
 
     def set_sprite_state(self, state: str, *, transient: bool = False) -> None:
-        if not self._profile.sprite_enabled:
+        if not self._profile.sprite_enabled and not self._native_bolttagu:
             return
         now_ms = time.monotonic() * 1000
         changed = (
@@ -899,12 +964,34 @@ class CharacterOverlay:
         if changed:
             self._schedule_animation_in(0)
 
+    def set_selected_session_state(self, state: str) -> None:
+        """Selection changes replace prior transients; folded work never implies thought."""
+        if not self._profile.sprite_enabled and not self._native_bolttagu:
+            return
+        self._native_category = None
+        if self._native_bolttagu:
+            self._native_bolttagu.animator.oneshot = None
+        mapped = {'working': 'generating', 'ready': 'success', 'blocked': 'error'}.get(state, 'idle')
+        model = self._sprite_model
+        model.input_active = False
+        model.work_state = 'generating' if state == 'working' else 'idle'
+        if model._set_display(mapped, time.monotonic() * 1000):
+            self._schedule_animation_in(0)
+
     def handle_bubble_event(self, event: object) -> None:
-        if self._profile.sprite_enabled and self._sprite_model.handle_event(event, time.monotonic() * 1000):
+        if self._native_bolttagu and isinstance(event, dict):
+            from overlay.event_api import tool_category
+            self.set_native_tool_category(tool_category(event.get("tool_name")) if event.get("kind") == "tool_use" else None)
+        if (self._profile.sprite_enabled or self._native_bolttagu) and self._sprite_model.handle_event(event, time.monotonic() * 1000):
+            self._schedule_animation_in(0)
+
+    def set_native_tool_category(self, category: str | None) -> None:
+        self._native_category = category if category in {"search", "memory", "read", "write", "execute", "communication", "other"} else None
+        if self._native_bolttagu:
             self._schedule_animation_in(0)
 
     def set_input_active(self, active: bool) -> None:
-        if self._profile.sprite_enabled and self._sprite_model.set_input_active(active, time.monotonic() * 1000):
+        if (self._profile.sprite_enabled or self._native_bolttagu) and self._sprite_model.set_input_active(active, time.monotonic() * 1000):
             self._schedule_animation_in(0)
 
     def _sprite_image(self, index: int, target_h: int, flip: bool) -> Image.Image:
@@ -946,6 +1033,12 @@ class CharacterOverlay:
 
         # 짧은 축 기준 스케일링 (landscape→높이, portrait→너비)
         target_h = target_height_for_work_area(self._work_size, cfg["char_height_ratio"])
+
+        if self._native_bolttagu:
+            self._img_w, self._img_h = self._native_bolttagu.resize(0, target_h)
+            self._base_image = self._native_bolttagu.render_frame(self.root.winfo_pointerx(), self.root.winfo_x(), force=True)
+            self._render_current_image()
+            return
 
         if self._profile.sprite_enabled and self._sprite_sheet is not None:
             spec = self._state_spec(self._sprite_model.state)
@@ -1038,7 +1131,7 @@ class CharacterOverlay:
             work = bubble_geometry.get_monitor_work_rect(x + self._img_w // 2, y + self._img_h // 2)
             previous = state.get("overlay_window")
             record = dict(previous) if isinstance(previous, dict) else {}
-            record.update({"x": int(x), "y": int(y), "work_area": list(work)})
+            record.update({"x": int(x), "y": int(y), "width": self._img_w, "height": self._img_h, "work_area": list(work)})
             state["overlay_window"] = record
         update_overlay_state_async(update)
 
@@ -1059,7 +1152,9 @@ class CharacterOverlay:
             x, y = int(saved.get("x", self.root.winfo_x())), int(saved.get("y", self.root.winfo_y()))
             work = bubble_geometry.get_monitor_work_rect(x + 26, y + 26)
             x, y = bubble_geometry.clamp_rect(x, y, 52, 52, work)
+            self.root.update_idletasks()
             self.root.geometry(f"52x52+{x}+{y}")
+            self.root.update_idletasks()
             return
         self._full_rect = self.get_phys_rect()
         canvas = tk.Canvas(self.root, width=52, height=52, bg=_CHROMA, highlightthickness=0, bd=0)
@@ -1089,10 +1184,28 @@ class CharacterOverlay:
         x, y = int(saved.get("x", self._full_rect[0])), int(saved.get("y", self._full_rect[1]))
         work = bubble_geometry.get_monitor_work_rect(x, y)
         x, y = bubble_geometry.clamp_rect(x, y, 52, 52, work)
+        # Complete label/canvas geometry before requesting the independent
+        # launcher placement; stale Configure processing otherwise restores
+        # the previous full-window origin on Windows Tk.
+        self.root.update_idletasks()
         self.root.geometry(f"52x52+{x}+{y}")
+        self.root.update_idletasks()
         update_overlay_state_async(lambda state: state.update({"launcher_window": {"x": x, "y": y, "width": 52, "height": 52}}))
 
+    def begin_native_collapse(self) -> bool:
+        """Exit runs on the existing animation tick; there is no extra after callback."""
+        if self._native_bolttagu is None or self._launcher_canvas is not None or not self._native_has_been_expanded:
+            return False
+        self._native_exit_deadline = time.monotonic() * 1000 + self._native_bolttagu.begin_exit()
+        self._schedule_animation_in(0)
+        return True
+
     def show_full(self) -> None:
+        self._native_has_been_expanded = True
+        self._native_exit_deadline = None
+        if self._native_bolttagu:
+            self._native_bolttagu.begin_enter()
+            self._schedule_animation_in(0)
         if self._launcher_canvas is None:
             return
         self._launcher_canvas.destroy()
@@ -1102,7 +1215,9 @@ class CharacterOverlay:
         if self._full_rect is not None:
             x, y, w, h = self.launcher_full_target()
             work = bubble_geometry.get_monitor_work_rect(x + w // 2, y + h // 2)
+            self.root.update_idletasks()
             self.root.geometry(f"{w}x{h}+{x}+{y}")
+            self.root.update_idletasks()
             def update(state: dict) -> None:
                 previous = state.get("overlay_window")
                 record = dict(previous) if isinstance(previous, dict) else {}
@@ -1199,7 +1314,7 @@ class CharacterOverlay:
         First capable-renderer launch has no acknowledged rect, so bundled size
         is the safe fallback until the renderer reports its actual geometry.
         """
-        lx, ly = self.root.winfo_x(), self.root.winfo_y()
+        lx, ly = getattr(self, '_launcher_expand_anchor', None) or (self.root.winfo_x(), self.root.winfo_y())
         if external_size is not None:
             width, height = max(1, int(external_size[0])), max(1, int(external_size[1]))
         else:
@@ -1275,7 +1390,15 @@ class CharacterOverlay:
 
     def capture_launcher_expand_anchor(self) -> tuple[int, int]:
         """Remember the physical launcher position before a clamped full open."""
-        self._launcher_expand_anchor = (int(self.root.winfo_x()), int(self.root.winfo_y()))
+        # Tk/Windows can still report the previous full rectangle after a
+        # launcher geometry request. Host placement and completed launcher drags
+        # already persist their intended coordinates, including queued writes.
+        saved = get_overlay_state().get('launcher_window')
+        try:
+            x, y = int(saved['x']), int(saved['y'])
+        except (KeyError, TypeError, ValueError):
+            x, y = int(self.root.winfo_x()), int(self.root.winfo_y())
+        self._launcher_expand_anchor = (x, y)
         return self._launcher_expand_anchor
 
     def snapshot_launcher_anchor(self) -> tuple[int, int]:
@@ -1796,7 +1919,7 @@ class CharacterOverlay:
 
     def _set_hovered(self, value: bool) -> None:
         self._emit_pointer_event("pointer_enter" if value else "pointer_leave", {})
-        if self._profile.sprite_enabled and self._sprite_model.set_hovered(value, time.monotonic() * 1000):
+        if (self._profile.sprite_enabled or self._native_bolttagu) and self._sprite_model.set_hovered(value, time.monotonic() * 1000):
             self._schedule_animation_in(0)
 
     def _on_drag(self, event):
@@ -1821,10 +1944,12 @@ class CharacterOverlay:
 
     def _keep_topmost(self):
         """주기적으로 창을 맨 위로 올려 작업표시줄 등에 가리지 않게 유지."""
+        if self._closing:
+            return
         if not self._context_menu_open:
             self.root.lift()
             self.root.attributes("-topmost", True)
-        self.root.after(500, self._keep_topmost)
+        self._topmost_after_id = self.root.after(500, self._keep_topmost)
 
     def _set_frame(self, source_path: Path):
         self._reload_image_for_current_monitor(source_path=source_path)
@@ -1874,7 +1999,7 @@ class CharacterOverlay:
         )
 
     def _start_click_action(self) -> None:
-        if self._profile.sprite_enabled:
+        if self._profile.sprite_enabled or self._native_bolttagu:
             self.set_sprite_state("click")
             return
         if not self._profile.click_vfx_enabled or "sparkle_burst" not in self._effect_images:
@@ -1888,6 +2013,8 @@ class CharacterOverlay:
 
     def _animation_tick(self):
         self._animation_after_id = None
+        if getattr(self, '_closing', False):
+            return
         try:
             if not self.root.winfo_exists():
                 return
@@ -1895,6 +2022,22 @@ class CharacterOverlay:
             return
 
         now_ms = time.monotonic() * 1000
+        if self._native_bolttagu:
+            if self._native_exit_deadline is not None and now_ms >= self._native_exit_deadline:
+                self._native_exit_deadline = None
+                self.show_launcher()
+            if self._launcher_canvas is None:
+                native = self._native_bolttagu
+                self._sprite_model.expire(now_ms, 1000)
+                if self._native_exit_deadline is None:
+                    native.apply_hint(self._sprite_model.state, self._native_category)
+                frame = native.render_frame(self.root.winfo_pointerx(), self.root.winfo_x())
+                if frame is not None:
+                    self._base_image = frame
+                    self._render_current_image()
+            if self._launcher_canvas is None:
+                self._schedule_animation_in(40)
+            return
         if self._profile.sprite_enabled and self._sprite_sheet is not None:
             spec = self._state_spec(self._sprite_model.state)
             elapsed = now_ms - self._sprite_model.started_ms

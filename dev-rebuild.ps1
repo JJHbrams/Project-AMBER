@@ -6,9 +6,17 @@
 .DESCRIPTION
     This development loop never invokes PyInstaller or changes dist/. Frozen
     bundles are owned by installer/build-installer.ps1.
+    -AutoStart preserve keeps ON/OFF and reconciles only deferred owned component paths.
+    -AutoStart on couples an existing installed host startup with the installed
+    external catalog provider; off removes only owned entries.
+    -ExternalOverlay start (default) starts the installed catalog after source
+    readiness; skip leaves it alone. -NoStart validates source only, with no
+    launches/login changes, and rejects explicit AutoStart on/off.
 #>
 param(
     [switch]$NoStart,
+    [ValidateSet('preserve','on','off')][string]$AutoStart = 'preserve',
+    [ValidateSet('start','skip')][string]$ExternalOverlay = 'start',
     [string]$CondaEnv = "intel_engram",
     [string]$PythonPath = "",
     [ValidateRange(10, 600)]
@@ -20,6 +28,9 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+if ($NoStart -and $AutoStart -ne 'preserve') { throw '-NoStart requires -AutoStart preserve; no startup changes requested.' }
+. "$PSScriptRoot\installer\joint-startup.ps1"
+. "$PSScriptRoot\installer\stop-engram-processes.ps1"
 $Root = $PSScriptRoot
 $Entry = Join-Path $Root "engram_overlay_entry.py"
 
@@ -79,12 +90,20 @@ function Get-DirectChild([int]$ParentPid, [string]$CommandFragment) {
 
 function Save-SourceChildSnapshot([Diagnostics.Process]$Process, [string]$Python, [string]$SourceRoot, [string]$OutputPath) {
     $previousErrorActionPreference = $ErrorActionPreference
+    $pendingPath = $OutputPath + '.pending'
+    $handle = $Process.Handle
+    [uint32]$snapshotExitCode = 0
+    if (-not [EngramArtifactProcessNative]::GetExitCodeProcess($handle, [ref]$snapshotExitCode) -or $snapshotExitCode -ne 259) { return $false }
     try {
         $ErrorActionPreference = "Continue"
-        & $Python -m core.install.process_identity snapshot --parent-pid $Process.Id --source-root $SourceRoot --output $OutputPath 2>&1 | Out-Null
-        return ($LASTEXITCODE -eq 0 -and (Test-Path -LiteralPath $OutputPath -PathType Leaf))
+        & $Python -m core.install.process_identity snapshot --parent-pid $Process.Id --source-root $SourceRoot --output $pendingPath 2>&1 | Out-Null
+        if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $pendingPath -PathType Leaf)) { return $false }
+        if (-not [EngramArtifactProcessNative]::GetExitCodeProcess($handle, [ref]$snapshotExitCode) -or $snapshotExitCode -ne 259) { return $false }
+        Move-Item -LiteralPath $pendingPath -Destination $OutputPath -Force
+        return $true
     } finally {
         $ErrorActionPreference = $previousErrorActionPreference
+        if (Test-Path -LiteralPath $pendingPath -PathType Leaf) { Remove-Item -LiteralPath $pendingPath -Force }
     }
 }
 
@@ -101,16 +120,6 @@ function Remove-SnapshottedSourceChildren([string]$Python, [string]$SourceRoot, 
     }
 }
 
-function Remove-ProvenSourceOrphans([string]$Python, [string]$SourceRoot) {
-    $previousErrorActionPreference = $ErrorActionPreference
-    try {
-        $ErrorActionPreference = "Continue"
-        & $Python -m core.install.process_identity cleanup-source-orphans --source-root $SourceRoot 2>&1 |
-            ForEach-Object { Write-Host "  [cleanup] $($_.ToString())" }
-    } finally {
-        $ErrorActionPreference = $previousErrorActionPreference
-    }
-}
 
 function Stop-StartedOverlay(
     [Diagnostics.Process]$Process,
@@ -120,13 +129,16 @@ function Stop-StartedOverlay(
 ) {
     if (-not $Process) { return }
     if ($Process.HasExited) {
-        Remove-ProvenSourceOrphans $Python $SourceRoot
         return
     }
     $snapshotPath = Join-Path ([IO.Path]::GetTempPath()) ("engram-dev-children-" + [Guid]::NewGuid().ToString("N") + ".json")
     Save-SourceChildSnapshot $Process $Python $SourceRoot $snapshotPath | Out-Null
     $health = Get-HealthJson "http://127.0.0.1:$StmPort/health"
-    if ($health -and $health.role -eq "overlay-stm" -and [int]$health.pid -eq $Process.Id) {
+    $handle = $Process.Handle
+    [uint32]$exitCode = 0
+    $alive = [EngramArtifactProcessNative]::GetExitCodeProcess($handle, [ref]$exitCode) -and $exitCode -eq 259
+    $owners = @(Get-NetTCPConnection -LocalPort $StmPort -State Listen -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess -Unique)
+    if ($alive -and $owners.Count -eq 1 -and $owners[0] -eq $Process.Id -and $health -and $health.role -eq "overlay-stm" -and [int]$health.pid -eq $Process.Id) {
         try {
             $shutdownArgs = @{
                 Uri = "http://127.0.0.1:$StmPort/shutdown"
@@ -141,7 +153,6 @@ function Stop-StartedOverlay(
             # closes managed MCP/watcher/dashboard children.
             if ($Process.WaitForExit(25000)) {
                 Remove-SnapshottedSourceChildren $Python $SourceRoot $snapshotPath
-                Remove-ProvenSourceOrphans $Python $SourceRoot
                 return
             }
         } catch {}
@@ -149,10 +160,11 @@ function Stop-StartedOverlay(
     # Refresh while the exact parent still exists so late-spawned/recovered
     # direct children are captured before forced parent termination reparents them.
     Save-SourceChildSnapshot $Process $Python $SourceRoot $snapshotPath | Out-Null
-    Stop-Process -Id $Process.Id -Force -ErrorAction SilentlyContinue
+    if ([EngramArtifactProcessNative]::GetExitCodeProcess($handle, [ref]$exitCode) -and $exitCode -eq 259) {
+        if (-not [EngramArtifactProcessNative]::TerminateProcess($handle, 1)) { throw 'Could not stop the exact source process started by this invocation.' }
+    }
     $Process.WaitForExit(5000) | Out-Null
     Remove-SnapshottedSourceChildren $Python $SourceRoot $snapshotPath
-    Remove-ProvenSourceOrphans $Python $SourceRoot
 }
 
 if ($PSBoundParameters.ContainsKey("Deploy") -or $PSBoundParameters.ContainsKey("FreshBuild")) {
@@ -193,11 +205,26 @@ if ($NoStart) {
     exit 0
 }
 
+Write-Step "Claude session lifecycle hooks (compatible CLI only)"
+& $python $Entry --role claude-monitor-hooks --provision --apply
+if ($LASTEXITCODE -ne 0) { throw 'Claude lifecycle hook provisioning failed; settings were not replaced.' }
+Write-Step "Codex session lifecycle hooks (existing configuration roots only; /hooks review required)"
+& $python $Entry --role codex-monitor-hooks --provision --apply
+if ($LASTEXITCODE -ne 0) { throw 'Codex lifecycle hook provisioning failed; inspect configuration before retrying.' }
+
 Write-Step "Restarting canonical source entrypoint"
+if ($AutoStart -eq 'on') {
+    Get-EngramExistingStartupHost | Out-Null
+    if ([bool]$contract.selected_renderer_id) { Get-EngramCatalogRuntime | Out-Null }
+}
+if ($ExternalOverlay -eq 'start' -and ([bool]$contract.selected_renderer_id -or $PSBoundParameters.ContainsKey('ExternalOverlay'))) {
+    Get-EngramCatalogRuntime | Out-Null
+}
 $previousDevRestartMarker = $env:ENGRAM_DEV_SOURCE_RESTART
 try {
     $env:ENGRAM_DEV_SOURCE_RESTART = "1"
-    $overlay = Start-Process -FilePath $python -ArgumentList @($Entry) -WorkingDirectory $Root -PassThru -WindowStyle Hidden
+    $overlay = Start-Process -FilePath $python -ArgumentList ('"{0}"' -f $Entry) -WorkingDirectory $Root -PassThru -WindowStyle Hidden
+    $null = $overlay.Handle # Pin this process instance before it can exit/reuse a PID.
 } finally {
     $env:ENGRAM_DEV_SOURCE_RESTART = $previousDevRestartMarker
 }
@@ -255,4 +282,18 @@ try {
     throw
 }
 
+if ($ExternalOverlay -eq 'start' -and ([bool]$contract.selected_renderer_id -or $PSBoundParameters.ContainsKey('ExternalOverlay'))) {
+    Start-EngramCatalogRuntime -StmPort $contract.stm_port -HostPid $overlay.Id -Required:([bool]$contract.selected_renderer_id -or $PSBoundParameters.ContainsKey('ExternalOverlay'))
+}
+if ($AutoStart -ne 'preserve') {
+    $startupHost = ''
+    if ($AutoStart -eq 'on') { $startupHost = Get-EngramExistingStartupHost }
+    else {
+        try { $startupHost = Get-EngramExistingStartupHost }
+        catch { Write-Warning 'No verified legacy host startup; only previously owned joint entries will be removed.' }
+    }
+    Set-EngramJointStartup -Mode $AutoStart -HostExecutable $startupHost -HostOnly:(-not [bool]$contract.selected_renderer_id)
+} else {
+    Set-EngramJointStartup -Mode preserve
+}
 exit 0

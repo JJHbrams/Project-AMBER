@@ -12,6 +12,11 @@
 #ifndef AppVersion
   #define AppVersion "0.0.0.0"
 #endif
+; 검증된 외부 renderer 버전. build-installer.ps1 이 installer/external-overlay.pin
+; 에서 읽어 넘긴다 — 이 파일에 버전을 적어두면 릴리스마다 썩는다.
+#ifndef ExternalOverlayVersion
+  #define ExternalOverlayVersion "unpinned"
+#endif
 #define AppPublisher "DRTECH"
 #define AppExeName "engram-overlay.exe"
 #ifndef BuildCompression
@@ -49,7 +54,19 @@ Name: "korean"; MessagesFile: "compiler:Languages\Korean.isl"
 [Tasks]
 Name: "autostart"; Description: "Windows 시작 시 자동 실행 (Startup 등록)"; Flags: unchecked
 
+[Types]
+Name: "custom"; Description: "내장 볼따구 + 선택 구성요소"; Flags: iscustom
+
+[Components]
+Name: "native"; Description: "Engram 및 내장 볼따구 (기본)"; Types: custom; Flags: fixed
+Name: "external"; Description: "외부 오버레이 v{#ExternalOverlayVersion} — 설치만 하며 현재 캐릭터를 변경하지 않음"
+#include "external-components\tree.iss"
+Name: "sdk"; Description: "개발자 SDK — 안내와 예제 (오버레이 선택과 독립)"
+
 [Files]
+#include "external-components\files.iss"
+Source: "component-status.ps1"; Flags: dontcopy
+Source: "external-components.ps1"; Flags: dontcopy
 ; install 전 실행 중인 동일 설치본을 종료하기 위한 공통 helper (PrepareToInstall에서 추출)
 Source: "stop-engram-processes.ps1"; Flags: dontcopy
 ; frozen 번들 전체 (dist\engram-overlay\*)
@@ -57,6 +74,11 @@ Source: "..\dist\engram-overlay\*"; DestDir: "{app}\dist\engram-overlay"; Flags:
 Source: "..\config\overlay.yaml"; DestDir: "{app}\dist\engram-overlay\config"; Flags: ignoreversion
 Source: "..\config\config.yaml"; DestDir: "{app}\dist\engram-overlay\config"; Flags: ignoreversion
 Source: "..\config\clients\copilot.md"; DestDir: "{app}\config\clients"; Flags: ignoreversion
+; 공급자별 subagent 정의. 형식과 경로가 공급자마다 달라 한 파일을 세 곳에 복사하면
+; 안 된다. 이전에는 소스 설치 경로(07_shims)만 이걸 배치해서, 설치본 사용자는
+; planner/coder/servant 를 아예 받지 못했다.
+Source: "..\config\agents\*"; DestDir: "{app}\config\agents"; Flags: recursesubdirs createallsubdirs ignoreversion
+Source: "deploy_agent_definitions.ps1"; DestDir: "{app}\installer"; Flags: ignoreversion
 Source: "templates\*"; DestDir: "{app}\installer\templates"; Flags: recursesubdirs createallsubdirs ignoreversion
 Source: "..\.github\skills\engram\SKILL.md"; DestDir: "{app}\.github\skills\engram"; Flags: ignoreversion
 Source: "..\.github\skills\orchestrate\SKILL.md"; DestDir: "{app}\.github\skills\orchestrate"; Flags: ignoreversion
@@ -66,6 +88,15 @@ Source: "..\.github\skills\engram-wiki-workflow\SKILL.md"; DestDir: "{app}\.gith
 Source: "..\.github\skills\engram-close-session\SKILL.md"; DestDir: "{app}\.github\skills\engram-close-session"; Flags: ignoreversion
 ; 설치타임 구성기
 Source: "configure.ps1"; DestDir: "{app}\installer"; Flags: ignoreversion
+Source: "joint-startup.ps1"; DestDir: "{app}\installer"; Flags: ignoreversion
+Source: "external-components.ps1"; DestDir: "{app}\installer"; Flags: ignoreversion
+Source: "external-bundle.ps1"; DestDir: "{app}\installer"; Flags: ignoreversion
+Source: "external-components.pin"; DestDir: "{app}\installer"; Flags: ignoreversion
+Source: "external-wheel.ps1"; DestDir: "{app}\installer"; Flags: ignoreversion
+Source: "stop-engram-processes.ps1"; DestDir: "{app}\installer"; Flags: ignoreversion
+; configure.ps1 이 검증된 외부 renderer 버전을 읽는다. 같이 배포되지 않으면 unpinned 로 떨어진다.
+Source: "external-overlay.pin"; DestDir: "{app}\installer"; Flags: ignoreversion
+Source: "external-overlay.ps1"; DestDir: "{app}\installer"; Flags: ignoreversion
 
 [UninstallRun]
 Filename: "powershell.exe"; \
@@ -76,8 +107,47 @@ Filename: "powershell.exe"; \
 var
   DirPage: TInputDirWizardPage;
   ProviderPage: TInputOptionWizardPage;
-  ExternalOverlayPage: TInputOptionWizardPage;
+  MakeYourOwnCheckBox: TNewCheckBox;
   QueryPage: TInputQueryWizardPage;
+  ExistingExternalComponents: TArrayOfString;
+  ExternalInventoryAvailable: Boolean;
+  SelectAllExternalButton: TNewButton;
+  SelectNoneExternalButton: TNewButton;
+  ExternalInventoryLabel: TNewStaticText;
+
+function ExistingExternalComponent(Id: String): Boolean;
+var I: Integer;
+begin
+  Result := False;
+  for I := 0 to GetArrayLength(ExistingExternalComponents) - 1 do
+    if ExistingExternalComponents[I] = Id then Result := True;
+end;
+
+procedure ExtractComponentArtifact(Name: String; RelativePath: String);
+begin
+  ExtractTemporaryFile(Name);
+  if not FileCopy(ExpandConstant('{tmp}\') + Name,
+    ExpandConstant('{tmp}\component-bundle\') + RelativePath, False) then
+    RaiseException('Unable to stage selected external component.');
+end;
+
+#include "external-components\code.iss"
+
+procedure SelectAllExternalClick(Sender: TObject);
+var Selection: String;
+begin
+  Selection := 'native,' + AllExternalComponentNames();
+  if WizardIsComponentSelected('sdk') then Selection := Selection + ',sdk';
+  WizardSelectComponents(Selection);
+end;
+
+procedure SelectNoneExternalClick(Sender: TObject);
+var Selection: String;
+begin
+  Selection := 'native';
+  if WizardIsComponentSelected('sdk') then Selection := Selection + ',sdk';
+  WizardSelectComponents(Selection);
+end;
 
 function DefaultDbDir(): String;
 begin
@@ -145,7 +215,55 @@ procedure InitializeWizard();
 var
   InitialDbDir: String;
   InitialWorkDir: String;
+  StatusCode: Integer;
+  I: Integer;
+  InventoryText: String;
 begin
+  ExtractTemporaryFile('external-components.ps1');
+  ExtractTemporaryFile('component-status.ps1');
+  if Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'),
+    '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + ExpandConstant('{tmp}\component-status.ps1') +
+    '" -OutputPath "' + ExpandConstant('{tmp}\component-status.txt') + '"', '', SW_HIDE, ewWaitUntilTerminated, StatusCode) then begin
+    ExternalInventoryAvailable := StatusCode = 0;
+    if ExternalInventoryAvailable then LoadStringsFromFile(ExpandConstant('{tmp}\component-status.txt'), ExistingExternalComponents);
+  end;
+  if not ExternalInventoryAvailable then
+    WizardForm.ComponentsList.Hint := '외부 설치 정보를 확인할 수 없습니다. 내장 볼따구만 설치하거나 외부 설치를 먼저 복구하세요.';
+  WizardForm.ComponentsList.Height := WizardForm.ComponentsList.Height - ScaleY(55);
+  SelectAllExternalButton := TNewButton.Create(WizardForm);
+  SelectAllExternalButton.Parent := WizardForm.SelectComponentsPage;
+  SelectAllExternalButton.Left := WizardForm.ComponentsList.Left;
+  SelectAllExternalButton.Top := WizardForm.ComponentsList.Top + WizardForm.ComponentsList.Height + ScaleY(4);
+  SelectAllExternalButton.Width := ScaleX(100);
+  SelectAllExternalButton.Height := ScaleY(23);
+  SelectAllExternalButton.Caption := '외부 전체 선택';
+  SelectAllExternalButton.OnClick := @SelectAllExternalClick;
+  SelectNoneExternalButton := TNewButton.Create(WizardForm);
+  SelectNoneExternalButton.Parent := WizardForm.SelectComponentsPage;
+  SelectNoneExternalButton.Left := SelectAllExternalButton.Left + SelectAllExternalButton.Width + ScaleX(8);
+  SelectNoneExternalButton.Top := SelectAllExternalButton.Top;
+  SelectNoneExternalButton.Width := ScaleX(100);
+  SelectNoneExternalButton.Height := ScaleY(23);
+  SelectNoneExternalButton.Caption := '외부 선택 해제';
+  SelectNoneExternalButton.OnClick := @SelectNoneExternalClick;
+  InventoryText := '';
+  for I := 0 to GetArrayLength(ExistingExternalComponents) - 1 do
+    if Pos('ownership=', ExistingExternalComponents[I]) <> 1 then begin
+      if InventoryText <> '' then InventoryText := InventoryText + ', ';
+      InventoryText := InventoryText + ExistingExternalComponents[I];
+    end;
+  if InventoryText = '' then InventoryText := '없음';
+  if ExistingExternalComponent('ownership=user-owned') then
+    InventoryText := '사용자 소유 런타임 (자동 변경 안 함) · ' + InventoryText;
+  if not ExternalInventoryAvailable then InventoryText := '확인 불가 — 외부 설치 복구 필요 (내장 설치 가능)';
+  ExternalInventoryLabel := TNewStaticText.Create(WizardForm);
+  ExternalInventoryLabel.Parent := WizardForm.SelectComponentsPage;
+  ExternalInventoryLabel.Left := WizardForm.ComponentsList.Left;
+  ExternalInventoryLabel.Top := SelectAllExternalButton.Top + SelectAllExternalButton.Height + ScaleY(3);
+  ExternalInventoryLabel.Width := WizardForm.ComponentsList.Width;
+  ExternalInventoryLabel.Height := ScaleY(25);
+  ExternalInventoryLabel.WordWrap := True;
+  ExternalInventoryLabel.Caption := '기존: ' + InventoryText + ' · 체크 해제로 기존 항목을 삭제하지 않습니다.';
   InitialDbDir := DefaultDbDir();
   InitialWorkDir := InitialDbDir;
   LoadExistingUserPaths(InitialDbDir, InitialWorkDir);
@@ -171,31 +289,20 @@ begin
   ProviderPage.Add('Ollama (로컬)');
   ProviderPage.SelectedValueIndex := 3;
 
-  { 3) External overlay contract scaffold. v1.1.0.89 has no installable assets. }
-  ExternalOverlayPage := CreateInputOptionPage(ProviderPage.ID,
-    '외부 오버레이 (선택)', '외부 렌더러 구성 방식을 선택하세요',
-    '현재 고정 공개 릴리스 v1.1.0.89에는 self-contained preset/SDK asset이 없습니다. 선택 시 AMBER core만 설치됩니다.', True, False);
-  ExternalOverlayPage.Add('설치 안 함 (권장)');
-  ExternalOverlayPage.Add('Preset provider — 현재 릴리스에서 사용 불가');
-  ExternalOverlayPage.Add('Renderer SDK — 현재 릴리스에서 사용 불가');
-  ExternalOverlayPage.SelectedValueIndex := 0;
-
   { 4) Ollama 모델 / Identity 이름 (선택) }
-  QueryPage := CreateInputQueryPage(ExternalOverlayPage.ID,
+  QueryPage := CreateInputQueryPage(ProviderPage.ID,
     '추가 설정 (선택)', '비워두면 기본값을 사용합니다',
     'Ollama 를 쓰는 경우 모델명을, engram 이름을 미리 정하려면 입력하세요.');
   QueryPage.Add('Ollama 모델명 (예: qwen3.5:4b) — 선택', False);
   QueryPage.Add('Engram Identity 이름 — 선택', False);
 end;
 
-function ExternalOverlayModeCode(): String;
+function ExternalOverlaySdkCode(): String;
 begin
-  case ExternalOverlayPage.SelectedValueIndex of
-    1: Result := 'presets';
-    2: Result := 'sdk';
+  if WizardIsComponentSelected('sdk') then
+    Result := 'yes'
   else
-    Result := 'none';
-  end;
+    Result := 'no';
 end;
 
 function ProviderCode(): String;
@@ -222,31 +329,58 @@ begin
   R := R + ' -DbDir ' + Q + DirPage.Values[0] + Q;
   R := R + ' -WorkDir ' + Q + DirPage.Values[1] + Q;
   R := R + ' -CliProvider ' + ProviderCode();
-  R := R + ' -ExternalOverlayMode ' + ExternalOverlayModeCode();
+  R := R + ' -ExternalOverlayMode none';
+  if ExternalOverlayComponentsCode() <> '' then
+    R := R + ' -ExternalOverlayComponents ' + Q + ExternalOverlayComponentsCode() + Q;
+  R := R + ' -ExternalOverlaySdk ' + ExternalOverlaySdkCode();
+  R := R + ' -ExternalComponentManifestPath ' + Q + ExpandConstant('{tmp}\component-bundle\engram-overlay-components.json') + Q;
   if Trim(QueryPage.Values[0]) <> '' then
     R := R + ' -OllamaModel ' + Q + Trim(QueryPage.Values[0]) + Q;
   if Trim(QueryPage.Values[1]) <> '' then
     R := R + ' -IdentityName ' + Q + Trim(QueryPage.Values[1]) + Q;
   if WizardIsTaskSelected('autostart') then
-    R := R + ' -EnableAutoStart';
+    R := R + ' -AutoStart on'
+  else
+    R := R + ' -AutoStart off';
   R := R + ' -LaunchNow';
   Result := R;
 end;
 
-function NextButtonClick(CurPageID: Integer): Boolean;
-begin
-  Result := True;
-  if (CurPageID = ExternalOverlayPage.ID) and
-     (ExternalOverlayPage.SelectedValueIndex <> 0) then
-    MsgBox('선택한 외부 오버레이 구성은 고정 공개 릴리스 v1.1.0.89에서 사용할 수 없습니다.' + #13#10 +
-      'AMBER core 설치는 계속되지만 외부 오버레이는 설치되지 않습니다.', mbInformation, MB_OK);
-end;
-
 procedure CurPageChanged(CurPageID: Integer);
 begin
-  if (CurPageID = wpFinished) and (ExternalOverlayPage.SelectedValueIndex <> 0) then
+  { 설치 결과는 configure.ps1 이 판정한다(Python 적격성, 기존 런타임 소유권).
+    위저드는 결과를 단정하지 않고 어디서 확인·변경하는지만 알린다. }
+  if CurPageID <> wpFinished then
+    Exit;
+  if ExternalOverlayComponentsCode() <> '' then
     WizardForm.FinishedLabel.Caption := WizardForm.FinishedLabel.Caption + #13#10 + #13#10 +
-      '외부 오버레이: 선택한 구성은 현재 릴리스에서 사용할 수 없어 설치되지 않았습니다.';
+      '캐릭터: 설정 > 오버레이에서 확인하고 언제든 바꿀 수 있습니다.';
+  if WizardIsComponentSelected('sdk') then
+    WizardForm.FinishedLabel.Caption := WizardForm.FinishedLabel.Caption + #13#10 +
+      '개발자 SDK: %LOCALAPPDATA%\engram-overlay\sdk 에 안내와 예제를 준비했습니다.';
+
+  { 네 번째 인지 표면. SDK 를 체크하지 않은 사람도 여기서 "직접 만들 수 있다"를
+    알게 된다. [Run] 섹션으로 넣으면 configure 를 [Code] 에서만 실행하고 exit code
+    를 전파한다는 이 installer 의 계약을 깬다 — 그래서 코드로 만든다. }
+  if MakeYourOwnCheckBox = nil then begin
+    MakeYourOwnCheckBox := TNewCheckBox.Create(WizardForm);
+    MakeYourOwnCheckBox.Parent := WizardForm.FinishedPage;
+    MakeYourOwnCheckBox.Left := WizardForm.FinishedLabel.Left;
+    MakeYourOwnCheckBox.Top := WizardForm.FinishedLabel.Top + WizardForm.FinishedLabel.Height + ScaleY(16);
+    MakeYourOwnCheckBox.Width := WizardForm.FinishedLabel.Width;
+    MakeYourOwnCheckBox.Height := ScaleY(17);
+    MakeYourOwnCheckBox.Caption := '나만의 캐릭터 만드는 법 보기';
+    MakeYourOwnCheckBox.Checked := False;
+  end;
+end;
+
+procedure DeinitializeSetup();
+var
+  ErrorCode: Integer;
+begin
+  if (MakeYourOwnCheckBox <> nil) and MakeYourOwnCheckBox.Checked then
+    ShellExec('open', 'https://github.com/JJHbrams/engram-overlay#readme',
+      '', '', SW_SHOWNORMAL, ewNoWait, ErrorCode);
 end;
 
 procedure RunConfigure;
@@ -254,6 +388,9 @@ var
   ResultCode: Integer;
   Params: String;
 begin
+  if (ExternalOverlayComponentsCode() <> '') and not ExternalInventoryAvailable then
+    RaiseException('외부 설치 정보를 확인할 수 없습니다. 기존 파일은 보존되었습니다. 외부 항목 없이 다시 설치하거나 기존 설치를 복구하세요.');
+  PrepareExternalComponentBundle();
   WizardForm.StatusLabel.Caption := 'AMBER (ENGRAM) 구성 중 (config · MCP · 바로가기)...';
   Params := '-NoProfile -ExecutionPolicy Bypass -File "' +
     ExpandConstant('{app}\installer\configure.ps1') + '" ' + GetConfigureParams('');

@@ -37,45 +37,30 @@ if (Test-Path $DistExe) {
 } else { Write-Warn "Skipped — launcher/exe not found" }
 
 # 13. Startup shortcut (auto-start on boot)
+Initialize-EngramExternalRuntime -Mode $ExternalOverlayMode -HostExecutable $DistExe -WheelPath (Join-Path $PSScriptRoot '..\external-overlay.whl') -PythonCommand $PythonExe -AllowDownloadWheel
+if ($ExternalOverlayComponents) {
+    . (Join-Path $PSScriptRoot '..\external-overlay.ps1')
+    . (Join-Path $PSScriptRoot '..\external-bundle.ps1')
+    $existingComponents = (Get-EngramInstalledComponents).InstalledComponents
+    $requestedComponents = @(@($ExternalOverlayComponents.Split(',')) + @($existingComponents) | Where-Object { $_ } | Sort-Object -Unique) -join ','
+    $componentManifest = Resolve-EngramComponentBundle -Components $requestedComponents -Sdk:($ExternalOverlaySdk -eq 'yes')
+    Install-EngramExternalComponents -ManifestPath $componentManifest -Components $ExternalOverlayComponents -PythonCommand $PythonExe -UpdateStartup:(-not $NoStart) | Out-Host
+}
+if ($ExternalOverlaySdk -eq 'yes') {
+    . (Join-Path $PSScriptRoot '..\external-bundle.ps1')
+    $sdkManifest = Resolve-EngramComponentBundle -Sdk
+    $sdkPath = Install-EngramOverlaySdk -ManifestPath $sdkManifest
+    Write-Ok "External overlay SDK: $sdkPath"
+}
 $StartupDir = [Environment]::GetFolderPath("Startup")
 $StartupLink = Join-Path $StartupDir "AMBER (ENGRAM).lnk"
 $LegacyStartupLink = Join-Path $StartupDir "engram-overlay.lnk"
-if ($EnableAutoStart) {
-    Write-Step "Startup registration (자동시작)..."
-    if (Test-Path $DistExe) {
-        $shell = New-Object -ComObject WScript.Shell
-        $shortcut = $shell.CreateShortcut($StartupLink)
-        $shortcut.TargetPath = $DistExe
-        $shortcut.WorkingDirectory = Split-Path $DistExe
-        $shortcut.Description = "AMBER (ENGRAM) — Auto Start"
-        $shortcut.IconLocation = "$DistExe,0"
-        $shortcut.Save()
-        if (Test-Path $LegacyStartupLink) { Remove-Item $LegacyStartupLink -Force }
-        Write-Ok $StartupLink
-    } elseif (Test-Path $OverlayCmdPath) {
-        # exe 가 아직 없을 때만 .cmd 폴백 (부팅 시 콘솔창 깜빡 + 고정 불가)
-        $shell = New-Object -ComObject WScript.Shell
-        $shortcut = $shell.CreateShortcut($StartupLink)
-        $shortcut.TargetPath = $OverlayCmdPath
-        $shortcut.WorkingDirectory = $ShimDir
-        $shortcut.Description = "AMBER (ENGRAM) — Auto Start"
-        $shortcut.Save()
-        if (Test-Path $LegacyStartupLink) { Remove-Item $LegacyStartupLink -Force }
-        Write-Warn "$StartupLink (exe 미빌드 — .cmd 폴백)"
-    } else { Write-Warn "Skipped — launcher/exe not found" }
-} else {
-    Write-Step "Startup registration (건너뜀 — 사용자 선택)..."
-    $RemovedStartupLink = $false
-    foreach ($link in @($StartupLink, $LegacyStartupLink)) {
-        if (Test-Path $link) {
-            Remove-Item $link -Force
-            $RemovedStartupLink = $true
-            Write-Ok "기존 자동시작 등록 제거: $link"
-        }
-    }
-    if (-not $RemovedStartupLink) {
-        Write-Ok "자동시작 미등록 (수동 실행)"
-    }
+
+# Preserve existing login settings on unattended reinstalls; only the explicit
+# CLI option or interactive choice changes joint startup. NoStart is read-only
+# with respect to login registration as well as launching processes.
+if (-not $NoStart) {
+    Set-EngramJointStartup -Mode $AutoStart -HostExecutable $DistExe -HostOnly:($JointStartupHostOnly -or $ExternalOverlayMode -eq 'none')
 }
 
 # 14. KG Watcher — overlay.exe의 자식 프로세스로 관리되므로 별도 등록 없음
@@ -84,12 +69,7 @@ Write-Step "KG Watcher — managed by overlay (no separate registration)"
 # 기존에 등록된 VBS가 있으면 정리
 $WatcherVbs = Join-Path $StartupDir "engram-kg-watcher.vbs"
 if (Test-Path $WatcherVbs) {
-    Remove-Item $WatcherVbs -Force
-    Write-Ok "Removed legacy VBS: $WatcherVbs"
-    # 고아 프로세스도 정리
-    Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
-        Where-Object { $_.CommandLine -match "kg_watcher\.py" } |
-        ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+    Write-Warn "Legacy watcher startup found; preserved pending ownership review: $WatcherVbs"
 } else {
     Write-Ok "No legacy VBS found (already clean)"
 }

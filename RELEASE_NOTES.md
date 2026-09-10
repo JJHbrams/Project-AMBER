@@ -1,5 +1,27 @@
 # Release Notes
 
+## 2026-09-10 - v1.5.15: Native Bolttagu and Selectable Overlay Components
+
+### Highlights
+
+- Bolttagu is now a packaged native character: its atlas, animation timeline,
+  mapping migration and settings editor are part of Engram rather than an
+  external provider process. The editor previews the selected pose using the
+  same packaged layers and frame timing as the runtime.
+- The installer can select compatible external overlay components and their
+  shared SDK independently, validates pinned artifacts, and preserves the
+  active character choice and user-owned mappings.
+- Session monitoring gains provider lifecycle recovery, title/project metadata,
+  child activity, permission presentation, and stack-selection improvements.
+
+### Notes
+
+- `Apply 준비` creates an owned, content-addressed mapping copy; use the main
+  Settings window's save action to persist its path, then restart the overlay.
+- This source release includes focused regression coverage. A clean-profile
+  setup installation and reboot remain release verification steps, not claims
+  made by this source curation.
+
 ## 2026-09-07 - v1.5.14: The Hotfix No Longer Freezes Managed Definitions
 
 > Follow-up to v1.5.13. That release decided ownership from the provenance record alone, so

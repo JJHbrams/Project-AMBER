@@ -73,6 +73,7 @@ def _run_dashboard_sidecar(argv: list[str]) -> None:
 
     options = {
         "server.headless": True,
+        "server.address": "127.0.0.1",
         "server.port": max(1, min(65535, int(args.port))),
         "global.developmentMode": False,
         "browser.gatherUsageStats": False,
@@ -155,6 +156,17 @@ def _dispatch_backend_role() -> bool:
             from core.install.user_config import main as user_config_main
             user_config_main(rest)
             return True
+        if role == 'claude-monitor-hooks':
+            from core.install.claude_monitor_hooks import main as claude_hooks_main
+            claude_hooks_main(rest)
+            return True
+        if role == 'codex-monitor-hooks':
+            from core.install.codex_monitor_hooks import main as codex_hooks_main
+            codex_hooks_main(rest)
+            return True
+        if role == 'service-config':
+            from core.install.service_config import main as service_config_main
+            raise SystemExit(service_config_main(rest))
         if role == "runtime-contract":
             from core.install.runtime_contract import main as runtime_contract_main
 
@@ -239,79 +251,19 @@ os.environ["ENGRAM_RUNTIME_ROLE"] = "overlay"
 
 
 def _get_stm_port() -> int:
-    try:
-
-        cfg_path = _Path.home() / ".engram" / "user.config.yaml"
-        if cfg_path.exists():
-            cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
-            return int(cfg.get("overlay", {}).get("stm_server_port", 17384))
-    except Exception:
-        pass
-    return 17384
+    from core.install.service_config import effective_service_config
+    return int(effective_service_config()['overlay']['stm_server_port'])
 
 
 def _shutdown_existing_overlay() -> bool:
-    """기존 overlay 인스턴스에 graceful shutdown을 요청하고 종료를 기다린다."""
+    from core.install.service_config import effective_service_config
+    from core.install.service_lifecycle import prepare_service_handover
+    from overlay.config import editable_project_root
+    project = editable_project_root() or _Path(__file__).resolve().parent
+    prepare_service_handover(effective_service_config(), project, sys.executable)
+    return True
 
-    port = _get_stm_port()
-    base = f"http://127.0.0.1:{port}"
 
-    # 1) 헬스 체크 — 기존 인스턴스가 있는지 확인
-    # role='overlay-stm' 인 경우만 실제 overlay 인스턴스로 판단 (dev_backend STM 브로커와 구분)
-    try:
-        with urllib.request.urlopen(f"{base}/health", timeout=2) as resp:
-
-            info = _json.loads(resp.read().decode())
-            old_pid = info.get("pid")
-            if info.get("role") != "overlay-stm":
-                _raw_log(f"[entry] /health 응답이 overlay-stm 이 아님 (role={info.get('role')}) — 외부 STM 브로커로 판단, 바로 시작")
-                return True
-    except Exception:
-        _raw_log("[entry] 기존 overlay 없음 — 바로 시작")
-        return True
-
-    _raw_log(f"[entry] 기존 overlay 발견 (PID={old_pid}) — graceful shutdown 요청")
-
-    # 2) /shutdown POST
-    try:
-        req = urllib.request.Request(
-            f"{base}/shutdown",
-            data=b"{}",
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        urllib.request.urlopen(req, timeout=3)
-    except Exception as e:
-        _raw_log(f"[entry] /shutdown 요청 실패 (무시): {e}")
-
-    # 3) 종료 대기 (최대 15초)
-    deadline = time.time() + 15
-    while time.time() < deadline:
-        time.sleep(0.5)
-        try:
-            urllib.request.urlopen(f"{base}/health", timeout=1)
-        except Exception:
-            _raw_log("[entry] 기존 overlay 종료 확인됨")
-            return True
-
-    # 4) 타임아웃 — PID로 강제 종료 (최후 수단)
-    if old_pid:
-        _raw_log(f"[entry] 타임아웃 — PID {old_pid} 강제 종료")
-        try:
-
-            PROCESS_TERMINATE = 0x0001
-            SYNCHRONIZE = 0x00100000
-            handle = ctypes.windll.kernel32.OpenProcess(PROCESS_TERMINATE | SYNCHRONIZE, False, old_pid)
-            if handle:
-                terminated = bool(ctypes.windll.kernel32.TerminateProcess(handle, 0))
-                wait_result = ctypes.windll.kernel32.WaitForSingleObject(handle, 5000) if terminated else 0xFFFFFFFF
-                ctypes.windll.kernel32.CloseHandle(handle)
-                if wait_result == 0:
-                    _raw_log(f"[entry] PID {old_pid} 강제 종료 확인 완료")
-                    return True
-        except Exception as e:
-            _raw_log(f"[entry] 강제 종료 실패: {e}")
-    return False
 
 
 def _cleanup_dev_restart_orphans() -> None:
@@ -342,11 +294,10 @@ try:
 
     _raw_log("[entry] 기존 overlay 종료 처리 시작")
     old_overlay_stopped = _shutdown_existing_overlay()
-    if old_overlay_stopped:
-        _raw_log("[entry] dev source restart의 allowlisted 고아 자식 정리")
-        _cleanup_dev_restart_orphans()
-    else:
-        _raw_log("[entry] 기존 overlay 종료 미확인 — child cleanup 생략")
+    if not old_overlay_stopped:
+        raise RuntimeError('Previous overlay exit was not verified; startup aborted')
+    # Handover owns only the snapshotted prior family. Never sweep all default
+    # installed children or all same-checkout workers after an isolated launch.
     _raw_log("[entry] overlay.main 임포트 완료, main() 호출")
     main()
 
