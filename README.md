@@ -87,7 +87,8 @@ To choose event poses in the Windows settings UI:
 3. Pick a state, tool category, or launcher transition. The editor previews the
    packaged atlas using the same layers and frame timing as the runtime.
 4. Choose **Apply preparation**, then choose **Save** in the main Settings
-   window. Restart the overlay to apply the saved mapping path.
+   window. The running overlay reloads the mapping immediately and keeps it
+   across restarts.
 
 Mappings are small JSON override documents: omitted entries use shipped defaults,
 while only valid changed choices are stored in AMBER-owned, content-addressed
@@ -133,7 +134,9 @@ For source changes, see the [architecture](docs/architecture.md),
 ## Troubleshooting
 
 - **The overlay does not change after editing a mapping:** choose **Save** in
-  the main Settings window after **Apply preparation**, then restart the overlay.
+  the main Settings window after **Apply preparation**. If live reload rejects
+  the file, correct the invalid mapping and save again; the last good mapping
+  remains active.
 - **A coding tool has no remembered project context:** confirm its local MCP
   configuration and project scope before treating a missing provider lifecycle
   signal as a memory failure.
