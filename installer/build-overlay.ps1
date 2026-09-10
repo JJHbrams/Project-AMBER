@@ -422,7 +422,6 @@ try {
 
     $stoppedProcesses = Stop-EngramArtifactProcesses -ArtifactDir $deployTarget
     $previousOverlayPaths = @($stoppedProcesses.OverlayPaths)
-    $buildWorkPath = Join-Path $Root "build\engram-overlay"
     Write-OverlayOk "Deploy target: $deployTarget"
 
     $cleanRetried = $false
@@ -431,6 +430,11 @@ try {
         $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ("engram-overlay-build-" + [Guid]::NewGuid().ToString("N"))
         $tempDist = Join-Path $tempRoot "dist"
         $tempArtifact = Join-Path $tempDist "engram-overlay"
+        $buildWorkPath = if ($attemptClean) {
+            Join-Path $tempRoot "work"
+        } else {
+            Join-Path $Root "build\engram-overlay"
+        }
         New-Item -ItemType Directory -Path $tempRoot -Force | Out-Null
 
         Write-OverlayStep "PyInstaller build ($(if ($attemptClean) { "clean" } else { "incremental" }))"

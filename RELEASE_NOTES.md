@@ -14,6 +14,11 @@
 - Session monitoring gains provider lifecycle recovery, title/project metadata,
   child activity, permission presentation, and stack-selection improvements.
 
+### Fixed
+
+- Fresh release builds now use an isolated PyInstaller work directory, avoiding
+  Windows cleanup failures caused by stale files in a previous build tree.
+
 ### Notes
 
 - `Apply 준비` creates an owned, content-addressed mapping copy; use the main
