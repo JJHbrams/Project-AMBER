@@ -172,6 +172,22 @@ Access at **http://localhost:8501** while the overlay is running.
 
 ---
 
+## Native Bolttagu Event Mapping
+
+Since v1.5.15, the default **Native Bolttagu** character is configured directly in AMBER. The external `engram-overlay` process and its mapping script are not required.
+
+1. Open **Settings** from the Bolttagu context menu or the tray icon.
+2. Under **Overlay → Character source**, select `Native Bolttagu` (`내장 볼따구`).
+3. Click **Edit mapping…** (`매핑 편집…`).
+4. Choose poses for state events, entry one-shots, tool categories, and show/hide lifecycle events. The packaged native atlas and runtime frame timing are played in the preview below the selectors.
+5. Click **Prepare apply** (`적용 준비`), then click **Save** in the main Settings window. The current overlay reloads the mapping and keeps it across restarts.
+
+**Import mapping…** copies a valid legacy `mapping.json` into AMBER-owned storage without modifying the original. **Default mapping** clears the custom path. Prepared mappings are content-addressed files under `~/.engram/native-bolttagu/mappings/<sha256>.json`; bundled files are never overwritten.
+
+The mapping covers finite public states such as idle, input, generating, thought, search, memory, success and errors; tool categories such as write, execute and read; and the Bolttagu show/hide animations. It never receives hidden chain-of-thought content.
+
+---
+
 ## Obsidian Integration
 
 AMBER's knowledge graph syncs bidirectionally with an **Obsidian vault**. Write notes → AI reads them. AI writes notes → read them in Obsidian.

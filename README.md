@@ -401,11 +401,32 @@ states:
 
 각 `states` 항목은 `frames`, 선택 방식(`fixed`/`random`/`sequence`/`sequence_once`/`shuffle`), `transform`(`none`, `breathe_mirror`, `hflip_squash`)과 `vfx`(`none`, `twinkle`, `sparkle_burst`)를 선언합니다. `breathe_mirror`는 숨쉬기 squash와 무작위 좌우 반전, `hflip_squash`는 좌우 반전과 세로 squash, `sparkle_burst`는 반짝임 폭발 효과입니다. 이전 `idle`/`hover`/`hover_flip_squash`/`alternating_mirror_squash`/`click`/`sparkle` 값은 읽을 때 호환되지만 GUI 저장 시 새 이름으로 정규화됩니다. `shuffle`은 매 cycle마다 모든 frame을 한 번씩 보여주고 cycle 경계의 즉시 반복을 피합니다. `random`은 같은 state dwell 동안 선택한 한 frame을 유지합니다. 클릭 VFX는 배포 기본 Engram 캐릭터/Engram sprite pack에만 적용되며 커스텀 소스에는 자동 적용되지 않습니다. `overlay.yaml`, `~/.engram/overlay.user.yaml`, 활성 pack의 manifest·PNG·VFX PNG는 약 1초 안에 안전하게 다시 읽습니다. 잘못 저장된 YAML/이미지는 마지막 정상 표시를 유지하고, 다음 정상 저장에서 다시 적용됩니다. 상태 판단에는 숨겨진 chain-of-thought가 아닌 공개 bubble 이벤트만 사용합니다. 자세한 manifest 항목과 경로 안전 규칙은 [Character packs](docs/character-packs.md)를 참고하세요.
 
+### 내장 볼따구 이벤트·애니메이션 매핑 변경
+
+v1.5.15부터 기본 캐릭터인 **내장 볼따구**는 외부 `engram-overlay` 프로세스나 그 저장소의 스크립트 없이 Engram 설정에서 직접 매핑합니다.
+
+1. 볼따구 우클릭 메뉴 또는 트레이 아이콘에서 **설정**을 엽니다.
+2. **오버레이 → 캐릭터 소스**를 `내장 볼따구`로 선택합니다.
+3. **매핑 편집…**을 누릅니다.
+4. `상태`, `진입 시 1회`, `도구 범주`, `등장 / 퇴장` 탭에서 이벤트마다 포즈를 선택합니다. 선택한 포즈는 아래 **선택한 동작 미리보기**에서 배포본에 포함된 atlas와 실제 frame timing으로 바로 재생됩니다.
+5. 편집 창에서 **적용 준비**를 누른 다음, 메인 설정 창에서 **저장**을 눌러 최종 적용합니다. 현재 오버레이가 새 설정을 다시 읽으며, 이후 재시작해도 선택이 유지됩니다.
+
+버튼의 의미는 다음과 같습니다.
+
+| 버튼 | 동작 |
+|---|---|
+| `매핑 가져오기…` | 기존 외부 볼따구의 `mapping.json` 등 유효한 JSON 매핑을 가져옵니다. 원본은 수정하지 않고 Engram 소유 복사본을 만듭니다. |
+| `매핑 편집…` | 이벤트별 포즈 선택과 packaged native preview를 엽니다. 편집기 안에서도 JSON 가져오기·내보내기가 가능합니다. |
+| `기본 매핑` | 사용자 매핑 경로를 비우고 v1.5.15 내장 기본 매핑으로 돌아갑니다. 메인 설정의 **저장**을 눌러야 확정됩니다. |
+| `적용 준비` | 변경 내용을 `~/.engram/native-bolttagu/mappings/<sha256>.json`에 새 파일로 저장하고 메인 설정에 그 경로를 준비합니다. 번들 파일이나 가져온 원본을 덮어쓰지 않습니다. |
+
+주요 매핑 대상은 유휴·입력·응답 생성·생각·검색·기억·완료·오류 같은 상태, write/execute/read 같은 도구 범주, 그리고 볼따구 등장·퇴장입니다. 숨겨진 chain-of-thought가 아니라 Engram이 공개한 유한 상태 이벤트만 애니메이션에 전달됩니다.
+
 ### 위치와 상태 편집
 
 오버레이를 드래그한 위치와 speech/thought 말풍선의 수동 상대 위치는 `~/.engram/overlay.state.yaml`에 저장되어 재시작·재부팅·rebuild 뒤에도 복원됩니다. 저장 좌표의 모니터가 사라진 경우에는 현재 보이는 가장 가까운 작업 영역 안으로 안전하게 보정됩니다. 설정 초기화를 하지 않는 한 대화 종료는 이 배치를 지우지 않습니다.
 
-설정 창의 **오버레이 → Sprite state manifest** 패널에서는 현재 sprite-grid reaction pack의 state를 선택해 frames, selection, frame/dwell timing, transform, VFX를 편집할 수 있습니다. 저장 또는 고급 YAML 열기는 번들 파일을 수정하지 않고 먼저 `~/.engram/character/reactions/<pack-id>/`에 사용자 복사본을 만든 뒤 그 복사본을 사용합니다. 유효하지 않은 frame 범위·열거값·timing은 저장되지 않으며, manifest의 다른 항목은 그대로 보존됩니다.
+설정 창의 **오버레이 → Sprite state manifest** 패널은 `스프라이트 그리드` 캐릭터 소스를 선택했을 때 사용하는 별도 편집기입니다. 내장 볼따구의 이벤트 매핑은 위의 **매핑 편집…**을 사용하세요. Sprite state manifest를 저장하거나 고급 YAML로 열면 번들 파일을 수정하지 않고 먼저 `~/.engram/character/reactions/<pack-id>/`에 사용자 복사본을 만든 뒤 그 복사본을 사용합니다. 유효하지 않은 frame 범위·열거값·timing은 저장되지 않으며, manifest의 다른 항목은 그대로 보존됩니다.
 
 ## Obsidian으로 지식 저장소 관리하기
 
