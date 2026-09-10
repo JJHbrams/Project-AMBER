@@ -1,0 +1,211 @@
+{
+  "sources": {
+    "origin": "sprite-pack-v10",
+    "trickcal": "sprite-pack-v10-trickcal-inspired"
+  },
+  "sourceCanvas": [
+    1254,
+    1254
+  ],
+  "crop": [
+    87,
+    13,
+    1167,
+    1219
+  ],
+  "scale": 0.25,
+  "cell": [
+    270,
+    302
+  ],
+  "feetAnchor": [
+    166,
+    267
+  ],
+  "sheets": {
+    "bolttagu-idle.png": [
+      "animations/idle_blink/open.png",
+      "animations/idle_blink/half.png",
+      "animations/idle_blink/closed.png"
+    ],
+    "bolttagu-steam.png": [
+      "animations/idle_steam/01.png",
+      "animations/idle_steam/02.png",
+      "animations/idle_steam/03.png",
+      "animations/idle_steam/04.png",
+      "animations/idle_steam/05.png",
+      "animations/idle_steam/06.png",
+      "animations/idle_steam/07.png",
+      "animations/idle_steam/08.png",
+      "animations/idle_steam/09.png",
+      "animations/idle_steam/10.png",
+      "animations/idle_steam/11.png",
+      "animations/idle_steam/12.png",
+      "animations/idle_steam/13.png",
+      "animations/idle_steam/14.png",
+      "animations/idle_steam/15.png",
+      "animations/idle_steam/16.png",
+      "animations/idle_steam/17.png",
+      "animations/idle_steam/18.png",
+      "animations/idle_steam/19.png",
+      "animations/idle_steam/20.png",
+      "animations/idle_steam/21.png",
+      "animations/idle_steam/22.png",
+      "animations/idle_steam/23.png",
+      "animations/idle_steam/24.png"
+    ],
+    "bolttagu-alert.png": [
+      "states/alert_aha.png"
+    ],
+    "bolttagu-wondering.png": [
+      "animations/wondering/01.png",
+      "animations/wondering/02.png",
+      "animations/wondering/03.png"
+    ],
+    "bolttagu-enter.png": [
+      "animations/enter/01.png",
+      "animations/enter/02.png",
+      "animations/enter/03.png"
+    ],
+    "bolttagu-exit.png": [
+      "animations/exit/01.png",
+      "animations/exit/02.png",
+      "animations/exit/03.png"
+    ],
+    "bolttagu-searching.png": [
+      "animations/searching/01.png",
+      "animations/searching/02.png",
+      "animations/searching/03.png"
+    ],
+    "bolttagu-writing.png": [
+      "animations/writing/01.png",
+      "animations/writing/02.png",
+      "animations/writing/03.png"
+    ],
+    "bolttagu-speaking.png": [
+      "animations/speaking/01.png",
+      "animations/speaking/02.png",
+      "animations/speaking/03.png"
+    ],
+    "bolttagu-listening.png": [
+      "animations/listening/01.png",
+      "animations/listening/02.png",
+      "animations/listening/03.png"
+    ],
+    "bolttagu-waiting.png": [
+      "animations/waiting/01.png",
+      "animations/waiting/02.png",
+      "animations/waiting/03.png"
+    ],
+    "bolttagu-success.png": [
+      "animations/success/01.png",
+      "animations/success/02.png",
+      "animations/success/03.png"
+    ],
+    "bolttagu-error.png": [
+      "animations/error/01.png",
+      "animations/error/02.png",
+      "animations/error/03.png"
+    ],
+    "bolttagu-floor.png": [
+      "layers/floor_base.png"
+    ],
+    "bolttagu-spill.png": [
+      "layers/coffee_spill.png"
+    ],
+    "bolttagu-trickcal-idle.png": [
+      "animations/idle_blink/open.png",
+      "animations/idle_blink/half.png",
+      "animations/idle_blink/closed.png"
+    ],
+    "bolttagu-trickcal-steam.png": [
+      "animations/idle_steam/01.png",
+      "animations/idle_steam/02.png",
+      "animations/idle_steam/03.png",
+      "animations/idle_steam/04.png",
+      "animations/idle_steam/05.png",
+      "animations/idle_steam/06.png",
+      "animations/idle_steam/07.png",
+      "animations/idle_steam/08.png",
+      "animations/idle_steam/09.png",
+      "animations/idle_steam/10.png",
+      "animations/idle_steam/11.png",
+      "animations/idle_steam/12.png",
+      "animations/idle_steam/13.png",
+      "animations/idle_steam/14.png",
+      "animations/idle_steam/15.png",
+      "animations/idle_steam/16.png",
+      "animations/idle_steam/17.png",
+      "animations/idle_steam/18.png",
+      "animations/idle_steam/19.png",
+      "animations/idle_steam/20.png",
+      "animations/idle_steam/21.png",
+      "animations/idle_steam/22.png",
+      "animations/idle_steam/23.png",
+      "animations/idle_steam/24.png"
+    ],
+    "bolttagu-trickcal-alert.png": [
+      "states/alert_aha.png"
+    ],
+    "bolttagu-trickcal-wondering.png": [
+      "animations/wondering/01.png",
+      "animations/wondering/02.png",
+      "animations/wondering/03.png"
+    ],
+    "bolttagu-trickcal-enter.png": [
+      "animations/enter/01.png",
+      "animations/enter/02.png",
+      "animations/enter/03.png"
+    ],
+    "bolttagu-trickcal-exit.png": [
+      "animations/exit/01.png",
+      "animations/exit/02.png",
+      "animations/exit/03.png"
+    ],
+    "bolttagu-trickcal-searching.png": [
+      "animations/searching/01.png",
+      "animations/searching/02.png",
+      "animations/searching/03.png"
+    ],
+    "bolttagu-trickcal-writing.png": [
+      "animations/writing/01.png",
+      "animations/writing/02.png",
+      "animations/writing/03.png"
+    ],
+    "bolttagu-trickcal-speaking.png": [
+      "animations/speaking/01.png",
+      "animations/speaking/02.png",
+      "animations/speaking/03.png"
+    ],
+    "bolttagu-trickcal-listening.png": [
+      "animations/listening/01.png",
+      "animations/listening/02.png",
+      "animations/listening/03.png"
+    ],
+    "bolttagu-trickcal-waiting.png": [
+      "animations/waiting/01.png",
+      "animations/waiting/02.png",
+      "animations/waiting/03.png"
+    ],
+    "bolttagu-trickcal-success.png": [
+      "animations/success/01.png",
+      "animations/success/02.png",
+      "animations/success/03.png"
+    ],
+    "bolttagu-trickcal-error.png": [
+      "animations/error/01.png",
+      "animations/error/02.png",
+      "animations/error/03.png"
+    ],
+    "bolttagu-trickcal-executing.png": [
+      "animations/executing/01.png",
+      "animations/executing/02.png",
+      "animations/executing/03.png"
+    ],
+    "bolttagu-trickcal-tool_use.png": [
+      "animations/tool_use/01.png",
+      "animations/tool_use/02.png",
+      "animations/tool_use/03.png"
+    ]
+  }
+}

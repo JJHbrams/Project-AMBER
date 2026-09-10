@@ -1,0 +1,132 @@
+{
+  "upstream_repository": "engram-overlay",
+  "upstream_revision": "d795f5a71ea23c11e09882f6537ee011790f371b",
+  "upstream_directory": "src/engram_overlay/overlays/assets/bolttagu_2d",
+  "license_status": "No LICENSE/COPYING/NOTICE found upstream; internal integration only, public redistribution requires rights review.",
+  "files": [
+    {
+      "name": "atlas.json",
+      "sha256": "bdca084ff49ff13789b817cd294a6963eec9cd0af785ae3d6044b6af685dbae3"
+    },
+    {
+      "name": "bolttagu-alert.png",
+      "sha256": "a32ce0aa15ca1ecdbf4acc62773fcacbae5779b781343b9d708739c0c883bc98"
+    },
+    {
+      "name": "bolttagu-enter.png",
+      "sha256": "0b918234491ce358773a2c546758e29ea6d657e0e7666c242889500053be0632"
+    },
+    {
+      "name": "bolttagu-error.png",
+      "sha256": "3b4eec81fc8534008825352b0acf60726da97e9aa1fc0bef3f72d52b9716ce74"
+    },
+    {
+      "name": "bolttagu-exit.png",
+      "sha256": "50826d51e4fb9058b2d8239591216680c7d13f7502dc50f6f045f0cfa00e4826"
+    },
+    {
+      "name": "bolttagu-floor.png",
+      "sha256": "650ce82e83362f9cec08958bd37e9d9172acbee37d708d2b003647275575827f"
+    },
+    {
+      "name": "bolttagu-idle.png",
+      "sha256": "65c1acc1a3c150580b1d09741df2565c16aeed34dfb5f0d479d6f06be5699a03"
+    },
+    {
+      "name": "bolttagu-listening.png",
+      "sha256": "a0c064a8c5ad0c35530c44f9da335c73b2d9958be513fbc67fb49ae0dfb00874"
+    },
+    {
+      "name": "bolttagu-searching.png",
+      "sha256": "32790e51d5234b311148569265f0162118a8c0aa4a8a86d7115726fba231fc5b"
+    },
+    {
+      "name": "bolttagu-speaking.png",
+      "sha256": "9f49fa9bc04fd7dc3a1d613ff2295fac3f2656b34bfe8d7861b994a111913cf6"
+    },
+    {
+      "name": "bolttagu-spill.png",
+      "sha256": "66bafae864ef875618685ccf780bfa64722a23fcbdc30bc9adedb6a7e2429104"
+    },
+    {
+      "name": "bolttagu-steam.png",
+      "sha256": "f03094b0285bf5f6dad561db8d839cbfbde80230db8ed53e2ac8035b5515abbf"
+    },
+    {
+      "name": "bolttagu-success.png",
+      "sha256": "a9957de9888030980562d5d5dce6652a744c5c6df16f21a560ea67fa2964c242"
+    },
+    {
+      "name": "bolttagu-trickcal-alert.png",
+      "sha256": "08f1b30eb8faec92773247e9151975890d8c11c58bb6a3352c04f8432a411562"
+    },
+    {
+      "name": "bolttagu-trickcal-enter.png",
+      "sha256": "085aea3f99f6ff587470b15050c1af18fc3d03bc9d1bf0204e6704d13ac81387"
+    },
+    {
+      "name": "bolttagu-trickcal-error.png",
+      "sha256": "7fd4dc20e86dd396e07d8439f6ab7a7d42a2e8aa5d2c3697ee64d2802c6e97e6"
+    },
+    {
+      "name": "bolttagu-trickcal-executing.png",
+      "sha256": "44af9127a9ce4faf447e89bcf9f59f23c96dd60779540ee836a66851e756d19d"
+    },
+    {
+      "name": "bolttagu-trickcal-exit.png",
+      "sha256": "6ad030a143b936f00e8ceb0025e8fdbd558cccd1a40b08ec4aba1eaadb35a5b4"
+    },
+    {
+      "name": "bolttagu-trickcal-idle.png",
+      "sha256": "64602fcb5779fde21ea266fb75e9c3dde50608610186607b7662298a7677c622"
+    },
+    {
+      "name": "bolttagu-trickcal-listening.png",
+      "sha256": "7658453fa72a44453f7a8b43cee032211b0c664e7b9d306bed5b784758160fc5"
+    },
+    {
+      "name": "bolttagu-trickcal-searching.png",
+      "sha256": "2b079e1becb090ed71de013ed6e10e4e9d80deca72e0f80e930f1bc4014df0ae"
+    },
+    {
+      "name": "bolttagu-trickcal-speaking.png",
+      "sha256": "44a1491944e7a24e8460040bae81b0561f817230bf16dc5ee818cfeb9cac2dff"
+    },
+    {
+      "name": "bolttagu-trickcal-steam.png",
+      "sha256": "d2284bf60c845cbfd1470ad00d0b2aa0bbaf8f757181c82ec3aed315f35b5824"
+    },
+    {
+      "name": "bolttagu-trickcal-success.png",
+      "sha256": "a3207d7a8dfa0c0add5870afd6c5e970b0937da9a2e11fed964098d8ffc9e5fc"
+    },
+    {
+      "name": "bolttagu-trickcal-tool_use.png",
+      "sha256": "c77246791d81e9a09e9c2a88cdb76ff577179c2d67d4e134197c34a295618795"
+    },
+    {
+      "name": "bolttagu-trickcal-waiting.png",
+      "sha256": "983837e5e02354c04ef8ae56b7dce7375100ff45af6c7fa74f2caffc9f4d9c86"
+    },
+    {
+      "name": "bolttagu-trickcal-wondering.png",
+      "sha256": "2f707afe755adf256dc4291e4796320ae3fc3d3c84d06de0ed74ac6a3a73ea45"
+    },
+    {
+      "name": "bolttagu-trickcal-writing.png",
+      "sha256": "04e1c6d27c0c3ec108d1f65017ef7a5434fd261970e1955034be925122549794"
+    },
+    {
+      "name": "bolttagu-waiting.png",
+      "sha256": "20ef771469353414a9c5c2c489acca43e6ca2c8b6048d9198671e17c612260a3"
+    },
+    {
+      "name": "bolttagu-wondering.png",
+      "sha256": "c02173577e08e8e140194655a1d174ffddf9ab6e8a58e8a54f1cfc1a4d4fcd9b"
+    },
+    {
+      "name": "bolttagu-writing.png",
+      "sha256": "7f2319d0b9bb163664b39bd84a52b2f279183f1c1a4af09c2cad82669742f2a6"
+    }
+  ]
+}

@@ -1,0 +1,9 @@
+flowchart TD
+ A[검증된 배포 manifest] --> B[기존 설치 읽기와 트리 생성]
+ B --> C[선택 ID와 의존성 검증]
+ C --> D[격리 staging 설치]
+ D --> E{검사 통과}
+ E -->|예| F[복구 가능한 runtime 전환과 목록 게시]
+ E -->|아니오| G[자체 staging 정리와 이전 설치 유지]
+ F --> H[결과 안내]
+ G --> H

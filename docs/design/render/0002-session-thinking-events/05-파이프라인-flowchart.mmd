@@ -1,0 +1,6 @@
+flowchart TD
+  A[공급자 이벤트 경계] --> B[로컬 adapter에서 종류와 ID만 추출]
+  B --> C{소유 연결과 epoch 및 turn 검증}
+  C -->|유효| D[훅과 관측 이벤트를 단일 reducer로 결합]
+  C -->|무효| E[본문 없는 거절]
+  D --> F[선택 세션의 기존 thought 매핑]

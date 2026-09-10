@@ -1,0 +1,11 @@
+stateDiagram-v2
+ [*] --> Selecting
+ Selecting --> Validating: 설치
+ Validating --> Staging: ID와 소유권 확인
+ Validating --> Failed: 부적합
+ Staging --> Publishing: 검증 성공
+ Staging --> Failed: 설치 실패
+ Publishing --> Ready: 전환 성공
+ Publishing --> Failed: 이전 설치 복구
+ Failed --> Selecting: 재시도
+ Ready --> [*]

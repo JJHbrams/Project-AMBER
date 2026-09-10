@@ -94,6 +94,8 @@ def _deep_merge(base: dict, override: dict) -> dict:
 _USER_CONFIG_PATH = Path.home() / ".engram" / "overlay.user.yaml"
 _STATE_PATH = Path.home() / ".engram" / "overlay.state.yaml"
 _STATE_LOCK = threading.RLock()
+_BUBBLE_TITLE_LOCK = threading.RLock()
+_BUBBLE_TITLE_OWNER = None
 # Runtime-state writes that have not reached disk yet, replayed on every read so
 # an async write is never observable as a stale value.
 _STATE_PENDING: list = []
@@ -472,6 +474,8 @@ def set_bubble_session_id(session_id: str | None) -> None:
     """resume용 claude 세션 id를 state.yaml에 저장한다(None이면 제거)."""
     def update(state: dict) -> None:
         bubble_cfg = state.get("bubble") if isinstance(state.get("bubble"), dict) else {}
+        if not session_id or bubble_cfg.get("claude_session_id") != session_id:
+            bubble_cfg.pop("title_metadata", None)
         if session_id:
             bubble_cfg["claude_session_id"] = session_id
         else:
@@ -481,6 +485,48 @@ def set_bubble_session_id(session_id: str | None) -> None:
         else:
             state.pop("bubble", None)
     update_overlay_state(update)
+
+
+def validate_bubble_title_metadata(metadata):
+    """Only two bounded public labels; no transcript or unrelated saved fields."""
+    from overlay.state_api import validate_bubble_title_metadata as validate
+    return validate(metadata)
+
+
+def get_bubble_title_metadata(session_id):
+    if not session_id:
+        return None
+    bubble = get_overlay_state().get('bubble', {})
+    if not isinstance(bubble, dict) or bubble.get('claude_session_id') != session_id:
+        return None
+    saved = bubble.get('title_metadata')
+    if not isinstance(saved, dict) or saved.get('provider_session_id') != session_id:
+        return None
+    return validate_bubble_title_metadata({key:saved.get(key) for key in ('producer','manual')})
+
+
+def claim_bubble_title_owner(owner):
+    global _BUBBLE_TITLE_OWNER
+    with _BUBBLE_TITLE_LOCK:
+        _BUBBLE_TITLE_OWNER = owner
+
+
+def set_bubble_title_metadata(session_id, metadata, *, owner=None, is_current=lambda: True):
+    checked = validate_bubble_title_metadata(metadata)
+    if not session_id or checked is None:
+        return False
+    def update(state):
+        bubble = state.get('bubble')
+        if (isinstance(bubble, dict)
+                and bubble.get('claude_session_id') == session_id):
+            bubble['title_metadata'] = {'provider_session_id':session_id, **checked}
+    # Serialize acceptance/enqueue with lifetime replacement. Already accepted
+    # writes survive normal retirement; later old-lifetime calls cannot enqueue.
+    with _BUBBLE_TITLE_LOCK:
+        if owner is not _BUBBLE_TITLE_OWNER or not is_current():
+            return False
+        update_overlay_state_async(update)
+    return True
 
 
 def get_ollama_model(cfg: dict | None = None) -> str:
@@ -646,24 +692,40 @@ def get_workdir(cfg: dict | None = None) -> Path:
     return Path.home()
 
 
-def load_cfg(*, strict: bool = False) -> dict:
+def load_cfg(*, strict: bool = False, create_user_config: bool = True, migrate_native: bool = False) -> dict:
     """기본 config 로드 후 user/state 오버라이드를 순서대로 병합."""
     with open(resolve_editable_overlay_path(_DEFAULT_REL), encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
     if not isinstance(cfg, dict):
         raise ValueError("default overlay config must be a YAML mapping")
 
-    if not _USER_CONFIG_PATH.exists():
+    if create_user_config and not _USER_CONFIG_PATH.exists():
         _USER_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
         _USER_CONFIG_PATH.write_text(_USER_TEMPLATE, encoding="utf-8")
 
+    from core.install.native_bolttagu import migrate_file, migrated_config, pending_mapping_warning
+    native_default = (cfg.get('overlay', {}).get('character', {}).get('source_mode') == 'native_bolttagu')
+    original_user = _safe_load_yaml(_USER_CONFIG_PATH, strict=strict)
+    warning = pending_mapping_warning(_USER_CONFIG_PATH, original_user) if native_default else ''
+    if warning and migrate_native:
+        import logging
+        logging.getLogger(__name__).warning('%s; using native defaults, original configuration preserved', warning)
+    if migrate_native and native_default and not warning:
+        migrate_file(_USER_CONFIG_PATH)
     user = _safe_load_yaml(_USER_CONFIG_PATH, strict=strict)
+    # Read-only callers see the same effective choice as the eventual host;
+    # only the explicit runtime entry persists the backed-up migration.
+    if native_default:
+        user, _ = migrated_config(user)
     if user:
         preserve_legacy_character_source_mode(user)
         cfg = _deep_merge(cfg, user)
+    if warning:
+        cfg['overlay']['native_bolttagu_warning'] = warning
 
     state = _safe_load_yaml(_STATE_PATH)
     state = _filter_runtime_state_overrides(state, user)
     if state:
         cfg = _deep_merge(cfg, state)
-    return cfg
+    from core.install.service_config import merge_service_config
+    return merge_service_config(cfg)

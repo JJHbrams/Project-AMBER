@@ -15,7 +15,7 @@ non-blocking하게 기다린다.
 import asyncio
 import logging
 import uuid
-from concurrent.futures import Future
+from concurrent.futures import Future, InvalidStateError
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
@@ -57,12 +57,18 @@ class ApprovalRequest:
     def allow(self) -> None:
         """tkinter 메인스레드에서 호출 — 승인 버튼 핸들러용."""
         if not self.future.done():
-            self.future.set_result(PermissionResultAllow(behavior="allow"))
+            try:
+                self.future.set_result(PermissionResultAllow(behavior="allow"))
+            except InvalidStateError:
+                pass  # Timeout/cancellation won the race with the Tk button.
 
     def deny(self, message: str = "사용자 거부") -> None:
         """tkinter 메인스레드에서 호출 — 거부 버튼 핸들러용."""
         if not self.future.done():
-            self.future.set_result(PermissionResultDeny(behavior="deny", message=message, interrupt=False))
+            try:
+                self.future.set_result(PermissionResultDeny(behavior="deny", message=message, interrupt=False))
+            except InvalidStateError:
+                pass
 
 
 class ToolApprovalBroker:
@@ -73,10 +79,12 @@ class ToolApprovalBroker:
         permission_level: str,
         on_request: Optional[Callable[[ApprovalRequest], None]] = None,
         timeout: float = 60.0,
+        on_settled: Optional[Callable[[str], None]] = None,
     ):
         self._permission_level = permission_level
         self._on_request = on_request
         self._timeout = timeout
+        self._on_settled = on_settled
 
     def _should_auto_allow(self, tool_name: str) -> bool:
         if self._permission_level == "confirm_always":
@@ -96,6 +104,20 @@ class ToolApprovalBroker:
 
         future: "Future[Any]" = Future()
         request = ApprovalRequest(id=str(uuid.uuid4()), tool_name=tool_name, tool_input=tool_input, future=future)
+        try:
+            return await self._await_request(request)
+        finally:
+            if not future.done():
+                future.cancel()
+            if self._on_settled is not None:
+                try:
+                    self._on_settled(request.id)
+                except Exception:
+                    logger.exception('[bubble] approval settlement callback failed')
+
+    async def _await_request(self, request):
+        future = request.future
+        tool_name = request.tool_name
         try:
             self._on_request(request)
         except Exception:

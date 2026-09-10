@@ -26,6 +26,9 @@ from .chat_window import ChatTerminal
 from .config import (
     get_bubble_cfg,
     get_bubble_session_id,
+    get_bubble_title_metadata,
+    set_bubble_title_metadata,
+    claim_bubble_title_owner,
     get_chat_mode,
     get_cli_provider,
     get_cli_model,
@@ -46,6 +49,10 @@ from .settings_window import open_settings
 from .cli_capabilities import models as provider_models
 from .remote_tunnel import TunnelManager
 from .stm_server import STMServer
+from .session_registry import SessionStateRegistry
+from .session_selection import SessionSelection
+from .session_stack import SessionStackWidget
+from .bubble.state import BubbleStateController
 from .bubble.bubble_manager import BubbleManager
 from .bubble.history_panel import HistoryPanel
 from .bubble.initiative import InitiativeEngine, default_sources, make_persona_phraser
@@ -358,7 +365,7 @@ def _try_start_discord_bot():
 
 class OverlayApp:
     def __init__(self):
-        cfg = load_cfg()
+        cfg = load_cfg(migrate_native=True)
         hotkey = cfg["overlay"]["hotkey"]
         self._cli_provider = get_cli_provider(cfg)
         self._ollama_model = get_ollama_model(cfg)
@@ -504,7 +511,27 @@ class OverlayApp:
         if self._chat_mode == "bubble":
             self._initiative.start()
 
-        self._mcp_http_proc = self._start_mcp_http_server()
+        self._session_registry = SessionStateRegistry()
+        self._bubble_state = None
+        self._stm_server = STMServer(
+            port=int(cfg['overlay']['stm_server_port']),
+            shutdown_callback=self._on_shutdown_request,
+            new_session_callback=self.new_bubble_session,
+            state_registry=self._session_registry,
+        )
+        self._stm_server.start()
+        if not self._stm_server.listening:
+            self._overlay_events.stop()
+            self.root.destroy()
+            raise RuntimeError('STM listener ownership failed; startup aborted instead of disabling monitoring')
+        self._init_session_stack()
+        try:
+            self._mcp_http_proc = self._start_mcp_http_server()
+        except Exception:
+            self._stm_server.stop()
+            self._overlay_events.stop()
+            self.root.destroy()
+            raise
 
         # MCP server가 KuzuDB write lock을 획득할 때까지 대기한 후
         # dashboard를 시작해야 cross-process lock 충돌이 없다.
@@ -514,11 +541,6 @@ class OverlayApp:
         # 깨진 리스너(프로세스 생존 + 신규 연결 불가) 상태를 자동 복구한다.
         threading.Thread(target=self._mcp_health_monitor_loop, daemon=True, name="overlay-mcp-health").start()
 
-        self._stm_server = STMServer(
-            shutdown_callback=self._on_shutdown_request,
-            new_session_callback=self.new_bubble_session,
-        )
-        self._stm_server.start()  # 포트 충돌 시 STMServer.start() 내부에서 조용히 실패
 
         # Global claude.exe discovery is intentionally disabled.  It cannot
         # distinguish Desktop Electron, safe-mode one-shots, or subagents.
@@ -589,7 +611,14 @@ class OverlayApp:
         req = urllib.request.Request(url, method="GET")
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
-                return int(getattr(resp, "status", 0)) == 200
+                if int(getattr(resp, "status", 0)) != 200:
+                    return False
+                import json
+                info = json.loads(resp.read())
+                expected_runtime = 'frozen' if getattr(sys, 'frozen', False) else 'source'
+                return (info.get('runtime') == expected_runtime and info.get('parent_pid') == os.getpid()
+                        and (expected_runtime == 'frozen' or
+                             os.path.normcase(str(info.get('source_root', ''))) == os.path.normcase(str(PROJECT_ROOT.resolve()))))
         except (urllib.error.URLError, TimeoutError, OSError, ValueError):
             return False
 
@@ -946,12 +975,12 @@ class OverlayApp:
         mcp_cfg = cfg.get("mcp") or {}
         port = int(mcp_cfg.get("http_port", MCP_HTTP_PORT))
         transport = self._normalize_mcp_transport(str(mcp_cfg.get("transport", "streamable-http") or "streamable-http"))
-        # 이미 포트가 열려있으면 외부 MCP 서버 재사용 (dev_backend 등)
+        # A stale or unrelated listener is not this host's managed MCP server.
         if self._is_mcp_listener_ready(port, timeout=1.0):
             if self._is_mcp_http_healthy(port, timeout=1.5):
-                log.info("[mcp_http] 포트 %d 이미 응답 중 — 외부 MCP 서버 재사용, 시작 스킵", port)
+                log.info("[mcp_http] port %d is already owned by this host", port)
                 return None
-            log.warning("[mcp_http] 포트 %d 리스너는 있으나 /health 실패 — 신규 MCP 서버 기동 시도", port)
+            raise RuntimeError(f'MCP port {port} belongs to another process family; refusing stale listener reuse')
         # frozen 번들: 같은 exe 를 멀티콜(`--role mcp-server`)로 재실행 → conda python 불필요.
         # 개발(소스) 모드: conda python 으로 mcp_server.py 실행.
         # 원격 인증 리스너는 명시적으로 켤 때만 연다. SSH 리버스 터널은 http_port 가
@@ -980,6 +1009,7 @@ class OverlayApp:
             env["ENGRAM_DB_DIR"] = get_db_root_dir()
             env["ENGRAM_RUNTIME_MODE"] = "frozen" if getattr(sys, "frozen", False) else "source"
             env["ENGRAM_RUNTIME_PARENT_PID"] = str(os.getpid())
+            env["ENGRAM_STM_PORT"] = str(cfg['overlay']['stm_server_port'])
             env["ENGRAM_RUNTIME_SOURCE_ROOT"] = "" if getattr(sys, "frozen", False) else str(PROJECT_ROOT.resolve())
             # overlay 역할 해제 — MCP 서버는 KuzuDB 직접 접근 가능
             env.pop("ENGRAM_RUNTIME_ROLE", None)
@@ -1247,6 +1277,8 @@ class OverlayApp:
             log.warning("[overlay] settings reload rejected; keeping last good runtime configuration")
             return
         cfg = load_cfg()
+        if getattr(self, '_session_stack', None) is not None:
+            self._session_stack.update_theme()
         ext = ((cfg.get("overlay") or {}).get("external_renderer") or {}) if isinstance(cfg.get("overlay"), dict) else {}
         self._overlay_events.set_selection(
             str(ext.get("selected_renderer_id") or "") if isinstance(ext, dict) else "",
@@ -1383,7 +1415,8 @@ class OverlayApp:
                 self._overlay_events.publish("overlay.show", "idle", {})
             return
         if mode == "launcher":
-            self.character.show_launcher()
+            if not getattr(self.character, 'begin_native_collapse', lambda: False)():
+                self.character.show_launcher()
         else:
             self.character.show_full()
 
@@ -1442,6 +1475,9 @@ class OverlayApp:
             # Detach first: a cleanup completion must never clear a newer
             # session created while the launcher is already responsive again.
             self._bubble_session = None
+            retire = getattr(session, 'retire_state', None)
+            if retire is not None:
+                retire()
             self._cleanup_bubble_session_async(session)
 
     def _cleanup_bubble_session_async(self, session: object) -> None:
@@ -1537,17 +1573,59 @@ class OverlayApp:
         self.chat.kill()
         if self._bubble_session is not None and self._bubble_session.is_alive():
             return
+        if self._bubble_session is not None:
+            self._bubble_session.stop()
+            self._bubble_session = None
         cfg = load_cfg()
         bubble_cfg = get_bubble_cfg(cfg)
         workdir = str(get_workdir(cfg))
-        self._bubble_session = BubbleSessionManager(
+        resume_id = get_bubble_session_id()
+        saved_title = get_bubble_title_metadata(resume_id)
+        title_owner = object()
+        claim_bubble_title_owner(title_owner)
+        state = None
+        if getattr(getattr(self, '_stm_server', None), 'listening', False):
+            state = BubbleStateController(self._session_registry, resume_session_id=resume_id,
+                                         saved_title=saved_title)
+        self._bubble_state = state
+
+        def dispatch(callback, argument):
+            owner_at_enqueue = state.session_id if state is not None else None
+            def deliver():
+                if self._bubble_session is session and (state is None or state.session_id == owner_at_enqueue):
+                    callback(argument)
+            self.root.after(0, deliver)
+
+        def persist_session_id(sid):
+            if self._bubble_session is session:
+                set_bubble_session_id(sid)
+                return True
+            return False
+
+        def request_approval(request):
+            def deliver():
+                if request.future.done():
+                    return
+                if self._bubble_session is not session:
+                    request.deny('Session detached')
+                    return
+                try:
+                    self._bubble_manager.show_approval_request(request)
+                except Exception:
+                    request.deny('Approval UI unavailable')
+                    log.exception('Bubble approval UI failed')
+            self.root.after(0, deliver)
+
+        session = BubbleSessionManager(
             cwd=workdir,
             env_overrides={"ENGRAM_SCOPE_KEY": "overlay", "ENGRAM_CLI_PROVIDER": "claude-code"},
             permission_level=get_permission_level(cfg),
-            on_event=lambda ev: self.root.after(0, lambda ev=ev: self._on_bubble_event(ev)),
-            on_approval_request=lambda req: self.root.after(0, lambda req=req: self._bubble_manager.show_approval_request(req)),
-            resume_session_id=get_bubble_session_id(),
-            on_session_id=lambda sid: set_bubble_session_id(sid),
+            on_event=lambda ev: dispatch(self._on_bubble_event, ev),
+            on_approval_request=request_approval,
+            resume_session_id=resume_id,
+            on_session_id=persist_session_id,
+            state_controller=state,
+            on_title_checkpoint=lambda checkpoint: self._checkpoint_bubble_title(session, state, checkpoint),
             stm_bridge=StmBridge(scope_key="overlay"),
             # 확장 사고 예산 — 생각풍선에 실제 추론 텍스트를 보여주기 위함(0이면 끔).
             thinking_tokens=int(bubble_cfg.get("thinking_tokens", 2000)),
@@ -1555,7 +1633,14 @@ class OverlayApp:
             # 그래야 기본 chat_mode(bubble)로 시작하는 신규 사용자도 튜토리얼 안내를 받는다.
             bootstrap_prompt=bubble_bootstrap_prompt(workdir),
         )
-        self._bubble_session.start()
+        self._bubble_session = session
+        session._title_owner = title_owner
+        try:
+            session.start()
+        except Exception:
+            session.retire_state()
+            self._bubble_session = None
+            raise
 
     def _toggle_bubble_input(self) -> None:
         # 캐릭터를 옮긴 뒤 다시 클릭한 경우 — 이전 응답의 말풍선/생각풍선이 아직 떠 있다면
@@ -1573,6 +1658,7 @@ class OverlayApp:
         self._mark_overlay_engaged()
 
     def _on_bubble_submit(self, text: str) -> None:
+        self._bubble_semantic = None
         # 내 메시지는 입력창이 있던 자리에 "에코 말풍선"으로 잠깐 남긴다(응답과 별개).
         # 응답 말풍선은 입력창과 무관하게 자기 위치(마지막 드래그 위치 또는 캐릭터 옆
         # 상단 기본)에 별도로 뜬다 — 내 입력이 응답으로 출력되는 것처럼 보이던 문제 해결.
@@ -1583,10 +1669,11 @@ class OverlayApp:
         # InputBar normally ended the override before invoking us. Keep direct
         # callers safe, then enter generation without reusing the old input
         # transient that mutated work_state as a side effect.
-        self.character.set_input_active(False)
-        self._overlay_events.publish("conversation.input_submitted", "input")
-        self._overlay_events.publish("generation.started", "generating")
-        self.character.set_sprite_state("generating")
+        if self._bubble_is_selected():
+            self.character.set_input_active(False)
+            self._overlay_events.publish("conversation.input_submitted", "input")
+            self._overlay_events.publish("generation.started", "generating")
+            self.character.set_sprite_state("generating")
         self._bubble_turn_active = True  # 턴 시작 — 응답이 끝날(turn_end/error/result) 때까지 발화 억제
         # 자율발화에 대한 답장일 때만 engaged 로 친다. 예전엔 모든 입력에서 무조건
         # notify_engaged 를 불렀는데, 그러면 자율발화와 무관한 평소 대화가 백오프를
@@ -1604,6 +1691,8 @@ class OverlayApp:
 
     def _on_bubble_input_activity(self, active: bool) -> None:
         """Publish metadata-only typing activity and mirror it in the bundled sprite."""
+        if not self._bubble_is_selected():
+            return
         self.character.set_input_active(active)
         self._overlay_events.publish(
             "conversation.input_active" if active else "conversation.input_idle",
@@ -1618,12 +1707,202 @@ class OverlayApp:
         if kind in ("turn_end", "error", "result"):
             self._bubble_turn_active = False
         self._initiative.feed_event(ev)
-        self._overlay_events.publish_bubble(ev)
         self._bubble_manager.handle_event(ev)
+        from .event_api import event_for_bubble
+        owner = getattr(self, '_bubble_state', None)
+        semantic = event_for_bubble(ev)
+        if owner is not None and semantic is not None:
+            self._bubble_semantic = (f'claude:{owner.session_id}', semantic)
         try:
-            self.character.handle_bubble_event(ev)
+            self._refresh_session_stack(schedule=False)
+            selected = getattr(self, '_session_selection', None)
+            waiting = selected is not None and selected.selected_row() is not None and selected.selected_row()['state'] == 'needs_input'
+            publish_terminal = True
+            if (kind == 'turn_end' and not ev.get('is_error') and owner is not None
+                    and getattr(getattr(self, '_stm_server', None), 'listening', False)
+                    and selected is not None):
+                row = selected.selected_row()
+                token = (row['key'], row.get('state_since')) if row else None
+                publish_terminal = (row is not None and row['key'] == f'claude:{owner.session_id}'
+                    and row['state'] == 'ready' and self._session_stack.presentation.state(row) == 'ready'
+                    and token != getattr(self, '_bubble_completion_semantic_token', None))
+                if publish_terminal:
+                    self._bubble_completion_semantic_token = token
+            if self._bubble_is_selected() and not waiting and publish_terminal:
+                self._overlay_events.publish_bubble(ev)
+                self.character.handle_bubble_event(ev)
         except Exception:
             log.debug("[overlay] character state event skipped", exc_info=True)
+
+    def _init_session_stack(self) -> None:
+        self._session_selection = SessionSelection()
+        self._session_stack = SessionStackWidget(self.root,
+            selection=self._session_selection, on_change=lambda: self._refresh_session_stack(schedule=False),
+            on_rename=self._rename_session_label)
+        self._session_stack_after = None
+        self._session_character_signature = None
+        self._refresh_session_stack()
+
+    def _rename_session_label(self, key, label):
+        if not getattr(self._stm_server, 'listening', False):
+            return False
+        bubble = getattr(self, '_bubble_state', None)
+        if bubble is not None and key == f'claude:{bubble.session_id}':
+            changed = bubble.set_label(label)
+        else:
+            changed = self._session_registry.set_label(key, label)
+        if changed:
+            self._refresh_session_stack(schedule=False)
+        return changed
+
+    def _bubble_is_selected(self) -> bool:
+        selection = getattr(self, '_session_selection', None)
+        if selection is None or not getattr(getattr(self, '_stm_server', None), 'listening', False):
+            return True
+        state = getattr(self, '_bubble_state', None)
+        return state is not None and selection.selected_key == f'claude:{state.session_id}'
+
+    def _session_stack_anchor(self):
+        """Only visible character pixels anchor the persistent monitor, never a launcher."""
+        character = self.character
+        if self._overlay_events.mode == 'replace' and getattr(character, '_external_rect', None) is not None:
+            if self._overlay_events.supports('overlay.presentation') and (
+                    getattr(self, '_presentation_mode', 'full') == 'launcher'
+                    or not getattr(self, '_external_renderer_visible', False)):
+                return None
+            return character.get_phys_rect()
+        if (getattr(self, '_presentation_mode', 'full') == 'launcher'
+                or getattr(character, '_launcher_canvas', None) is not None
+                or not character.root.winfo_viewable()):
+            return None
+        return character.get_bundled_phys_rect()
+
+    def _checkpoint_bubble_title(self, session=None, state=None, checkpoint=None):
+        session = session or getattr(self, '_bubble_session', None)
+        state = state or getattr(self, '_bubble_state', None)
+        if (session is None or state is None or not hasattr(state, 'title_checkpoint')
+                or getattr(self, '_bubble_session', None) is not session
+                or getattr(self, '_bubble_state', None) is not state):
+            return
+        checkpoint = checkpoint if checkpoint is not None else state.title_checkpoint()
+        if checkpoint is None:
+            return
+        signature, metadata = checkpoint
+        def current():
+            return (getattr(self, '_bubble_session', None) is session
+                    and getattr(self, '_bubble_state', None) is state
+                    and state.session_id == signature[0]
+                    and state._confirmed_provider_id == signature[1])
+        state.accept_title_checkpoint(checkpoint, lambda: set_bubble_title_metadata(
+            signature[1], metadata,
+            owner=getattr(session, '_title_owner', None), is_current=current))
+
+    def _refresh_native_session_semantics(self, row, state):
+        """Selected-only ordered native tool presentation, with a bounded dwell."""
+        from collections import deque
+        key = row['key'] if row else None
+        changed = key != getattr(self, '_native_semantic_key', None)
+        self._native_semantic_key = key
+        batch = self._session_registry.consume_native_semantics(
+            key, row['state'] if row else None, selection_changed=changed)
+        if changed or state != 'working':
+            self._native_semantic_pending = deque(maxlen=128)
+            self._native_semantic_hold_until = 0.0
+            self._native_display_category = None
+            self._native_display_hint = None
+        if state != 'working' or not batch:
+            return  # Permission/Stop/idle preempt dwell; normal state handles completion once.
+        base_hint = ('thought' if row.get('agent_name') in ('Claude', 'Codex')
+                     and row.get('provider') == 'mcp' else 'generating')
+        self._overlay_events.set_generation_display_hint(base_hint)
+        now = time.monotonic()
+        pending = getattr(self, '_native_semantic_pending', None)
+        if pending is None:
+            pending = self._native_semantic_pending = deque(maxlen=128)
+        for event in batch['events']:
+            if event['type'] in ('generation.started', 'tool.started', 'tool.completed', 'tool.failed'):
+                pending.append((event['_expires_at'], event))
+        while pending and now >= pending[0][0]:
+            pending.popleft()
+        if now < getattr(self, '_native_semantic_hold_until', 0.0):
+            return
+        while pending:
+            _, event = pending.popleft()
+            kind, category = event['type'], event['category']
+            hint = ('error' if kind == 'tool.failed' else
+                    'memory' if category == 'read' else category if category in ('search', 'memory') else
+                    base_hint if category is None else 'generating')
+            if kind == 'tool.failed' and not batch['active_category']:
+                # Reset durable work before the error transient; failure does
+                # not imply another generation started. Any surviving tool
+                # category is restored by its queued observed tool.started.
+                self.character.set_sprite_state(base_hint)
+                if base_hint == 'thought':
+                    self._overlay_events.select_session_state('working', work_hint=base_hint)
+                else:
+                    self._overlay_events.select_session_state('working')
+            getattr(self.character, 'set_native_tool_category', lambda _category: None)(category)
+            self.character.set_sprite_state(hint, transient=kind == 'tool.failed')
+            self._overlay_events.publish(kind, hint, {'category': category} if category else {})
+            self._native_display_category = category if kind == 'tool.started' else None
+            self._native_display_hint = base_hint if kind == 'tool.failed' else hint
+            if kind == 'tool.started':
+                self._native_semantic_hold_until = now + .18
+                return  # Fast pre/post pairs must be visible across Tk frames.
+        category = batch['active_category']
+        hint = ('memory' if category == 'read' else category if category in ('search', 'memory') else
+                base_hint if category is None else 'generating')
+        if (changed or category != getattr(self, '_native_display_category', None)
+                or hint != getattr(self, '_native_display_hint', None)):
+            getattr(self.character, 'set_native_tool_category', lambda _category: None)(category)
+            self.character.set_sprite_state(hint)
+            if category:
+                self._overlay_events.publish('tool.started', hint, {'category': category})
+            else:
+                if base_hint == 'thought':
+                    self._overlay_events.select_session_state('working', work_hint=base_hint)
+                else:
+                    self._overlay_events.select_session_state('working')
+            self._native_display_category = category
+            self._native_display_hint = hint
+
+    def _refresh_session_stack(self, schedule=True) -> None:
+        if getattr(self, '_quitting', False) or not hasattr(self, '_session_stack'):
+            return
+        if schedule:
+            self._session_stack_after = None
+        try:
+            self._checkpoint_bubble_title()
+            listening = getattr(getattr(self, '_stm_server', None), 'listening', False)
+            self._session_stack.update_rows(self._session_registry.snapshot() if listening else [])
+            row = self._session_selection.selected_row()
+            self._overlay_events.publish_session_stack(self._session_selection.rows, self._session_selection.selected_key)
+            state = self._session_stack.presentation.state(row)
+            signature = (row['key'] if row else None, state,
+                         row.get('state_since') if row and row['state'] == 'ready' else None)
+            if signature != getattr(self, '_session_character_signature', None):
+                self._session_character_signature = signature
+                self.character.set_selected_session_state(state)
+                self._overlay_events.select_session_state(state)
+                semantic = getattr(self, '_bubble_semantic', None)
+                if state == 'working' and semantic and semantic[0] == signature[0]:
+                    event_name, hint, payload = semantic[1]
+                    if hint in ('thought', 'search', 'memory', 'generating'):
+                        getattr(self.character, 'set_native_tool_category', lambda _category: None)(payload.get('category'))
+                        self.character.set_sprite_state(hint)
+                        self._overlay_events.publish(event_name, hint, payload)
+            self._refresh_native_session_semantics(row, state)
+            hidden = (getattr(self, '_launcher_hidden', False) or getattr(self, '_settings_active', False))
+            anchor = self._session_stack_anchor()
+            if hidden or not listening or self._overlay_events.owns_session_stack or anchor is None:
+                self._session_stack.hide()
+            elif row:
+                self._session_stack.show(anchor)
+        except Exception:
+            log.debug('[overlay] session deck refresh skipped', exc_info=True)
+        finally:
+            if schedule and not getattr(self, '_quitting', False):
+                self._session_stack_after = self.root.after(100, self._refresh_session_stack)
 
     def _restore_bundled_renderer(self) -> None:
         """Replacement failure must always return control to the bundled window."""
@@ -1758,6 +2037,15 @@ class OverlayApp:
 
     def _apply_overlay_foreground(self, foreground: bool, below_hwnd: int) -> None:
         """Presentation only: never let this break renderer input handling."""
+        monitor = getattr(self, '_session_stack', None)
+        if monitor is not None:
+            # An actual focus transition may change the native topmost order.
+            # The monitor only reasserts NOACTIVATE topmost; unlike bubbles it
+            # never demotes, and heartbeat refresh performs no restacking.
+            try:
+                monitor.restack_monitor()
+            except Exception:
+                log.debug('[overlay] monitor ordering skipped', exc_info=True)
         for surface in (getattr(self, "_bubble_manager", None), getattr(self, "_bubble_input", None)):
             if surface is None:
                 continue
@@ -2222,11 +2510,15 @@ class OverlayApp:
         _ensure_bubble_session 이 resume=None 으로 새 세션을 지연 기동한다.
         """
         def _reset() -> None:
+            session = self._bubble_session
+            # Revoke callback authority before clearing persisted resume data.
+            self._bubble_session = None
             try:
-                set_bubble_session_id(None)
-                if self._bubble_session is not None:
-                    self._bubble_session.stop()
-                    self._bubble_session = None
+                try:
+                    set_bubble_session_id(None)
+                finally:
+                    if session is not None:
+                        session.stop()
                 log.info("[overlay] 말풍선 새 세션 — session_id 리셋 완료")
             except Exception:
                 log.exception("[overlay] 말풍선 새 세션 리셋 실패")
@@ -2246,6 +2538,11 @@ class OverlayApp:
         if self._quitting:
             return
         self._quitting = True
+        if getattr(self, '_session_stack_after', None) is not None:
+            self.root.after_cancel(self._session_stack_after)
+            self._session_stack_after = None
+        if getattr(self, '_session_stack', None) is not None:
+            self._session_stack.destroy()
         self._cancel_pending_external_menu_activation()
         self.character._dismiss_context_menu()
         self._withdraw_visible_surfaces()

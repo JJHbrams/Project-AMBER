@@ -23,6 +23,23 @@ $DistDir = Join-Path $Root "dist\engram-overlay"
 $DistExe = Join-Path $DistDir "engram-overlay.exe"
 $DashboardExe = Join-Path $DistDir "engram-dashboard.exe"
 $CacheHelpers = Join-Path $PSScriptRoot "build-cache.ps1"
+. (Join-Path $PSScriptRoot 'smoke-profile.ps1')
+
+function Get-PinnedExternalOverlayVersion {
+    <#
+        검증된 외부 renderer 버전의 단일 출처. 이전에는 .iss 와 configure.ps1 에
+        같은 문자열이 네 곳 박혀 있어 릴리스마다 낡았다.
+    #>
+    $pin = Join-Path $PSScriptRoot "external-overlay.pin"
+    if (-not (Test-Path -LiteralPath $pin)) { return "unpinned" }
+    $value = (Get-Content -LiteralPath $pin -Raw).Trim()
+    if ($value -notmatch '^\d+\.\d+\.\d+(\.\d+)?$') {
+        Write-Err "external-overlay.pin 형식이 올바르지 않습니다: '$value'"
+    }
+    return $value
+}
+
+. (Join-Path $PSScriptRoot 'external-wheel.ps1')
 
 function Write-Step($Message) { Write-Host "`n==> $Message" -ForegroundColor Cyan }
 function Write-Ok($Message) { Write-Host "  [OK] $Message" -ForegroundColor Green }
@@ -32,10 +49,18 @@ function Write-Err($Message) {
 }
 
 function Invoke-FrozenRole([string]$Role) {
-    $process = Start-Process -FilePath $DistExe `
-        -ArgumentList @("--role", $Role) `
-        -Wait -PassThru -WindowStyle Hidden
-    return [int]$process.ExitCode
+    $savedProfile = Enter-EngramBuildSmokeProfile
+    try {
+        $process = Start-Process -FilePath $DistExe `
+            -ArgumentList @("--role", $Role) `
+            -PassThru -WindowStyle Hidden
+        if (-not $process.WaitForExit(120000)) {
+            $process.Kill()
+            $process.WaitForExit()
+            throw "Frozen installer role timed out: $Role"
+        }
+        return [int]$process.ExitCode
+    } finally { Exit-EngramBuildSmokeProfile $savedProfile }
 }
 
 function Invoke-IsccCompile(
@@ -65,9 +90,10 @@ function Invoke-IsccCompile(
     }
     try {
         $versionDefine = "/DAppVersion=$AppVersion"
+        $overlayDefine = "/DExternalOverlayVersion=$(Get-PinnedExternalOverlayVersion)"
         & $Iscc "/DBuildCompression=$Compression" `
             "/DBuildSolidCompression=$SolidCompression" `
-            "/DBuildOutputSuffix=$OutputSuffix" $versionDefine $compileIss |
+            "/DBuildOutputSuffix=$OutputSuffix" $versionDefine $overlayDefine $compileIss |
             Where-Object { $_ -notmatch '^\s+Compressing:' } |
             ForEach-Object { Write-Host $_ }
         $compileExit = [int]$LASTEXITCODE
@@ -127,6 +153,14 @@ if ($SkipBuild) {
     Write-Ok "Frozen bundle build completed"
 }
 
+$overlayPin = Get-PinnedExternalOverlayVersion
+. (Join-Path $PSScriptRoot 'build-components.ps1')
+. (Join-Path $PSScriptRoot 'external-bundle.ps1')
+Resolve-EngramComponentBundle -All | Out-Null
+# A missing/invalid pinned optional component bundle is a packaging error, not
+# an empty wheel that the installer silently claims to have installed.
+Write-EngramComponentIncludes -BundleRoot (Join-Path $PSScriptRoot 'external-components')
+
 if (-not (Test-Path $DistExe)) {
     Write-Err "번들 없음: $DistExe"
 }
@@ -170,9 +204,17 @@ if ($installerCacheHit) {
         if ($embeddingExit -ne 0 -or $smokeExit -ne 0) {
             Write-Err "Release smoke tests failed (embedding=$embeddingExit, roles=$smokeExit)"
         }
-        $dashboardSmoke = Start-Process -FilePath $DashboardExe `
-            -ArgumentList @("--smoke-check") `
-            -Wait -PassThru -WindowStyle Hidden
+        $savedProfile = Enter-EngramBuildSmokeProfile
+        try {
+            $dashboardSmoke = Start-Process -FilePath $DashboardExe `
+                -ArgumentList @("--smoke-check") `
+                -PassThru -WindowStyle Hidden
+            if (-not $dashboardSmoke.WaitForExit(120000)) {
+                $dashboardSmoke.Kill()
+                $dashboardSmoke.WaitForExit()
+                throw 'Installer dashboard smoke timed out'
+            }
+        } finally { Exit-EngramBuildSmokeProfile $savedProfile }
         if ($dashboardSmoke.ExitCode -ne 0) {
             Write-Err "Dashboard sidecar render smoke failed (exit $($dashboardSmoke.ExitCode))"
         }

@@ -4,6 +4,9 @@
 #
 
 # 4b. Runtime config (model/options)
+$serviceConfig = & $PythonExe (Join-Path $ProjectRoot 'engram_overlay_entry.py') --role service-config
+if ($LASTEXITCODE -ne 0) { throw 'Effective service configuration is invalid; client registration unchanged.' }
+$MCP_HTTP_PORT = [int](($serviceConfig | ConvertFrom-Json).mcp_port)
 Write-Step "Runtime config..."
 $CopilotModel = "claude-sonnet-4.6"
 $CopilotAllowAllTools = $true
@@ -136,6 +139,13 @@ if (Test-Path $ClaudeConfigPath) {
 $claudeMcpJson = @{ mcpServers = @{ engram = @{ type = "http"; url = "http://127.0.0.1:$MCP_HTTP_PORT/mcp" } } } | ConvertTo-Json -Depth 5
 [System.IO.File]::WriteAllText($ClaudeMcpConfigPath, $claudeMcpJson, [System.Text.UTF8Encoding]::new($false))
 Write-Ok $ClaudeMcpConfigPath
+
+Write-Step "Claude session lifecycle hooks (compatible CLI only)"
+& $PythonExe (Join-Path $ProjectRoot 'engram_overlay_entry.py') --role claude-monitor-hooks --provision --apply
+if ($LASTEXITCODE -ne 0) { throw 'Claude lifecycle hook provisioning failed; inspect settings JSON before retrying.' }
+Write-Step "Codex session lifecycle hooks (existing configuration roots only; /hooks review required)"
+& $PythonExe (Join-Path $ProjectRoot 'engram_overlay_entry.py') --role codex-monitor-hooks --provision --apply
+if ($LASTEXITCODE -ne 0) { throw 'Codex lifecycle hook provisioning failed; inspect settings JSON before retrying.' }
 
 $claudeProjectHardeningScript = @"
 import json

@@ -1478,7 +1478,13 @@ class OverlayEventApiTests(unittest.TestCase):
             self.assertIn("metadata_only", text)
             self.assertIn("selected_renderer_id", text)
         self.assertIn('text="?", width=3', settings)
-        self.assertIn("커스텀 오버레이 적용 방법", settings)
+        # "적용"은 이미 렌더러를 가지고 있다고 전제하는 말이라 "만들 수 있다"는
+        # 사실을 가린다. 계획 §2.1 에서 문구와 목적지를 함께 바꿨다.
+        self.assertNotIn("커스텀 오버레이 적용 방법", settings)
+        self.assertIn("직접 만들거나 가져오기", settings)
+        self.assertIn("open_overlay_make_your_own", settings)
+        self.assertIn("직접 만들기", settings)
+        self.assertIn("예제 받기", settings)
         readme = (root / "README.md").read_text(encoding="utf-8")
         for expected in (
             "https://github.com/JJHbrams/engram-overlay",

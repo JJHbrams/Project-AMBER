@@ -25,6 +25,7 @@ if sys.platform == "win32":
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from mcp.server.fastmcp import FastMCP, Context
+from mcp.types import CallToolResult, TextContent
 
 from core.storage.db import initialize_db, get_connection
 from core.identity import (
@@ -75,6 +76,7 @@ from core.integrations.git_policy_hook import ensure_repo_policy
 from core.memory.bus import memory_bus
 from core.context.project_scope import resolve_scope_key, resolve_project_key, resolve_kg_node_id, cwd_is_foreign, get_global_scope_key
 from core.graph.semantic import checkpoint_open_session
+from core.integrations.engram_bootstrap import session_title_directive
 
 # DB 초기화
 initialize_db()
@@ -82,12 +84,59 @@ initialize_db()
 from core.observability.call_log import call_log as _call_log
 
 # host/port는 __main__ 블록에서 argparse 이후 재설정됨 (SSE 모드 전용)
-engramMCP = FastMCP("engram", instructions="Project Intel Engram 정신체의 기억·정체성·테마를 관리하는 도구 모음", stateless_http=True)
+engramMCP = FastMCP(
+    "engram",
+    instructions="Project Intel Engram 정신체의 기억·정체성·테마를 관리하는 도구 모음. "
+                 + session_title_directive(),
+    stateless_http=False,
+)
+from core.integrations.mcp_presence import PresenceReporter, PresenceMiddleware, TransportIdentityFilter
+from core.integrations.project_metadata import ClientRootProjectResolver
+_mcp_presence = PresenceReporter()
+_client_root_projects = ClientRootProjectResolver()
+for _transport_logger in ('mcp.server.streamable_http_manager', 'mcp.server.streamable_http'):
+    logging.getLogger(_transport_logger).addFilter(TransportIdentityFilter())
 
 import functools as _functools
 import inspect as _inspect
+from pydantic import StrictInt as _StrictInt
 
 _orig_tool = engramMCP.tool.__func__ if hasattr(engramMCP.tool, "__func__") else engramMCP.tool
+
+
+async def _refresh_client_root_project(context):
+    """Best-effort automatic label refresh; client URIs never leave this call."""
+    try:
+        identity = _mcp_presence.context_identity(context)
+        if not identity or identity[1]:
+            return
+        label = await _client_root_projects.resolve(context, identity[0])
+        if label:
+            await asyncio.to_thread(_mcp_presence.report_project, context, label, None, source=2)
+    except Exception:
+        pass
+
+
+async def _report_bootstrap_project(context, project_name, project_key, cwd):
+    """Apply explicit > advertised root > caller textual fallback precedence."""
+    from overlay.state_api import project_display_name
+    # An explicitly supplied name is authoritative, including an invalid one:
+    # never quietly replace a rejected explicit value with an inferred label.
+    if project_name is not None:
+        name = project_display_name(project_name)
+        if name is not None:
+            await asyncio.to_thread(_mcp_presence.report_project, context, name, None, source=3)
+        return
+    identity = _mcp_presence.context_identity(context)
+    if identity and not identity[1]:
+        root_name = await _client_root_projects.resolve(context, identity[0])
+        if root_name:
+            await asyncio.to_thread(_mcp_presence.report_project, context, root_name, None, source=2)
+            return
+    # project_key is textual metadata only.  If it is not a safe display label,
+    # report_project may use the caller's cwd basename; neither is persisted raw.
+    safe_key = project_display_name(project_key or None)
+    await asyncio.to_thread(_mcp_presence.report_project, context, safe_key, cwd or None, source=1)
 
 # 서버 시작 시 1회 스냅샷 — config.yaml tools.disabled 목록
 from core.config.runtime_config import (
@@ -111,16 +160,40 @@ def _tool_with_log(*args, **kwargs):
 
             @_functools.wraps(fn)
             async def logged_async(*a, **kw):
-                _call_log.record(fn.__name__, kw)
-                return await fn(*a, **kw)
+                context = engramMCP.get_context()
+                native_event = fn.__name__ in {'engram_report_claude_event', 'engram_report_codex_event'}
+                if not native_event:
+                    _mcp_presence.report_context(context)
+                logged = {} if fn.__name__ in {'engram_report_session_state', 'engram_report_session_title', 'engram_report_session_project', 'engram_report_claude_event', 'engram_report_codex_event'} else dict(kw)
+                if fn.__name__ == 'engram_get_context_once':
+                    logged.pop('cwd', None)
+                    logged.pop('project_name', None)
+                    logged.pop('project_key', None)
+                _call_log.record(fn.__name__, logged)
+                result = await fn(*a, **kw)
+                structured = getattr(result, 'structuredContent', result)
+                try:
+                    native_child = _inspect.signature(fn).bind_partial(*a, **kw).arguments.get('agent_id') not in (None, '')
+                except TypeError:
+                    native_child = True  # malformed calls never earn an automatic refresh
+                if (native_event and not native_child and isinstance(structured, dict)
+                        and structured.get('accepted')):
+                    await _refresh_client_root_project(context)
+                elif not native_event and fn.__name__ != 'engram_get_context_once':
+                    await _refresh_client_root_project(context)
+                return result
 
             return decorator(logged_async)
         else:
 
             @_functools.wraps(fn)
-            def logged_sync(*a, **kw):
+            async def logged_sync(*a, **kw):
+                context = engramMCP.get_context()
+                _mcp_presence.report_context(context)
                 _call_log.record(fn.__name__, kw)
-                return fn(*a, **kw)
+                result = fn(*a, **kw)
+                await _refresh_client_root_project(context)
+                return result
 
             return decorator(logged_sync)
 
@@ -128,6 +201,105 @@ def _tool_with_log(*args, **kwargs):
 
 
 engramMCP.tool = _tool_with_log
+
+
+@engramMCP.tool()
+async def engram_report_session_state(state: str, label: str | None = None,
+                                      subagent_count: _StrictInt | None = None) -> dict:
+    """Report this MCP connection's overlay state, without an identity argument.
+
+    States: working, needs_input, ready, blocked, unknown. Label must be a short
+    safe alias (no paths/content); subagent_count is 0..9999. This is an explicit
+    producer, not automatic provider instrumentation. Bubble-owned state is denied.
+    """
+    import asyncio
+    context = engramMCP.get_context()
+    return await asyncio.to_thread(_mcp_presence.report_state, context, state, label, subagent_count)
+
+
+@engramMCP.tool()
+async def engram_report_session_title(title: str) -> dict:
+    """Set a 2–8 word safe title for this live MCP connection only.
+
+    No session key, state, approval, or content argument is accepted.  This
+    metadata path is also allowed for the local bubble owner, but cannot alter
+    the bubble controller's state.
+    """
+    context = engramMCP.get_context()
+    return await asyncio.to_thread(_mcp_presence.report_title, context, title)
+
+
+@engramMCP.tool()
+async def engram_report_session_project(project_name: str | None = None, cwd: str | None = None) -> dict:
+    """Report this connection's short project name or caller cwd basename only.
+
+    No session identity argument. Raw cwd is never published to overlay state.
+    Project name takes precedence; no server-directory or content inference.
+    """
+    return await asyncio.to_thread(_mcp_presence.report_project, engramMCP.get_context(), project_name, cwd,
+                                   source=3 if project_name is not None else 1)
+
+
+@engramMCP.tool()
+async def engram_report_claude_event(event: str, turn_id: str | None = None,
+                                    agent_id: str | None = None,
+                                    tool_name: str | None = None,
+                                    tool_use_id: str | None = None,
+                                    native_session_id: str | None = None) -> CallToolResult:
+    """Native Claude hook only: report a safe event on this MCP connection.
+
+    Optional native session ID is privately hashed for safe title restoration.
+    No prompt, response, transcript or tool input.
+    turn_id is the hook prompt_id UUID, used privately for stale-turn fencing.
+    Non-root agent events are ignored. Never call this tool to infer work from
+    ordinary MCP activity; use Claude's opt-in native mcp_tool hooks.
+    """
+    result = await asyncio.to_thread(_mcp_presence.report_claude_event,
+                                    engramMCP.get_context(), event, turn_id,
+                                    agent_id, tool_name, tool_use_id, native_session_id)
+    # Claude's native hook parser reads text, not our diagnostic structure.
+    # Keep text strictly in the documented non-blocking hook JSON shape.
+    hook_output = {"suppressOutput": True}
+    if "hookSpecificOutput" in result:
+        hook_output["hookSpecificOutput"] = result["hookSpecificOutput"]
+    return CallToolResult(content=[TextContent(type="text", text=json.dumps(hook_output))],
+                          structuredContent=result)
+
+
+@engramMCP.tool()
+async def engram_report_codex_event(event: str, turn_id: str,
+                                   tool_name: str | None = None,
+                                   tool_use_id: str | None = None,
+                                   native_session_id: str | None = None,
+                                   agent_id: str | None = None) -> CallToolResult:
+    """Native Codex MCP hook only; never call manually to infer work.
+
+    Accepts UserPromptSubmit, PreToolUse, PostToolUse, PermissionRequest,
+    Stop and Interrupt. turn_id is Codex's opaque ephemeral turn ID, hashed
+    privately for stale-turn fencing. Optional native session ID is privately
+    hashed for safe title restoration. No prompt, transcript,
+    output or tool input. Uses this existing MCP connection only.
+    """
+    result = await asyncio.to_thread(_mcp_presence.report_codex_event,
+                                    engramMCP.get_context(), event, turn_id,
+                                    tool_name, tool_use_id, native_session_id, agent_id)
+    # Codex rejects suppressOutput on PreToolUse. Empty JSON is a successful
+    # non-blocking hook; only the documented title context is model-visible.
+    output = ({'hookSpecificOutput': result['hookSpecificOutput']}
+              if 'hookSpecificOutput' in result else {})
+    return CallToolResult(content=[TextContent(type='text', text=json.dumps(output))],
+                          structuredContent=result)
+
+
+# FastMCP's default argument models ignore extra keys. This identity-free tool
+# must reject them rather than silently accepting a caller-supplied session ID.
+for _metadata_tool_name in ('engram_report_session_state', 'engram_report_session_title', 'engram_report_session_project', 'engram_report_claude_event', 'engram_report_codex_event'):
+    _metadata_tool = engramMCP._tool_manager.get_tool(_metadata_tool_name)
+    if _metadata_tool is not None:
+        _metadata_tool.fn_metadata.arg_model.model_config['extra'] = 'forbid'
+        _metadata_tool.fn_metadata.arg_model.model_config['hide_input_in_errors'] = True
+        _metadata_tool.fn_metadata.arg_model.model_rebuild(force=True)
+        _metadata_tool.parameters = _metadata_tool.fn_metadata.arg_model.model_json_schema()
 
 
 # 세션별 컨텍스트 초기화 dedupe (TTL 만료 전까지 유지)
@@ -183,7 +355,9 @@ def _context_session_fingerprint(ctx: Context | None) -> str:
         pass
 
     try:
-        is_stateless = getattr(engramMCP.settings, "stateless_http", False)
+        # Preserve the established STM dedupe/binding policy. Transport presence
+        # now uses stateful server handles, but must not silently rekey STM rows.
+        is_stateless = True
         if is_stateless:
             # stateless 모드: 프로세스 수명 동안 고정된 토큰 사용
             parts.append(f"startup:{_SERVER_STARTUP_TOKEN}")
@@ -244,11 +418,18 @@ _STM_RETRY_INTERVAL: float = 30.0  # 재연결 쿨다운 (초)
 def _try_connect_stm() -> str | None:
     """overlay STM 서버에 연결을 시도하고 base URL 반환. 실패 시 None."""
     try:
-        port = int(os.environ.get("ENGRAM_STM_PORT", "17384"))
+        from core.install.service_config import effective_service_config
+        port = int(os.environ.get("ENGRAM_STM_PORT") or effective_service_config()['overlay']['stm_server_port'])
         import urllib.request
 
         with urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=1) as resp:
             if resp.status == 200:
+                parent = int(os.environ.get('ENGRAM_RUNTIME_PARENT_PID', '0') or 0)
+                if parent:
+                    import json
+                    info = json.loads(resp.read())
+                    if info.get('role') != 'overlay-stm' or info.get('pid') != parent:
+                        return None
                 return f"http://127.0.0.1:{port}"
     except Exception:
         pass
@@ -827,6 +1008,7 @@ async def engram_get_context_once(
     cwd: str = "",
     ctx: Context | None = None,
     client_token: str = "",
+    project_name: str | None = None,
 ) -> str:
     """세션 단위 컨텍스트 초기화를 1회만 수행합니다.
 
@@ -840,6 +1022,14 @@ async def engram_get_context_once(
     session_fingerprint = _context_session_fingerprint(ctx)
     if client_token and not _root_client_token_active(client_token):
         return "[engram] invalid root client token."
+    # Caller-owned display metadata must refresh even on a context-cache hit.
+    # Do not use effective/server cwd or STM fingerprints for overlay identity.
+    # A caller project key may be a machine identifier rather than display text.
+    # Only a safe key precedes cwd; an explicit invalid project_name is rejected.
+    try:
+        await _report_bootstrap_project(ctx or engramMCP.get_context(), project_name, project_key, cwd)
+    except Exception:
+        pass  # Overlay metadata cannot block ordinary context bootstrap.
     cache_key = _build_context_once_key(
         caller,
         scope_key,
@@ -3622,7 +3812,9 @@ def _build_hybrid_http_app():
         app.router.routes.append(route)
         existing.add(key)
 
-    return app
+    if hasattr(engramMCP._session_manager, 'session_idle_timeout'):
+        engramMCP._session_manager.session_idle_timeout = 1800
+    return PresenceMiddleware(app, _mcp_presence, path=engramMCP.settings.streamable_http_path)
 
 
 # ── 원격 리스너 가드 ──────────────────────────────────────────────────────────
@@ -3737,6 +3929,12 @@ class RemoteGuardMiddleware:
                 detail="missing or unknown bearer token",
             )
             return await _asgi_send_json(send, 401, {"error": "unauthorized"})
+
+        # An internal scope marker, never a client header. Bind stateful MCP
+        # handles to this exact credential and listener domain.
+        import hashlib
+        scope = dict(scope)
+        scope['engram.remote_principal'] = hashlib.sha256(token.encode()).hexdigest()
 
         # 2) tools/call deny 검사 — 본문이 있는 요청만 버퍼링한다.
         #    GET(SSE)은 receive 에 손대지 않는다.

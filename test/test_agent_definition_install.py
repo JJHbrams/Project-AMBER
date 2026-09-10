@@ -69,7 +69,9 @@ def test_07_shims_uses_provider_specific_agent_deployment():
     # planner/coder/servant 는 아무나 쓸 이름이라, 무조건 복사는 사용자가 같은
     # 이름으로 만든 에이전트를 백업도 없이 지운다. provenance 해시로 우리가 쓴
     # 내용인지 판정하고, 아닐 때는 건드리지 않는다.
-    assert "Get-FileHash" in helper
+    assert "[Security.Cryptography.SHA256]::Create()" in helper
+    assert "[IO.File]::OpenRead" in helper
+    assert "Get-FileHash" not in helper
     assert "provenance" in helper.lower()
     assert "agent-definitions.json" in helper
     assert "-LiteralPath $source -Destination $destination -Force" in helper
@@ -206,6 +208,55 @@ def test_windows_agent_deployment_can_repair_only_claude():
                 f"{path} was overwritten; the installer must not clobber files it did not write"
             )
         assert "SKIP" in result.stdout, "건너뛴 사실을 사용자에게 말해야 한다"
+
+
+# ── 진입점이 둘이다: 설치본은 configure.ps1, 소스 설치는 modules/07_shims.ps1.
+#    한쪽에만 배선하면 그쪽 사용자만 받는다. 실제로 subagent 정의가 소스 경로에만
+#    배선돼 있어서 AMBER 설치본 사용자는 planner/coder/servant 를 받지 못했다.
+#    기존 테스트는 shims 에 있는지만 확인해 그 공백을 잡지 못했다.
+
+def test_installed_path_also_deploys_agent_definitions():
+    configure = (ROOT / "installer" / "configure.ps1").read_text(encoding="utf-8-sig")
+    assert "deploy_agent_definitions.ps1" in configure, (
+        "configure.ps1 is what setup.exe runs; without this the installed user "
+        "never gets planner/coder/servant"
+    )
+    assert "-ProjectRoot $InstallDir" in configure, (
+        "configure.ps1 has no $ProjectRoot; the install root is $InstallDir"
+    )
+
+
+def test_installer_ships_the_sources_and_the_deployer():
+    iss = (ROOT / "installer" / "engram-overlay.iss").read_text(encoding="utf-8-sig")
+    assert r'Source: "..\config\agents\*"' in iss, (
+        "the deployer throws when a provider source is missing, so the sources "
+        "have to be shipped too"
+    )
+    assert 'Source: "deploy_agent_definitions.ps1"' in iss
+
+
+def test_provider_formats_stay_separate():
+    helper = (ROOT / "installer" / "deploy_agent_definitions.ps1").read_text(encoding="utf-8-sig")
+    # One shared file copied to three places was the earlier bug: the formats
+    # differ, so a Claude .md dropped into ~/.codex/agents is not a definition.
+    for source, destination, extension in (
+        ("claude", r".claude\agents", '".md"'),
+        ("copilot", r".copilot\agents", '".agent.md"'),
+        ("codex", r".codex\agents", '".toml"'),
+    ):
+        assert source in helper
+        assert destination in helper
+        assert extension in helper
+
+
+def test_agent_definition_failure_does_not_stop_core_setup():
+    configure = (ROOT / "installer" / "configure.ps1").read_text(encoding="utf-8-sig")
+    block = configure[configure.index("$AgentDefinitionsInstaller"):]
+    block = block[:block.index("# ── 외부 오버레이")]
+    assert "try {" in block and "catch {" in block, (
+        "a missing provider source must not fail the whole install"
+    )
+    assert "Write-Warn" in block, "it must say what was skipped"
 
 
 def _run_deploy(profile: Path, *extra: str):

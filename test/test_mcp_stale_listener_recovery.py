@@ -16,6 +16,7 @@ def _identity(executable: Path, arguments: str, *, pid: int = 2828, parent: int 
         "Name": executable.name,
         "ExecutablePath": str(executable),
         "CommandLine": f'"{executable}" {arguments}'.strip(),
+        "CreationDate": "2026-09-09T00:00:00Z",
     }
 
 
@@ -111,6 +112,8 @@ class SourceChildIdentityTests(unittest.TestCase):
         kernel = Mock()
         kernel.OpenProcess.return_value = 123
         kernel.TerminateProcess.return_value = 1
+        kernel.GetExitCodeProcess.side_effect = lambda _handle, output: setattr(output._obj, 'value', 259) or 1
+        kernel.WaitForSingleObject.return_value = 0
         with patch.object(process_identity, "get_process_identity", return_value=reparented), patch.object(
             process_identity.ctypes, "windll", Mock(kernel32=kernel), create=True
         ):

@@ -413,6 +413,7 @@ VS Code Copilot과 wt 터미널 간 STM(단기 기억) 공유를 가능하게 �
 | 엔드포인트           | 메서드 | 설명                                         |
 | -------------------- | ------ | -------------------------------------------- |
 | `/health`            | GET    | `{ status: "ok", pid }` 헬스체크             |
+| `/state`             | GET/POST | loopback 세션 스택 상태. Bearer discovery token 필요, STM 저장소와 분리 |
 | `/stm/session/start` | POST   | `{ session_id, scope_key }` 세션 시작        |
 | `/stm/message`       | POST   | `{ status }` 메시지 저장 (request_id 멱등성) |
 | `/stm/messages`      | GET    | `?scope_key=...` → `{ messages: [...] }`     |

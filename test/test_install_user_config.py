@@ -104,7 +104,8 @@ session:
         self.assertIn('Engram Overlay.lnk', source_install)
         self.assertIn('Engram Overlay.lnk', shortcuts)
         self.assertIn('"AMBER (ENGRAM)"', shortcuts)
-        self.assertIn('"AMBER (ENGRAM) — Auto Start"', shortcuts)
+        startup = (ROOT / "installer" / "joint-startup.ps1").read_text(encoding="utf-8-sig")
+        self.assertIn("'AMBER (ENGRAM) ' + [char]0x2014 + ' Auto Start'", startup)
         self.assertIn('_STARTUP_LINK = _STARTUP_DIR / "AMBER (ENGRAM).lnk"', settings)
         self.assertIn('_LEGACY_STARTUP_LINK = _STARTUP_DIR / "engram-overlay.lnk"', settings)
         self.assertIn("AMBER (ENGRAM) \\u2014 Auto Start", settings)
@@ -172,21 +173,42 @@ session:
         self.assertIn("if CurStep = ssPostInstall then", run_configure)
         self.assertEqual(run_configure.count("RunConfigure;"), 2)  # declaration plus one invocation
 
-    def test_external_overlay_page_is_explicitly_unavailable_but_mode_is_propagated(self):
+    def test_external_overlay_page_asks_for_a_character_and_propagates_the_choice(self):
+        """이전 계약은 "선택지가 상시 비활성"이었다.
+
+        위저드가 배포 형태(Preset provider / Renderer SDK)를 물었고 그 둘이 늘
+        사용 불가였다. 설치하는 사람이 답할 수 없는 질문이라 캐릭터 선택으로
+        바꿨고, SDK 는 배타 선택이 아니므로 같은 페이지의 체크박스로 옮겼다.
+        docs/dev/external-overlay-install-plan.md §2
+        """
         iss = (ROOT / "installer" / "engram-overlay.iss").read_text(encoding="utf-8-sig")
         configure = (ROOT / "installer" / "configure.ps1").read_text(encoding="utf-8-sig")
 
-        self.assertIn("ExternalOverlayPage: TInputOptionWizardPage", iss)
-        self.assertIn("ExternalOverlayPage.Add('설치 안 함 (권장)')", iss)
-        self.assertIn("Preset provider — 현재 릴리스에서 사용 불가", iss)
-        self.assertIn("Renderer SDK — 현재 릴리스에서 사용 불가", iss)
-        self.assertIn("-ExternalOverlayMode ' + ExternalOverlayModeCode()", iss)
-        self.assertIn("CurPageID = ExternalOverlayPage.ID", iss)
-        self.assertIn("CurPageID = wpFinished", iss)
-        self.assertIn('[ValidateSet("none", "presets", "sdk")]', configure)
-        self.assertIn("v1.1.0.89 has no self-contained provider/SDK asset", configure)
-        self.assertIn("external overlay was NOT installed", configure)
-        self.assertNotIn("releases/latest", iss + configure)
+        self.assertIn('[Components]', iss)
+        self.assertIn('external-components\\tree.iss', iss)
+        self.assertIn('Name: "sdk";', iss)
+        self.assertIn('현재 캐릭터를 변경하지 않음', iss)
+        for gone in ("설치 안 함 (권장)", "Preset provider", "Renderer SDK", "현재 릴리스에서 사용 불가"):
+            self.assertNotIn(gone, iss, f"{gone!r} was the unanswerable question")
+
+        # 선택과 SDK 플래그가 둘 다 configure 로 전달된다.
+        self.assertIn("-ExternalOverlayComponents ' + Q + ExternalOverlayComponentsCode()", iss)
+        self.assertIn("-ExternalOverlaySdk ' + ExternalOverlaySdkCode()", iss)
+        self.assertIn("$ExternalOverlaySdk", configure)
+        self.assertIn('Install-EngramExternalComponents', configure)
+        self.assertIn("wpFinished", iss, "the finish page still reports where to change it")
+
+        # 위저드는 결과를 단정하지 않는다 — configure 가 Python 적격성과 기존
+        # 런타임 소유권을 보고 판정한다.
+        self.assertNotIn("external overlay was NOT installed", configure)
+        helper = (ROOT / "installer" / "joint-startup.ps1").read_text(encoding="utf-8-sig")
+        self.assertIn("Initialize-EngramExternalRuntime -Mode $ExternalOverlayMode", configure)
+        self.assertIn("Install-ExternalOverlayRuntime", helper)
+        self.assertIn("Requested external runtime could not be installed", helper)
+
+        # 핀 버전은 리터럴이 아니라 빌드 define 이다.
+        self.assertNotIn("v1.1.0.89", iss + configure)
+        self.assertIn("{#ExternalOverlayVersion}", iss)
 
     def test_installer_stops_only_the_target_artifact_before_copying_files(self):
         iss = (ROOT / "installer" / "engram-overlay.iss").read_text(encoding="utf-8-sig")

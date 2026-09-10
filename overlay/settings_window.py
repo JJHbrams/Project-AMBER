@@ -84,12 +84,33 @@ _POLICY_LEVEL_DISPLAY_TO_VALUE = {
     "Agent 강제 · 사람 경고 (권장)": "enforce_agents",
 }
 OVERLAY_EVENT_API_MANUAL_URL = "http://localhost:8501/?page=manual&manual=overlay-event-api"
+# 프로토콜 명세가 아니라 시작 안내가 첫 화면이어야 한다. "나도 만들 수 있나?" 하고
+# 누른 사람에게 JSONL 와이어 규격을 내밀면 그 자리에서 끝난다. 명세는 이 안내 안의
+# 링크로 이어진다. docs/dev/external-overlay-install-plan.md §2.1
+OVERLAY_MAKE_YOUR_OWN_URL = "https://github.com/JJHbrams/engram-overlay#readme"
+OVERLAY_PRESET_RELEASES_URL = "https://github.com/JJHbrams/engram-overlay/releases/latest"
 
 
 def open_overlay_event_api_manual(opener: Callable[[str], object] | None = None) -> object:
     """Open the installed manual page; injected opener keeps this UI action testable."""
     opener = opener or webbrowser.open
     return opener(OVERLAY_EVENT_API_MANUAL_URL)
+
+
+def open_overlay_make_your_own(opener: Callable[[str], object] | None = None) -> object:
+    """Getting started with your own renderer — clone, install-dev, the skill."""
+    opener = opener or webbrowser.open
+    local = Path.home() / ".engram" / "make-your-own-overlay.md"
+    if local.is_file():
+        # installer 가 SDK 옵션으로 놓아둔 안내가 있으면 그쪽이 이 설치본에 맞다.
+        return opener(local.as_uri())
+    return opener(OVERLAY_MAKE_YOUR_OWN_URL)
+
+
+def open_overlay_preset_releases(opener: Callable[[str], object] | None = None) -> object:
+    """Where the bundled preset renderers are published."""
+    opener = opener or webbrowser.open
+    return opener(OVERLAY_PRESET_RELEASES_URL)
 
 
 def _manual_ssh_key_available(host: str) -> bool:
@@ -140,6 +161,7 @@ _THOUGHT_DETAIL_VALUE_TO_DISPLAY = {
 }
 
 _CHARACTER_SOURCE_MODE_DISPLAY_TO_VALUE = {
+    "내장 볼따구": "native_bolttagu",
     "스프라이트 그리드": "sprite_grid",
     "단일 이미지": "static",
     "애니메이션 폴더": "sequence",
@@ -399,6 +421,8 @@ def validate_sprite_grid(
 def validate_character_source(mode: object, character_path: object, grid_values: tuple[object, object, object, object, object, object]) -> tuple[bool, str]:
     """Validate the active character-source mode before a settings write."""
     normalized_mode = str(mode or "").strip()
+    if normalized_mode == "native_bolttagu":
+        return True, "Engram 내장 볼따구 (외부 설치 불필요)"
     if normalized_mode == "sprite_grid":
         return validate_sprite_grid(*grid_values)
     source_path = _resolve_character_source_path(character_path, normalized_mode)
@@ -785,7 +809,7 @@ class _SettingsWindow:
         f = self._tab_overlay
 
         self._custom_overlay_help_label = ttk.Label(
-            f, text="커스텀 오버레이 적용 방법", foreground="gray"
+            f, text="직접 만들거나 가져오기", foreground="gray"
         )
         self._custom_overlay_help_label.grid(row=0, column=0, columnspan=3, sticky="e", padx=(8, 2), pady=(5, 0))
         self._custom_overlay_help_button = ttk.Button(
@@ -809,6 +833,16 @@ class _SettingsWindow:
         self._renderer_mode_combo = ttk.Combobox(renderer_box, textvariable=self._renderer_mode_var, state="readonly", width=14)
         self._renderer_mode_combo.grid(row=1, column=1, sticky="w", **PAD)
         ttk.Label(renderer_box, textvariable=self._renderer_status_var, foreground="gray", wraplength=650).grid(row=2, column=0, columnspan=2, sticky="w", padx=8, pady=(0, 4))
+        # 연결된 renderer 가 없을 때 이 자리는 "확인하는 중입니다" 만 남는 죽은 공간이었다.
+        # 기본 캐릭터가 질린 사람이 실제로 오는 곳이 설정이므로, 동기가 생기는 자리에
+        # 다음 행동이 있어야 한다. 계획 §2.1
+        self._renderer_empty_actions = ttk.Frame(renderer_box)
+        ttk.Button(self._renderer_empty_actions, text="직접 만들기",
+                   command=open_overlay_make_your_own).grid(row=0, column=0, padx=(0, 6))
+        ttk.Button(self._renderer_empty_actions, text="예제 받기",
+                   command=open_overlay_preset_releases).grid(row=0, column=1)
+        self._renderer_empty_actions.grid(row=3, column=0, columnspan=2, sticky="w", padx=8, pady=(0, 6))
+        self._renderer_empty_actions.grid_remove()
         self._renderer_combo.bind("<<ComboboxSelected>>", self._on_renderer_selected)
 
         # 캐릭터 소스 — 서로 배타적인 세 모드를 한 프레임에 모아 이후 설정 행과 겹치지 않게 둔다.
@@ -826,6 +860,19 @@ class _SettingsWindow:
         )
         ttk.Label(source_box, text="방식:").grid(row=0, column=0, sticky="w", **PAD)
         self._char_source_mode_combo.grid(row=0, column=1, sticky="w", **PAD)
+        native_box = ttk.Frame(source_box)
+        native_box.grid(row=20, column=0, columnspan=4, sticky="ew", padx=8, pady=6)
+        self._bolttagu_face_var = tk.BooleanVar(value=True)
+        self._bolttagu_floor_var = tk.BooleanVar(value=False)
+        self._bolttagu_mapping_var = tk.StringVar(value="")
+        ttk.Checkbutton(native_box, text="볼따구 시선 따라가기", variable=self._bolttagu_face_var).pack(side="left")
+        ttk.Checkbutton(native_box, text="바닥 표시", variable=self._bolttagu_floor_var).pack(side="left")
+        ttk.Button(native_box, text="매핑 가져오기…", command=self._import_bolttagu_mapping).pack(side="left", padx=6)
+        ttk.Button(native_box, text="기본 매핑", command=lambda: self._bolttagu_mapping_var.set("")).pack(side="left")
+        ttk.Button(native_box, text="매핑 편집…", command=self._edit_bolttagu_mapping).pack(side="left", padx=6)
+        ttk.Label(source_box, textvariable=self._bolttagu_mapping_var, wraplength=600).grid(row=21, column=0, columnspan=4, sticky="w", padx=8)
+        self._bolttagu_warning_var = tk.StringVar()
+        ttk.Label(source_box, textvariable=self._bolttagu_warning_var, foreground='#b05b22', wraplength=700).grid(row=22, column=0, columnspan=4, sticky='w', padx=8)
         self._char_path_var = tk.StringVar()
         ttk.Label(source_box, text="이미지 / 폴더:").grid(row=1, column=0, sticky="w", **PAD)
         self._char_path_entry = ttk.Entry(source_box, textvariable=self._char_path_var, width=28)
@@ -2125,6 +2172,10 @@ class _SettingsWindow:
         mode = _nested_get(cfg, ["overlay", "character", "source_mode"], "")
         stored_mode = str(mode or ("sequence" if Path(str(char_name or "")).is_dir() else "static"))
         self._char_source_mode_var.set(character_source_mode_to_display(stored_mode))
+        self._bolttagu_face_var.set(_nested_get(cfg, ["overlay", "character", "bolttagu", "face_pointer"], True))
+        self._bolttagu_floor_var.set(_nested_get(cfg, ["overlay", "character", "bolttagu", "show_floor"], False))
+        self._bolttagu_mapping_var.set(_nested_get(cfg, ["overlay", "character", "bolttagu", "mapping_path"], ""))
+        self._bolttagu_warning_var.set(_nested_get(cfg, ['overlay', 'native_bolttagu_warning'], ''))
         grid = _nested_get(cfg, ["overlay", "character", "reactions", "grid"], {}) or {}
         self._grid_path_var.set(str(_nested_get(cfg, ["overlay", "character", "reactions", "sprite_sheet"], "")))
         self._grid_columns_var.set(str(grid.get("columns", 6)))
@@ -2346,6 +2397,35 @@ class _SettingsWindow:
             path, self._grid_columns_var.get(), self._grid_rows_var.get(),
             self._grid_cell_width_var.get(), self._grid_cell_height_var.get(), self._grid_chroma_var.get(),
         )
+
+    def _import_bolttagu_mapping(self) -> None:
+        from overlay.bolttagu_mapping import validate_mapping_file
+        selected = filedialog.askopenfilename(parent=self.window, title="볼따구 매핑 JSON 선택", filetypes=[("JSON", "*.json")])
+        if not selected:
+            return
+        try:
+            validate_mapping_file(Path(selected))
+        except (OSError, ValueError) as exc:
+            messagebox.showerror("매핑을 가져올 수 없습니다", str(exc), parent=self.window)
+            return
+        from core.install.native_bolttagu import import_mapping
+        try:
+            target = import_mapping(Path(selected), _USER_CONFIG_PATH.parent / 'native-bolttagu' / 'mappings')
+            self._bolttagu_mapping_var.set(str(target))
+        except (OSError, ValueError) as exc:
+            messagebox.showerror('가져오기 실패', str(exc), parent=self.window)
+
+    def _edit_bolttagu_mapping(self) -> None:
+        from overlay.bolttagu_editor import BolttaguMappingEditor
+        try:
+            path = self._bolttagu_mapping_var.get()
+            self._bolttagu_editor = BolttaguMappingEditor(
+                self.window, Path(path) if path else None,
+                _USER_CONFIG_PATH.parent / 'native-bolttagu' / 'mappings',
+                self._bolttagu_mapping_var.set,
+            )
+        except (OSError, ValueError) as exc:
+            messagebox.showerror('매핑 편집 실패', str(exc), parent=self.window)
 
     def _on_character_source_mode_changed(self, _event=None) -> None:
         self._apply_character_source_mode()
@@ -2732,7 +2812,28 @@ class _SettingsWindow:
             self._renderer_var.set(selected or "기본 오버레이 사용")
             self._on_renderer_selected()
         diagnosis = f" · 사용 불가 {len(diagnostics)}개 ({diagnostics[0].reason})" if diagnostics else ""
-        self._renderer_status_var.set(legacy or f"연결된 외부 오버레이 {len(renderers)}개{diagnosis}. 선택은 즉시 적용됩니다.")
+        if renderers:
+            self._renderer_status_var.set(legacy or f"연결된 외부 오버레이 {len(renderers)}개{diagnosis}. 선택은 즉시 적용됩니다.")
+            self._set_renderer_empty_actions(False)
+        else:
+            self._renderer_status_var.set(
+                legacy or "연결된 외부 오버레이가 없습니다 — 기본 캐릭터를 쓰고 있습니다."
+                          " 캐릭터는 별도 프로그램이며, 실행해 두면 여기 목록에 나타납니다."
+            )
+            self._set_renderer_empty_actions(True)
+
+    def _set_renderer_empty_actions(self, visible: bool) -> None:
+        """Show the next action only when there is nothing connected to choose."""
+        frame = getattr(self, "_renderer_empty_actions", None)
+        if frame is None:
+            return
+        try:
+            if visible:
+                frame.grid()
+            else:
+                frame.grid_remove()
+        except Exception:
+            pass
 
     def _on_renderer_selected(self, _event=None) -> None:
         renderer = self._renderers.get(self._renderer_var.get())
@@ -2778,6 +2879,17 @@ class _SettingsWindow:
         char_path = self._char_path_var.get().strip()
         _nested_set(user, ["overlay", "character", "name"], char_path or None)
         _nested_set(user, ["overlay", "character", "source_mode"], mode)
+        _nested_set(user, ["overlay", "native_bolttagu_migration"], 1)
+        if hasattr(self, '_bolttagu_mapping_var'):
+            mapping_path = self._bolttagu_mapping_var.get()
+            if mapping_path:
+                from overlay.bolttagu_mapping import validate_mapping_file
+                validate_mapping_file(Path(mapping_path))
+            _nested_set(user, ["overlay", "character", "bolttagu"], {
+                "face_pointer": bool(self._bolttagu_face_var.get()),
+                "show_floor": bool(self._bolttagu_floor_var.get()),
+                "mapping_path": mapping_path,
+            })
         legacy_body_motion = bool(self._legacy_body_motion_var.get())
         _nested_set(user, ["overlay", "character", "effects", "legacy_body_motion"], True if legacy_body_motion else None)
         if mode == "sprite_grid":

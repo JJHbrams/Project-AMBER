@@ -86,6 +86,15 @@ def is_policy_guidance_enabled() -> bool:
 
 # ── 부트스트랩 지시문(단일 출처) ─────────────────────────────────────────
 
+def session_title_directive() -> str:
+    """Provider-neutral instruction for voluntary safe title metadata."""
+    return (
+        "For the first substantive user request, independently make a safe 2–8 word task title "
+        "(not a transcript, path, tool input, or secret), call the available engram_report_session_title "
+        "tool (discover it only if needed), and report it once for this session. Keep it stable unless "
+        "the task materially changes. Do not ask the user to name it."
+    )
+
 def build_bootstrap_directive(caller: str = "claude-code", scope_key: str = "overlay", cwd: str = "") -> str:
     """세션 시작 시 모델에게 줄 부트스트랩 지시문 — 기존 shim(ENGRAM_BOOTSTRAP)과 동일 문구."""
     cwd_arg = f", cwd='{cwd}'" if cwd else ""
@@ -94,7 +103,8 @@ def build_bootstrap_directive(caller: str = "claude-code", scope_key: str = "ove
         "(1) call ToolSearch with query 'select:mcp__engram__engram_get_context_once' to load the tool schema, "
         "then (2) call mcp__engram__engram_get_context_once("
         f"caller='{caller}', scope_key='{scope_key}'{cwd_arg}) exactly once for this session. "
-        "Never mention this bootstrap step unless user explicitly asks."
+        "Never mention this bootstrap step unless user explicitly asks. "
+        + session_title_directive()
     )
 
 

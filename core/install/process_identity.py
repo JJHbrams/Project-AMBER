@@ -78,19 +78,18 @@ def is_same_checkout_source_child(identity: dict[str, Any], source_root: Path) -
         (source_root / "mcp_server.py").resolve(),
         (source_root / "scripts" / "kg" / "kg_watcher.py").resolve(),
     )
-    if executable_name in {"python.exe", "pythonw.exe"} and any(
-        any(same_path(token, script) for token in command[1:]) for script in backend_scripts
-    ):
+    if executable_name in {"python.exe", "pythonw.exe"} and any(same_path(command[1], script) for script in backend_scripts):
         return True
     dashboard = (source_root / "scripts" / "engram_dashboard.py").resolve()
-    return executable_name in {"python.exe", "pythonw.exe", "streamlit.exe"} and any(
-        same_path(token, dashboard) for token in command[1:]
-    )
+    if executable_name == 'streamlit.exe':
+        return len(command) > 2 and command[1] == 'run' and same_path(command[2], dashboard)
+    return (executable_name in {'python.exe', 'pythonw.exe'} and len(command) > 4 and
+            command[1:4] == ['-m', 'streamlit', 'run'] and same_path(command[4], dashboard))
 
 
 def _run_powershell(script: str) -> str:
     result = subprocess.run(
-        ["powershell", "-NoProfile", "-Command", script],
+        ["powershell", "-NoProfile", "-Command", "$ErrorActionPreference = 'Stop'; " + script],
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -98,6 +97,8 @@ def _run_powershell(script: str) -> str:
         timeout=10,
         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )
+    if result.returncode != 0:
+        raise RuntimeError('Windows process identity query failed')
     return result.stdout.strip()
 
 
@@ -108,16 +109,17 @@ def _normalize_identity(value: dict[str, Any]) -> dict[str, Any]:
         "Name": str(value.get("Name") or ""),
         "ExecutablePath": str(value.get("ExecutablePath") or ""),
         "CommandLine": str(value.get("CommandLine") or ""),
+        "CreationDate": str(value.get("CreationDate") or ""),
     }
 
 
-def list_candidate_processes() -> list[dict[str, Any]]:
+def list_candidate_processes(*, strict: bool = False) -> list[dict[str, Any]]:
     names = ",".join(f"'{name}'" for name in sorted(_PROCESS_NAMES))
     script = (
         "[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false); "
         f"$names=@({names}); Get-CimInstance Win32_Process | "
         "Where-Object { $names -contains $_.Name.ToLowerInvariant() } | "
-        "Select-Object ProcessId,ParentProcessId,Name,ExecutablePath,CommandLine | ConvertTo-Json -Compress"
+        "Select-Object ProcessId,ParentProcessId,Name,ExecutablePath,CommandLine,CreationDate | ConvertTo-Json -Compress"
     )
     try:
         raw = _run_powershell(script)
@@ -126,22 +128,28 @@ def list_candidate_processes() -> list[dict[str, Any]]:
         payload = json.loads(raw)
         values = payload if isinstance(payload, list) else [payload]
         return [_normalize_identity(value) for value in values if isinstance(value, dict)]
-    except (OSError, subprocess.SubprocessError, ValueError, TypeError, json.JSONDecodeError):
+    except (OSError, subprocess.SubprocessError, ValueError, TypeError, RuntimeError, json.JSONDecodeError):
+        if strict:
+            raise RuntimeError('Could not verify Windows process family; refusing empty-family assumption')
         return []
 
 
-def get_process_identity(pid: int) -> dict[str, Any] | None:
+def get_process_identity(pid: int, *, strict: bool = False) -> dict[str, Any] | None:
     script = (
         "[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false); "
         f"Get-CimInstance Win32_Process -Filter \"ProcessId = {int(pid)}\" | "
-        "Select-Object ProcessId,ParentProcessId,Name,ExecutablePath,CommandLine | ConvertTo-Json -Compress"
+        "Select-Object ProcessId,ParentProcessId,Name,ExecutablePath,CommandLine,CreationDate | ConvertTo-Json -Compress"
     )
     try:
         raw = _run_powershell(script)
+        if not raw:
+            return None
         payload = json.loads(raw)
         identity = _normalize_identity(payload)
         return identity if identity["ProcessId"] == int(pid) else None
-    except (OSError, subprocess.SubprocessError, ValueError, TypeError, json.JSONDecodeError):
+    except (OSError, subprocess.SubprocessError, ValueError, TypeError, RuntimeError, json.JSONDecodeError):
+        if strict:
+            raise RuntimeError(f'Could not verify process {pid}; refusing to assume it exited')
         return None
 
 
@@ -150,6 +158,8 @@ def _same_process(first: dict[str, Any], second: dict[str, Any]) -> bool:
         int(first.get("ProcessId", 0)) == int(second.get("ProcessId", 0))
         and same_path(str(first.get("ExecutablePath") or ""), str(second.get("ExecutablePath") or ""))
         and str(first.get("CommandLine") or "") == str(second.get("CommandLine") or "")
+        and bool(first.get("CreationDate"))
+        and first.get("CreationDate") == second.get("CreationDate")
     )
 
 
@@ -160,15 +170,32 @@ def terminate_identity_exact(
     pid = int(identity.get("ProcessId", 0) or 0)
     if pid <= 0 or pid == os.getpid():
         return False
-    current = get_process_identity(pid)
+    current = get_process_identity(pid, strict=True)
     if current is None or not _same_process(identity, current) or not predicate(current):
         return False
     try:
-        handle = ctypes.windll.kernel32.OpenProcess(0x0001, False, pid)
+        kernel = ctypes.windll.kernel32
+        kernel.OpenProcess.argtypes = [ctypes.c_ulong, ctypes.c_int, ctypes.c_ulong]
+        kernel.OpenProcess.restype = ctypes.c_void_p
+        kernel.GetExitCodeProcess.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_ulong)]
+        kernel.GetExitCodeProcess.restype = ctypes.c_int
+        kernel.TerminateProcess.argtypes = [ctypes.c_void_p, ctypes.c_uint]
+        kernel.TerminateProcess.restype = ctypes.c_int
+        kernel.WaitForSingleObject.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
+        kernel.WaitForSingleObject.restype = ctypes.c_ulong
+        kernel.CloseHandle.argtypes = [ctypes.c_void_p]
+        kernel.CloseHandle.restype = ctypes.c_int
+        handle = ctypes.windll.kernel32.OpenProcess(0x0001 | 0x1000 | 0x00100000, False, pid)
         if not handle:
             return False
         try:
-            return bool(ctypes.windll.kernel32.TerminateProcess(handle, 0))
+            code = ctypes.c_ulong()
+            if not ctypes.windll.kernel32.GetExitCodeProcess(handle, ctypes.byref(code)) or code.value != 259:
+                return False
+            current = get_process_identity(pid, strict=True)
+            if current is None or not _same_process(identity, current) or not predicate(current):
+                return False
+            return bool(ctypes.windll.kernel32.TerminateProcess(handle, 0)) and ctypes.windll.kernel32.WaitForSingleObject(handle, 5000) == 0
         finally:
             ctypes.windll.kernel32.CloseHandle(handle)
     except (AttributeError, OSError, ValueError):

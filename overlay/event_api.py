@@ -17,6 +17,7 @@ import threading
 import time
 import uuid
 from typing import Any, Callable
+from core.integrations.tool_semantics import tool_category, category_hint
 
 log = logging.getLogger(__name__)
 SCHEMA_VERSION = 2
@@ -33,24 +34,13 @@ MAX_CAPABILITIES = 32
 MAX_CAPABILITY_LENGTH = 128
 MAX_CATALOG_ITEMS = 32
 MAX_OUTBOUND_MESSAGES = 256
+MAX_SESSION_ROWS = 64
+SESSION_EVENT_TYPES = frozenset({'session.stack_changed', 'session.state_changed'})
 _ACTIVE_HOST: "OverlayEventPublisher | None" = None
 
 
 def discovery_file(home: Path | None = None) -> Path:
     return (home or Path.home()) / ".engram" / "overlay-event-api-v2.json"
-
-
-def tool_category(name: object) -> str:
-    value = str(name or "").lower()
-    if any(x in value for x in ("memory", "kg_", "recall")): return "memory"
-    if any(x in value for x in ("search", "find", "web", "browser", "fetch", "grep", "glob", "list")): return "search"
-    if any(x in value for x in ("read", "open")): return "read"
-    if any(x in value for x in ("write", "edit", "patch", "delete")): return "write"
-    # "bash" contains none of the generic verbs, so the most common shell tool
-    # fell through to "other" while PowerShell matched on "shell".
-    if any(x in value for x in ("shell", "bash", "exec", "build", "test", "run", "task", "agent")): return "execute"
-    if any(x in value for x in ("mail", "message", "discord", "slack")): return "communication"
-    return "other"
 
 
 def _loopback_port_owner(port: int) -> int | None:
@@ -91,7 +81,7 @@ def event_for_bubble(event: object) -> tuple[str, str, dict[str, Any]] | None:
     if kind == "thought": return "generation.thinking", "thought", {}
     if kind == "tool_use":
         category = tool_category(event.get("tool_name"))
-        return "tool.started", category if category in {"search", "memory"} else "generating", {"category": category}
+        return "tool.started", category_hint(category), {"category": category}
     if kind == "tool_result": return ("tool.failed", "error", {}) if event.get("is_error") else ("tool.completed", "generating", {})
     if kind in {"turn_end", "result"}: return "generation.completed", "success", {"outcome": "success"}
     if kind == "error": return "provider.failed", "provider_error", {}
@@ -115,6 +105,7 @@ class _Client:
         self.catalog = catalog
         self.active_renderer_id: str | None = renderer_id if not catalog else None
         self.pending_renderer_id: str | None = None
+        self.handshake_complete = False
         # Outbound is queued so a renderer that stops reading can never block the
         # host's Tk main thread inside sendall.  Semantic events are droppable;
         # control and handshake messages are not, because losing one leaves the
@@ -154,6 +145,14 @@ class _Client:
         with self._outbound_lock:
             if self._outbound_closed:
                 return
+            if message.get('type') in SESSION_EVENT_TYPES:
+                marker = ('"type":"' + message['type'] + '"').encode()
+                # Snapshots replace older queued snapshots of the same kind.
+                # The writer checks object identity before popping its in-flight
+                # buffer, so replacing even the head cannot discard a new item.
+                self._outbound = collections.deque(
+                    (drop, pending) for drop, pending in self._outbound if marker not in pending
+                )
             if len(self._outbound) >= MAX_OUTBOUND_MESSAGES:
                 # Shed the oldest droppable event.  A stalled renderer misses
                 # animation cues rather than a position or visibility command.
@@ -166,6 +165,14 @@ class _Client:
                     if droppable:
                         self.dropped_events += 1
                         return
+                    self._outbound_closed = True
+                    self._outbound.clear()
+                    self._outbound_ready.set()
+                    try:
+                        self.connection.shutdown(socket.SHUT_RDWR)
+                    except (OSError, AttributeError):
+                        pass
+                    return
             self._outbound.append((droppable, data))
             if self._writer is None:
                 self._writer = threading.Thread(target=self._writer_loop, daemon=True,
@@ -230,10 +237,14 @@ class OverlayEventPublisher:
         # so a pointer-leave or typing-idle event can reveal active work instead
         # of incorrectly resetting an external renderer to idle.
         self._work_hint = "idle"
+        self._generation_display_hint = "generating"
         self._tool_category: str | None = None
         self._generation_active = False
         self._hovered = False
         self._input_active = False
+        self._session_snapshot = {'sessions': [], 'total_count': 0, 'truncated': False}
+        self._selected_session = {'session': None}
+        self._session_snapshot_ready = False
 
     @property
     def connected(self) -> bool:
@@ -241,6 +252,21 @@ class OverlayEventPublisher:
 
     def supports(self, capability: str) -> bool:
         return capability in self.capabilities
+
+    @staticmethod
+    def _session_capable(client: _Client) -> bool:
+        item = client.item(client.active_renderer_id or '')
+        return client.handshake_complete and not client._outbound_closed and item is not None and 'session_stack' in item.capabilities
+
+    @property
+    def owns_session_stack(self) -> bool:
+        """Only an active complete replace consumer may hide the host deck."""
+        with self._lock:
+            owner = self._clients.get(self._replace_owner)
+            return bool(owner is not None and owner.mode == 'replace'
+                        and owner.active_renderer_id == self.selected_renderer_id
+                        and self._session_capable(owner) and self._session_snapshot_ready
+                        and not self._session_snapshot['truncated'])
 
     def start(self) -> bool:
         global _ACTIVE_HOST
@@ -420,6 +446,10 @@ class OverlayEventPublisher:
         return client
 
     def _send_welcome(self, client: _Client) -> None:
+        with self._lock:
+            self._send_welcome_locked(client)
+
+    def _send_welcome_locked(self, client: _Client) -> None:
         # Handshake goes through the same outbound queue as everything else so
         # a publish racing registration can never overtake welcome/snapshot.
         selected = client.item(self.selected_renderer_id) is not None
@@ -428,6 +458,8 @@ class OverlayEventPublisher:
         # Welcome is intentionally self-contained, while the assignment event
         # makes initial selection follow the same path as later recomputation.
         self._enqueue(client, self._message("renderer.assignment", self._resolved_hint(), client.assignment_payload(self.selected_renderer_id, self.selected_mode)))
+        client.handshake_complete = True
+        self._send_session_snapshot(client)
 
     def _handle_ready(self, client: _Client, message: dict[str, Any]) -> None:
         """Promote only the catalog item assigned on this authenticated socket."""
@@ -459,6 +491,7 @@ class OverlayEventPublisher:
             }}
         if connected is not None and self._on_message:
             self._on_message(connected)
+        self._send_session_snapshot(client)
 
     @staticmethod
     def _valid_inbound(message: dict[str, Any], client: _Client) -> bool:
@@ -523,7 +556,7 @@ class OverlayEventPublisher:
             return self._resolved_hint()
         if type == "generation.started":
             self._generation_active = True
-            self._work_hint, self._tool_category = "generating", None
+            self._work_hint, self._tool_category = self._generation_display_hint, None
         elif type == "generation.thinking":
             self._generation_active = True
             self._work_hint = "thought"
@@ -533,7 +566,7 @@ class OverlayEventPublisher:
             self._tool_category = category if isinstance(category, str) else None
             self._work_hint = display_hint if display_hint in {"search", "memory"} else "generating"
         elif type == "tool.completed":
-            self._work_hint = "generating" if self._generation_active else "idle"
+            self._work_hint = self._generation_display_hint if self._generation_active else "idle"
             self._tool_category = None
         elif type == "tool.failed":
             self._tool_category = None
@@ -561,6 +594,8 @@ class OverlayEventPublisher:
 
     def publish(self, type: str, display_hint: str, payload: dict[str, Any] | None = None) -> None:
         """Queue an outbound message. Never blocks, so Tk cannot stall on a socket."""
+        if type in SESSION_EVENT_TYPES:
+            raise ValueError('Session events require publish_session_stack validation')
         payload = payload or {}
         with self._lock:
             resolved_hint = self._resolve_event_hint(type, display_hint, payload)
@@ -572,11 +607,105 @@ class OverlayEventPublisher:
                 clients = [owner] if owner is not None else []
             else:
                 clients = list(self._clients.values())
-        for client in clients: client.enqueue(message, droppable=not control)
+        for client in clients:
+            if client.handshake_complete is True:
+                client.enqueue(message, droppable=not control)
 
     def publish_bubble(self, event: object) -> None:
         mapped = event_for_bubble(event)
         if mapped: self.publish(*mapped)
+
+    def _send_session_snapshot(self, client: _Client) -> None:
+        with self._lock:
+            if not self._session_capable(client):
+                return
+            self._enqueue(client, self._message('session.stack_changed', 'idle', self._session_snapshot))
+            self._enqueue(client, self._message('session.state_changed', 'idle', self._selected_session))
+
+    def publish_session_stack(self, rows: list[dict], selected_key: str | None) -> None:
+        """Publish bounded allowlisted metadata, never the registry's raw rows.
+
+        Full snapshots make reconnect/reassignment deterministic. Clocks, owner
+        fields and acknowledgement stay local. Overflow keeps the host visible.
+        """
+        from .state_api import validate_payload
+
+        sessions = []
+        selected = None
+        budget = MAX_MESSAGE_BYTES - 2048
+        used = 0
+        total = len(rows)
+        ordered = sorted(rows, key=lambda row: row.get('first_seen', 0) if isinstance(row, dict) and
+                         type(row.get('first_seen', 0)) in (int, float) else 0)
+        for row in ordered:
+            if not isinstance(row, dict):
+                continue
+            candidate = {name: row.get(name) for name in ('provider', 'session_id', 'state')}
+            candidate.update(label=row.get('label'), subagent_count=row.get('subagent_count'))
+            if row.get('project_name') is not None:
+                candidate['project_name'] = row['project_name']
+            if row.get('agent_name') is not None:
+                candidate['agent_name'] = row['agent_name']
+            valid, error = validate_payload(candidate)
+            if error:
+                continue
+            public = {
+                'provider': valid['provider'], 'session_id': valid['session_id'],
+                'label': valid.get('label'), 'state': valid['state'],
+                'subagent_count': valid.get('subagent_count') or 0,
+                'selected': f"{valid['provider']}:{valid['session_id']}" == selected_key,
+            }
+            if valid.get('project_name') is not None:
+                public['project_name'] = valid['project_name']
+            if valid.get('agent_name') is not None:
+                public['agent_name'] = valid['agent_name']
+            if public['selected']:
+                selected = public
+            size = len(json.dumps(public, separators=(',', ':')).encode('utf-8')) + 1
+            if len(sessions) < MAX_SESSION_ROWS and used + size <= budget:
+                sessions.append(public)
+                used += size
+        snapshot = {'sessions': sessions, 'total_count': total, 'truncated': len(sessions) != total}
+        selection = {'session': selected}
+        with self._lock:
+            stack_changed = not self._session_snapshot_ready or snapshot != self._session_snapshot
+            state_changed = not self._session_snapshot_ready or selection != self._selected_session
+            self._session_snapshot, self._selected_session = snapshot, selection
+            self._session_snapshot_ready = True
+            clients = [client for client in self._clients.values() if self._session_capable(client)]
+            for kind, payload, changed in (
+                ('session.stack_changed', snapshot, stack_changed),
+                ('session.state_changed', selection, state_changed),
+            ):
+                if changed:
+                    message = self._message(kind, 'idle', payload)
+                    for client in clients:
+                        client.enqueue(message, droppable=False)
+
+    def set_generation_display_hint(self, hint: str) -> None:
+        """Selected native display policy only; never synthesizes reasoning events."""
+        with self._lock:
+            self._generation_display_hint = 'thought' if hint == 'thought' else 'generating'
+
+    def select_session_state(self, state: str, *, work_hint: str = 'generating') -> None:
+        """Replace selected work using the existing v2 snapshot contract.
+
+        Selection is not a generation-completed event. In particular, waiting,
+        unknown, or an empty stack must clear old work without inventing success.
+        A subsequently replayed observed semantic event may refine generic work.
+        """
+        with self._lock:
+            self._generation_display_hint = 'thought' if work_hint == 'thought' else 'generating'
+            self._generation_active = state == "working"
+            self._work_hint = self._generation_display_hint if self._generation_active else "idle"
+            self._tool_category = None
+            hint = {"ready": "success", "blocked": "error"}.get(state, self._work_hint)
+            message = self._message("state.snapshot", hint, {
+                "generation_active": self._generation_active, "tool_category": None,
+            })
+            clients = [client for client in self._clients.values() if client.handshake_complete is True]
+            for client in clients:
+                client.enqueue(message, droppable=False)
 
     def replace_owner_pid(self) -> int | None:
         """PID of the process holding the replace connection, from the socket itself.
@@ -611,9 +740,10 @@ class OverlayEventPublisher:
             return renderers
 
     def set_selection(self, renderer_id: str, mode: str) -> None:
-        self.selected_renderer_id = renderer_id; self.selected_mode = mode if mode in {"observer", "replace"} else "observer"
         old_owner = None; old_owner_id = None; promoted = None
         with self._lock:
+            self.selected_renderer_id = renderer_id
+            self.selected_mode = mode if mode in {"observer", "replace"} else "observer"
             if self._replace_owner is not None:
                 owner = self._clients.get(self._replace_owner)
                 if owner is not None:
@@ -643,12 +773,15 @@ class OverlayEventPublisher:
                             break
                     self.mode = "replace"; self.capabilities = selected_item.capabilities; promoted = selected_client
             clients = list(self._clients.values())
+            for client in clients:
+                if not client.handshake_complete:
+                    continue
+                # Assignment and its replay form one queue transaction under
+                # the same lock as publish_session_stack.
+                client.enqueue(self._message("renderer.assignment", self._resolved_hint(), client.assignment_payload(renderer_id, self.selected_mode)), droppable=False)
+                self._send_session_snapshot(client)
         if old_owner is not None and old_owner is not promoted and self._on_message:
             self._on_message({"type": "_renderer.disconnected", "payload": {"renderer_id": old_owner_id, "mode": "replace"}})
-        for client in clients:
-            # Settings applies a selection from the Tk thread; assignment is
-            # never droppable but must also never block that thread.
-            client.enqueue(self._message("renderer.assignment", self._resolved_hint(), client.assignment_payload(renderer_id, self.selected_mode)), droppable=False)
         if promoted is not None and selected_item is not None and self._on_message:
             self._on_message({"type": "_renderer.connected", "payload": {"renderer_id": selected_item.renderer_id, "name": selected_item.name, "mode": "replace", "capabilities": sorted(selected_item.capabilities)}})
 
@@ -671,3 +804,19 @@ class OverlayEventPublisher:
 
 def connected_renderer_snapshot() -> list[dict[str, Any]]:
     return _ACTIVE_HOST.connected_renderers() if _ACTIVE_HOST else []
+
+
+def renderer_startup_snapshot() -> dict[str, Any]:
+    """Authenticated setup diagnostics: catalog presence is not worker readiness."""
+    host = _ACTIVE_HOST
+    if host is None:
+        return {'catalog_connected': False, 'selected_ready': False, 'renderers': []}
+    with host._lock:
+        clients = [client for client in host._clients.values() if client.handshake_complete and not client._outbound_closed]
+        selected = host.selected_renderer_id
+        ready = not selected or any(client.active_renderer_id == selected and client.pending_renderer_id is None
+                                    and client.mode == host.selected_mode for client in clients)
+        return {'catalog_connected': any(client.catalog for client in clients),
+                'selected_renderer_id': selected, 'selected_mode': host.selected_mode,
+                'selected_ready': ready, 'actual_mode': host.mode,
+                'renderers': host.connected_renderers()}

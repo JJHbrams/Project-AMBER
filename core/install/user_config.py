@@ -111,8 +111,25 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--overlay-provider")
     parser.add_argument("--overlay-mcp-port", type=int)
     parser.add_argument("--overlay-ollama-model", default="")
+    parser.add_argument('--overlay-renderer', choices=['engram.bolttagu-2d'])
     args = parser.parse_args(argv)
-    if args.overlay_provider is not None:
+    if args.overlay_renderer is not None:
+        path = Path(args.config_path)
+        data = yaml.safe_load(path.read_text(encoding='utf-8-sig')) if path.exists() else {}
+        if not isinstance(data, dict) or not isinstance(data.get('overlay', {}), dict):
+            raise ValueError('Overlay configuration must contain mappings')
+        overlay = data.setdefault('overlay', {})
+        external = overlay.setdefault('external_renderer', {})
+        if not isinstance(external, dict):
+            raise ValueError('External renderer configuration must be a mapping')
+        external.update(selected_renderer_id=args.overlay_renderer, mode='replace')
+        # Explicit post-upgrade selection must not be migrated back on next boot.
+        overlay['native_bolttagu_migration'] = 1
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_name(path.name + '.tmp')
+        temporary.write_text(yaml.safe_dump(data, allow_unicode=True, sort_keys=False), encoding='utf-8')
+        temporary.replace(path)
+    elif args.overlay_provider is not None:
         if args.overlay_mcp_port is None:
             parser.error("--overlay-mcp-port is required with --overlay-provider")
         update_overlay_installer_config(Path(args.config_path), provider=args.overlay_provider, mcp_port=args.overlay_mcp_port, ollama_model=args.overlay_ollama_model)
