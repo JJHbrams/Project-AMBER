@@ -1,7 +1,5 @@
 # AMBER
 
-# AMBER
-
 <p align="center"><a href="https://github.com/JJHbrams/Project-AMBER"><img src="resource/asset/readme/amber-header.svg" width="100%" alt="AMBER — persistent project memory" /></a></p>
 
 <p align="center"><strong>Switch AI tools. Keep your project memory.</strong></p>
