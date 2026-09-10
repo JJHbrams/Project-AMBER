@@ -69,7 +69,9 @@ def test_07_shims_uses_provider_specific_agent_deployment():
     # planner/coder/servant 는 아무나 쓸 이름이라, 무조건 복사는 사용자가 같은
     # 이름으로 만든 에이전트를 백업도 없이 지운다. provenance 해시로 우리가 쓴
     # 내용인지 판정하고, 아닐 때는 건드리지 않는다.
-    assert "Get-FileHash" in helper
+    assert "[Security.Cryptography.SHA256]::Create()" in helper
+    assert "[IO.File]::OpenRead" in helper
+    assert "Get-FileHash" not in helper
     assert "provenance" in helper.lower()
     assert "agent-definitions.json" in helper
     assert "-LiteralPath $source -Destination $destination -Force" in helper

@@ -47,7 +47,17 @@ if ($Provider -ne "All") {
 
 function Get-ContentHash([string]$Path) {
     if (-not (Test-Path -LiteralPath $Path)) { return "" }
-    return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash
+    $stream = [IO.File]::OpenRead($Path)
+    try {
+        $sha = [Security.Cryptography.SHA256]::Create()
+        try {
+            return ([BitConverter]::ToString($sha.ComputeHash($stream))).Replace("-", "")
+        } finally {
+            $sha.Dispose()
+        }
+    } finally {
+        $stream.Dispose()
+    }
 }
 
 function Read-Provenance([string]$Path) {
