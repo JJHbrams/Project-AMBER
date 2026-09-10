@@ -1,0 +1,82 @@
+{
+  "schema_version": 1,
+  "asset": "native-bolttagu-v1.5.15.gif",
+  "poster": "native-bolttagu-v1.5.15.png",
+  "frame_count": 13,
+  "source_runtime": "frozen-normal-launch",
+  "source_version": "1.5.15.736",
+  "exe_sha256": "590f44f1ac28b016eb1b2920a2cfdd69e0195e33fbe86dd18bc7d62162280818",
+  "source_result": "PASS: bounded frozen smoke only",
+  "frames": [
+    {
+      "name": "native-idle.png",
+      "file_sha256": "f3648f42d07bf600a650200cafc9ef1d3363794544fb4998ca72fc119444e6ea",
+      "reported_pixel_sha256": "24554f708a6b5dbfb216fde13f0005132670df3916662b90319ffe7196e5d568"
+    },
+    {
+      "name": "state-1.png",
+      "file_sha256": "357701f824a56ce2dd692ff47c8dd1bd6de8db48c2b37398ded08c02a13226d6",
+      "reported_pixel_sha256": "f755ae3d273162bdf4e1430007fe5b7377fbe25ff1dda2c19b27b5d8cf5c0e26"
+    },
+    {
+      "name": "state-2.png",
+      "file_sha256": "8be8c6119f05b66b4682dd33df86d30327981db1119f71e9059082231db33d33",
+      "reported_pixel_sha256": "689a81f6879f9073aa95b1b60a2e9a4551630af49080c1887f2b04e6e6fc5852"
+    },
+    {
+      "name": "state-3.png",
+      "file_sha256": "0ed81400872e1c9b2a76adc9d57849bffb24978f1eb9b090e2d0582c8f2f9bd7",
+      "reported_pixel_sha256": "c21b64c64185e06cd7d05d346ce78a03fad731c5435884673b0eb6fab69817db"
+    },
+    {
+      "name": "completed-idle.png",
+      "file_sha256": "5a144fe50411a0301e52affb065719aa2209b1b81154e52742a7a47487d08e64",
+      "reported_pixel_sha256": "a09b0215eee7c465a0694e14f725acec1111a1c4c0cf740fd951c6ce1d9261e2"
+    },
+    {
+      "name": "idle-sequence-0.png",
+      "file_sha256": "15575f6759f7cab6e149c2a2ba62064d1bd4c8cbdb44fc387ba38bb288792284",
+      "reported_pixel_sha256": "e843c2a169adccb3f7dc9bdeb07aa8db2e0e44a97098cffd26ab069065bcd371"
+    },
+    {
+      "name": "idle-sequence-1.png",
+      "file_sha256": "d13ff03cbf481d490c1525067cdcc0e5dfdbebc035c22ab8f7e1bc56738a41e5",
+      "reported_pixel_sha256": "fbec2d93d08d41fba04d6255d550d598ded45613dec3595fa0794c7cd1f34952"
+    },
+    {
+      "name": "idle-sequence-2.png",
+      "file_sha256": "7d073202aa52d2c867a901636d540e56537b297dc908afd6b192b7d70d143a7b",
+      "reported_pixel_sha256": "40b2c3927318f9336eb542ee3d9453fd9e6fbc066fac0e45bbf40f18a21a627e"
+    },
+    {
+      "name": "idle-sequence-3.png",
+      "file_sha256": "44c33d686638a309cc73c92df9690b313fcf8ad2112fc546788085f0d990ea4b",
+      "reported_pixel_sha256": "3a7fc0b795196e4ea301f452b0786b82610376edc8776b6ccf41edadb574de22"
+    },
+    {
+      "name": "idle-sequence-4.png",
+      "file_sha256": "0a27a7ee06c7f1ed8dc4e76e91db665bba50e1bca8120cbc540d8295dba3d69d",
+      "reported_pixel_sha256": "054c3d0a33948e9baf821f67fc62f230c56f9df8bc49a4669c325becf8f1831f"
+    },
+    {
+      "name": "idle-sequence-5.png",
+      "file_sha256": "71b00a2f4795616b922d41c79ae0bcef527a66f905801fbc7d6be1574812bc7c",
+      "reported_pixel_sha256": "92f2eab359b305e7040980119f2a04907a4b0ad6f5b272098e5c34ee6cf1c73f"
+    },
+    {
+      "name": "idle-sequence-6.png",
+      "file_sha256": "903eb1341f41f2d115c12d913e39aab7418694d9cbe4ba43993b7e8fff319241",
+      "reported_pixel_sha256": "217150910a0b43c0b8540a5fa035543282a44d61255e413b9edec9981cd30ffa"
+    },
+    {
+      "name": "idle-sequence-7.png",
+      "file_sha256": "9cc1902a65d1919ff8c11180c85418f1cbaa79873337af451bb1fd9b94f5dca6",
+      "reported_pixel_sha256": "ae09a86db298dfe487f4203297abd88098d215d0137634a98824127098e768ab"
+    }
+  ],
+  "limitations": [
+    "Synthetic metadata, not provider lifecycle evidence.",
+    "Owned-window launcher click; original pointer restored.",
+    "Normal frozen launch is not an Inno installation test."
+  ]
+}
