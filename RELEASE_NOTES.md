@@ -18,6 +18,8 @@
 
 - Fresh release builds now use an isolated PyInstaller work directory, avoiding
   Windows cleanup failures caused by stale files in a previous build tree.
+- Agent-definition deployment is now ASCII-safe for Windows PowerShell 5.1, so
+  non-ASCII comments cannot be misdecoded into a parser error during setup.
 
 ### Notes
 
