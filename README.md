@@ -16,9 +16,9 @@ AMBER gives configured **Claude Code**, **Codex CLI**, and **GitHub Copilot CLI*
 a shared project-memory layer. Move between coding sessions with decisions and
 project context ready to retrieve instead of rebuilding everything from scratch.
 
-<p align="center"><img src="resource/asset/readme/native-bolttagu-v1.5.15.gif" width="236" alt="AMBER native Bolttagu overlay changes from idle through search, writing, completion, then idle again." /></p>
+<p align="center"><img src="resource/asset/readme/native-bolttagu-trickcal-v1.5.15.gif" width="262" alt="Native Bolttagu with Trickcal-style event animations, including writing and completion." /></p>
 
-<p align="center"><sub>Native Bolttagu in AMBER v1.5.15 · demo events. <a href="resource/asset/readme/native-bolttagu-v1.5.15.provenance.json">Capture details</a> · <a href="resource/asset/readme/native-bolttagu-v1.5.15.png">Poster</a></sub></p>
+<p align="center"><sub>AMBER v1.5.15.736 · packaged Trickcal-style art with a custom event mapping, not the default mapping. <a href="resource/asset/readme/trickcal-demo-v1.5.15.provenance.json">Capture details</a> · <a href="resource/asset/readme/native-bolttagu-trickcal-v1.5.15.png">Poster</a></sub></p>
 
 ## Why AMBER
 
@@ -32,6 +32,26 @@ project context ready to retrieve instead of rebuilding everything from scratch.
 AMBER stores its working memory and project knowledge locally. It does not turn
 your prompts, tool payloads, or raw memory into a public overlay feed; the
 external overlay contract is metadata-only.
+
+## On your desktop
+
+### Keep several sessions in view
+
+The stacked monitor shows the selected session and neighboring sessions, with
+provider labels and the current reported activity.
+
+<p align="center"><img src="resource/asset/readme/session-monitor-trickcal-v1.5.15.png" width="342" alt="Three demo sessions in the stacked session monitor above Trickcal-style Bolttagu." /></p>
+
+### Open a conversation from the character
+
+Bubble mode provides an input beside your desktop companion. The example below
+shows the real input UI with an unsent question, not a generated provider reply.
+
+<p align="center"><img src="resource/asset/readme/bubble-mode-trickcal-v1.5.15.png" width="850" alt="Trickcal-style Bolttagu beside the bubble input containing an unsent example question." /></p>
+
+These captures use the installed Windows executable, synthetic session metadata,
+and custom colors. Only the demo's own windows were captured and composed on a
+neutral background; no private conversations are shown.
 
 ## Quick start (Windows)
 
@@ -75,7 +95,7 @@ AMBER retrieves relevant saved context; it cannot guarantee perfect recall of
 every past detail. Local AMBER storage is distinct from a cloud provider: a
 provider can receive the context you choose to send through its own configured
 client. The demo above uses synthetic event metadata rather than a real provider
-lifecycle; its [capture details](resource/asset/readme/native-bolttagu-v1.5.15.provenance.json)
+lifecycle; its [capture details](resource/asset/readme/trickcal-demo-v1.5.15.provenance.json)
 record the bounded evidence and limits.
 
 ## Local knowledge: Obsidian and the graph
@@ -93,8 +113,11 @@ See [architecture](docs/architecture.md) for storage and service boundaries.
 
 Bolttagu is bundled as a native character, so its atlas and animation timeline
 run in the Engram process—no sibling renderer checkout is required. The GIF
-above uses the exact packaged native presentation captured from the v1.5.15.736
-frozen executable.
+above uses packaged Trickcal-style art captured from the v1.5.15.736 frozen
+executable with a custom mapping. To keep this style during events, map tool
+`categories` and completion `oneshots.success` as well as `hints`: omitted entries
+inherit defaults and can briefly show the basic art. The demo's exact overrides
+are listed in its capture details; your saved mapping is not changed by this demo.
 
 To choose event poses in the Windows settings UI:
 

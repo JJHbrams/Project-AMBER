@@ -26,9 +26,31 @@
 
 </td><td valign="top" align="right" width="320">
 
-![overlay demo](resource/asset/overlay-demo.png)
+![트릭칼풍 볼따구 이벤트 애니메이션](resource/asset/readme/native-bolttagu-trickcal-v1.5.15.gif)
 
 </td></tr></table>
+
+## 바탕화면에서 보는 AMBER
+
+### 여러 세션을 한눈에
+
+선택한 세션과 이웃 세션을 쌓아 보여주며, AI 도구 이름과 보고된 작업 상태를 확인할 수 있습니다.
+
+<p align="center"><img src="resource/asset/readme/session-monitor-trickcal-v1.5.15.png" width="342" alt="트릭칼풍 볼따구 위에 표시된 세 개의 예시 세션" /></p>
+
+### 캐릭터 옆에서 바로 입력
+
+말풍선 모드의 실제 입력창입니다. 화면의 질문은 촬영용으로 입력만 했으며 전송하지 않았습니다.
+
+<p align="center"><img src="resource/asset/readme/bubble-mode-trickcal-v1.5.15.png" width="850" alt="트릭칼풍 볼따구와 전송하지 않은 예시 질문이 담긴 말풍선 입력창" /></p>
+
+설치된 **v1.5.15.736 실행 파일**에 번들된 트릭칼풍 아트와 사용자 지정 매핑·색상을 사용했습니다.
+기본 매핑 그대로의 모습은 아닙니다. 세션 정보는 가상 예시이며, 촬영용 프로세스의 실제 창만
+캡처해 단색 배경 위에 배치했습니다. [촬영 근거와 매핑 보완 항목](resource/asset/readme/trickcal-demo-v1.5.15.provenance.json)을 확인할 수 있습니다.
+
+이벤트 때도 같은 아트를 유지하려면 `hints`뿐 아니라 도구 `categories`와 완료 순간의
+`oneshots.success`까지 `trickcal-*`로 지정해야 합니다. 빠진 항목은 기본 매핑을 상속하므로
+기본 아트가 잠깐 나타날 수 있습니다. 촬영용 매핑만 보완했으며 사용자의 저장된 설정은 변경하지 않았습니다.
 
 ## 빠른 시작
 
@@ -283,7 +305,7 @@ Claude Code 또는 Goose에서 Ollama 로컬 모델을 백엔드로 사용할 �
 ## 지식 그래프 대시보드
 
 기억, 위키 노드, 시맨틱 관계를 웹 브라우저에서 시각적으로 탐색할 수 있는 대시보드입니다.
-![alt text](resource\asset\dashboard.png)
+![AMBER dashboard](resource/asset/dashboard.png)
 
 기본적으로 engram-overlay.exe 를 실행하면 서버가 로드됩니다.
 
