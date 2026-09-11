@@ -1,0 +1,48 @@
+{
+  "version": "1.5.15.736",
+  "runtime": "installed Windows frozen executable, normal native launch",
+  "exe_sha256": "590f44f1ac28b016eb1b2920a2cfdd69e0195e33fbe86dd18bc7d62162280818",
+  "renderer": "native_bolttagu",
+  "external_renderer_selected": false,
+  "capture_method": "Owned HWND PrintWindow; multiwindow PNGs composed at their actual relative positions on a neutral matte. Input window repositioned before capture.",
+  "source_mapping_sha256": "1d572406098f076f9bd63cf41b06aa2d582cf24ee6915ca2a45330b77b524da6",
+  "demo_mapping_sha256": "f9e9e9f2373c9041574f37096a99202941955e3aa84c2542b7806b26ace5b59d",
+  "demo_mapping_overrides": {
+    "categories": {
+      "write": "trickcal-writing",
+      "read": "trickcal-searching",
+      "communication": "trickcal-speaking"
+    },
+    "oneshots": {"success": "trickcal-success"},
+    "lifecycle": {"hide": "trickcal-enter"}
+  },
+  "source_mapping_unchanged": true,
+  "visual_settings": {
+    "char_height_ratio": 0.139,
+    "session_font_size": 7,
+    "bubble_font_size": 13,
+    "bubble_font_family": "Noto Sans KR Black",
+    "bubble_input_bg": "#628ab3",
+    "bubble_speech_fg": "#400040"
+  },
+  "evidence": {
+    "gif_encoded_frames": 42,
+    "gif_duration_ms": 9330,
+    "events": "Synthetic search, write, ready and unknown lifecycle states",
+    "monitor": "Three synthetic demo sessions, no real session contents",
+    "bubble": "Actual bubble input with an unsent example; no provider query or reply",
+    "cleanup": "Capture host exited gracefully with code 0"
+  },
+  "sha256": {
+    "native-bolttagu-trickcal-v1.5.15.gif": "4704bd4d92df311f8912f5128089cf85242ecf3b40c438bd20695b1d6b326515",
+    "native-bolttagu-trickcal-v1.5.15.png": "fbc77e981c7b540ac00c6bb2e5300dd1e0e6bbc97da09a32b8fe66027c4355bd",
+    "session-monitor-trickcal-v1.5.15.png": "0f313e0828935c4b94da1359caaf5362ce90cef40d8a62dc26f5fd5ada7f7522",
+    "bubble-mode-trickcal-v1.5.15.png": "c4cd2eb86fc552feba9294081766946d39b1ee39f55c78dedf55003700fd001e"
+  },
+  "limitations": [
+    "Custom mapping and colors, not the default install appearance",
+    "Synthetic events do not prove a live provider lifecycle",
+    "Owned-window composition, not a full desktop compositor screenshot",
+    "Input demonstration does not prove a completed conversation"
+  ]
+}
