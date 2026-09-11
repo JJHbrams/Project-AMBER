@@ -305,7 +305,7 @@ Claude Code 또는 Goose에서 Ollama 로컬 모델을 백엔드로 사용할 �
 ## 지식 그래프 대시보드
 
 기억, 위키 노드, 시맨틱 관계를 웹 브라우저에서 시각적으로 탐색할 수 있는 대시보드입니다.
-![alt text](resource\asset\dashboard.png)
+![AMBER dashboard](resource/asset/dashboard.png)
 
 기본적으로 engram-overlay.exe 를 실행하면 서버가 로드됩니다.
 
