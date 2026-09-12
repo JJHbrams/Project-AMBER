@@ -24,6 +24,7 @@ function Write-EngramComponentIncludes {
     $code.Add('function ExternalOverlayComponentsCode(): String;')
     $code.Add('begin')
     $code.Add('  Result := '''';')
+    $code.Add('  if PreserveUserOwnedExternalDefault then Exit;')
     foreach ($component in $manifest.components) {
         $code.Add(('  if WizardIsComponentSelected(''external\{0}\{1}'') then begin if Result <> '''' then Result := Result + '',''; Result := Result + ''{2}''; end;' -f $component.group.ToLowerInvariant(), $component.id.Replace('-', '_'), $component.id))
     }

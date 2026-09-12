@@ -1,6 +1,35 @@
 # Release Notes
 
+## 2026-09-12 - v1.5.17: User-Owned Runtime Upgrade Fix
+
+### Fixed
+
+- Upgrading AMBER no longer treats an existing user-owned external overlay
+  runtime as permission to install or migrate external components.
+- The preservation rule now lives in the component-include generator, so the
+  packaging step cannot silently regenerate an unsafe installer path.
+
+### Validation
+
+- Built from Project_Engram `dev` commit `d6dfaf8` as `1.5.17.746` with a clean
+  PyInstaller build and frozen runtime/role smoke checks.
+- A real silent Windows upgrade completed configuration successfully without
+  staging external payloads. The existing runtime marker state, `pyvenv.cfg`,
+  and installed package metadata hashes remained unchanged.
+- The launched host family ran from the installed frozen path and returned an
+  `ok` response from `/health`.
+
+### Upgrade
+
+- Install `AMBER_1.5.17.746_x64-setup.exe` over the existing version.
+- `v1.5.16` is superseded for systems that already have a legacy or user-owned
+  external overlay runtime; use this release instead.
+
 ## 2026-09-12 - v1.5.16: Native Bubble Workspace
+
+> Superseded by v1.5.17 for upgrades with a legacy or user-owned external
+> overlay runtime. The v1.5.16 installer can finish file deployment but fail
+> during configuration in that environment.
 
 ### Highlights
 

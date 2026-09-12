@@ -17,6 +17,7 @@ PIN = INSTALLER / "external-overlay.pin"
 ISS = INSTALLER / "engram-overlay.iss"
 BUILD = INSTALLER / "build-installer.ps1"
 CONFIGURE = INSTALLER / "configure.ps1"
+BUILD_COMPONENTS = INSTALLER / "build-components.ps1"
 
 
 def read(path: Path) -> str:
@@ -110,6 +111,20 @@ class WizardWiringTests(unittest.TestCase):
         source = read(ISS)
         self.assertNotIn("설치되지 않았습니다", source)
         self.assertNotIn("MsgBox('선택한 외부 오버레이", source)
+
+    def test_user_owned_runtime_defaults_to_native_without_claiming_migration(self):
+        source = read(ISS)
+        marker = "ExistingExternalComponent('ownership=user-owned')"
+        default = "WizardSelectComponents('native')"
+        self.assertIn(marker, source)
+        self.assertIn(default, source)
+        self.assertLess(source.index(marker), source.index(default))
+        self.assertIn("CurPageID = wpSelectComponents", source)
+        self.assertIn("PreserveUserOwnedExternalDefault and WizardSilent", source)
+        self.assertLess(source.index("procedure CurPageChanged"), source.index("function PrepareToInstall"))
+        generator = read(BUILD_COMPONENTS)
+        guard = "if PreserveUserOwnedExternalDefault then Exit"
+        self.assertIn(guard, generator)
 
     def test_configure_reports_every_outcome_to_the_user(self):
         source = read(CONFIGURE)
