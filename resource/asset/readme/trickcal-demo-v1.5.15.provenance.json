@@ -13,8 +13,12 @@
       "read": "trickcal-searching",
       "communication": "trickcal-speaking"
     },
-    "oneshots": {"success": "trickcal-success"},
-    "lifecycle": {"hide": "trickcal-enter"}
+    "oneshots": {
+      "success": "trickcal-success"
+    },
+    "lifecycle": {
+      "hide": "trickcal-enter"
+    }
   },
   "source_mapping_unchanged": true,
   "visual_settings": {
@@ -27,22 +31,76 @@
   },
   "evidence": {
     "gif_encoded_frames": 42,
-    "gif_duration_ms": 9330,
+    "gif_duration_ms": 5160,
     "events": "Synthetic search, write, ready and unknown lifecycle states",
     "monitor": "Three synthetic demo sessions, no real session contents",
     "bubble": "Actual bubble input with an unsent example; no provider query or reply",
-    "cleanup": "Capture host exited gracefully with code 0"
+    "cleanup": "Capture host exited gracefully with code 0",
+    "gif_frame_durations_ms": [
+      120,
+      120,
+      120,
+      120,
+      120,
+      120,
+      120,
+      120,
+      120,
+      120,
+      120,
+      120,
+      120,
+      120,
+      120,
+      120,
+      120,
+      120,
+      120,
+      120,
+      120,
+      120,
+      120,
+      120,
+      120,
+      120,
+      120,
+      120,
+      120,
+      120,
+      120,
+      120,
+      120,
+      120,
+      120,
+      120,
+      120,
+      120,
+      120,
+      120,
+      120,
+      240
+    ],
+    "gif_timing_refresh": "Same approved captured frames re-encoded only; no generated or interpolated art.",
+    "bubble_history": {
+      "runtime": "source native Tauri shell with synthetic QA host",
+      "source_commit": "d6aace3",
+      "input_capture_sha256": "0c42d880986946759bdf48b56c6e6514f2ad28bd9639cab224715c0801978646",
+      "history_capture_sha256": "68d4335fcd4b18eb1fd187f5f7b3bba9f6e4f76799dcc6c1c21b13edecaa293a",
+      "composition": "Actual RGBA WebView captures plus the approved installed character poster on a neutral matte."
+    }
   },
   "sha256": {
-    "native-bolttagu-trickcal-v1.5.15.gif": "4704bd4d92df311f8912f5128089cf85242ecf3b40c438bd20695b1d6b326515",
+    "native-bolttagu-trickcal-v1.5.15.gif": "202abce3522c409d2810abb2705ec7a77da351837bee15a7986a4595bd6bfc52",
     "native-bolttagu-trickcal-v1.5.15.png": "fbc77e981c7b540ac00c6bb2e5300dd1e0e6bbc97da09a32b8fe66027c4355bd",
     "session-monitor-trickcal-v1.5.15.png": "0f313e0828935c4b94da1359caaf5362ce90cef40d8a62dc26f5fd5ada7f7522",
-    "bubble-mode-trickcal-v1.5.15.png": "c4cd2eb86fc552feba9294081766946d39b1ee39f55c78dedf55003700fd001e"
+    "bubble-mode-trickcal-v1.5.15.png": "c4cd2eb86fc552feba9294081766946d39b1ee39f55c78dedf55003700fd001e",
+    "bubble-mode-history-20260912.png": "5256637ba641110013e3a4bb1bc3e8537e6baf138bdf4d44c686c94349f86dee"
   },
   "limitations": [
     "Custom mapping and colors, not the default install appearance",
     "Synthetic events do not prove a live provider lifecycle",
     "Owned-window composition, not a full desktop compositor screenshot",
-    "Input demonstration does not prove a completed conversation"
+    "Input demonstration does not prove a completed conversation",
+    "The response-history README composition is source-runtime synthetic QA, not a provider conversation or frozen-release proof."
   ]
 }

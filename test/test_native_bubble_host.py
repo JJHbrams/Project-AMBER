@@ -55,6 +55,24 @@ class HostTests(unittest.TestCase):
         self.action('presentation_size',window='speech',width=250,height=170,presentation_revision=revision)
         self.assertEqual(self.host._presentation_sizes['speech']['width'],240)
 
+    def test_speech_history_is_bounded_private_and_new_presentation_resets_only_its_size(self):
+        h=self.host
+        self.submit('active')
+        key=self.provider.sent[-1][2]
+        event={'request_key':{'session_id':key.session_id,'request_id':key.request_id,'attempt_generation':key.attempt_generation},'kind':'speech','id':'same','delta':False,'text':'first answer'}
+        h.handle_event(event)
+        h._geometry(dict(window='speech',x=10,y=20,width=700,height=500,scale=1,origin='user_resize'))
+        revision=h.presentation_revision['speech']
+        event.update(delta=True,text=' more');h.handle_event(event)
+        self.assertIn('speech',h.manual_size)
+        self.assertGreater(h.presentation_revision['speech'],revision)
+        h._present('speech','second answer')
+        self.assertNotIn('speech',h.manual_size)
+        self.assertEqual(h.snapshot()['speech_history'][0]['text'],'first answer more')
+        for i in range(25):h._present('speech',f'answer {i}')
+        self.assertEqual(len(h.speech_history),20)
+        self.assertNotIn('first answer',self.provider.sent[0][0])
+
     def test_reopened_idle_submission_does_not_stick(self):
         self.host.hide()
         self.host.show()
