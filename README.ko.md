@@ -42,14 +42,14 @@
 
 말풍선 입력창은 Flip으로 전송 대기열을 확인할 수 있고, 응답창도 Flip하면 최근 답변을
 한 줄 요약 카드 목록으로 다시 볼 수 있습니다. 목록은 스크롤할 수 있으며 카드를 고르면
-전체 답변을 열고 최신 응답으로 돌아옵니다. 응답창을 직접 늘린 크기는 현재 답변에만
+전체 답변을 열고 최신 응답으로 돌아옵니다. 활성 응답창을 직접 늘린 크기는 현재 답변에만
 적용되고 다음 답변부터 내용 길이에 맞춰 다시 조절됩니다.
 
-<p align="center"><img src="resource/asset/readme/bubble-mode-history-20260912.png" width="850" alt="트릭칼풍 볼따구 옆의 native 말풍선 입력창과 스크롤 가능한 최근 응답 Flip 목록" /></p>
+<p align="center"><img src="resource/asset/readme/bubble-mode-history-20260912.png" width="850" alt="세션 모니터와 트릭칼풍 볼따구 옆의 native 활성 응답 말풍선 및 컴팩트 입력창" /></p>
 
-말풍선 이미지는 실제 source-runtime native WebView를 합성 QA 문구로 캡처한 화면과,
-승인된 설치본의 캐릭터 poster를 단색 배경에 배치한 **UI 미리보기**입니다. 실제 provider
-대화나 frozen 배포판 검증 화면이라고 주장하지 않습니다. 세션 정보는 가상 예시이고
+말풍선 이미지는 실제 source-runtime native WebView를 합성 QA 문구로 캡처한 활성 응답·입력
+화면에 승인된 설치본의 세션 모니터·캐릭터 capture를 단색 배경으로 배치한 **UI 미리보기**입니다.
+실제 provider 대화나 frozen 배포판 검증 화면이라고 주장하지 않습니다. 세션 정보는 가상 예시이고
 사적인 대화는 포함하지 않았습니다. [촬영 근거와 매핑 보완 항목](resource/asset/readme/trickcal-demo-v1.5.15.provenance.json)을 확인할 수 있습니다.
 
 이벤트 때도 같은 아트를 유지하려면 `hints`뿐 아니라 도구 `categories`와 완료 순간의

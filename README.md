@@ -47,15 +47,15 @@ provider labels and the current reported activity.
 Bubble mode keeps the composer compact, flips it to the queued-request list,
 and gives responses their own Flip view for recent answers. Past responses are
 shown as one-line, scrollable cards; selecting one reopens its full text, while
-the current response returns to content-based sizing after a per-response resize.
+the active response returns to content-based sizing after a per-response resize.
 
-<p align="center"><img src="resource/asset/readme/bubble-mode-history-20260912.png" width="850" alt="Trickcal-style Bolttagu beside the native bubble composer and the scrollable recent-response Flip view." /></p>
+<p align="center"><img src="resource/asset/readme/bubble-mode-history-20260912.png" width="850" alt="Session monitor and Trickcal-style Bolttagu beside a native active-response bubble and compact composer." /></p>
 
 The bubble composition uses actual source-runtime native WebView captures with
-synthetic QA text plus the approved installed character poster. It is a UI
-preview, not a provider conversation or frozen-release proof. The session
-monitor and top animation use installed-Windows captures with synthetic metadata
-and custom colors. No private conversations are shown. See the
+synthetic QA text, plus approved installed session-monitor and character captures.
+It is a UI preview, not a provider conversation or frozen-release proof. The
+session monitor and top animation use installed-Windows captures with synthetic
+metadata and custom colors. No private conversations are shown. See the
 [sanitized provenance](resource/asset/readme/trickcal-demo-v1.5.15.provenance.json).
 
 ## Quick start (Windows)
