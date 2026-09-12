@@ -111,6 +111,8 @@ var
   QueryPage: TInputQueryWizardPage;
   ExistingExternalComponents: TArrayOfString;
   ExternalInventoryAvailable: Boolean;
+  PreserveUserOwnedExternalDefault: Boolean;
+  ExternalDefaultApplied: Boolean;
   SelectAllExternalButton: TNewButton;
   SelectNoneExternalButton: TNewButton;
   ExternalInventoryLabel: TNewStaticText;
@@ -229,6 +231,11 @@ begin
   end;
   if not ExternalInventoryAvailable then
     WizardForm.ComponentsList.Hint := '외부 설치 정보를 확인할 수 없습니다. 내장 볼따구만 설치하거나 외부 설치를 먼저 복구하세요.';
+  { A detected user-owned runtime is preservation evidence, not permission to
+    migrate it. Until an explicit migration workflow exists, installer-driven
+    external component requests are suppressed for this ownership state. }
+  PreserveUserOwnedExternalDefault := ExternalInventoryAvailable and
+    ExistingExternalComponent('ownership=user-owned');
   WizardForm.ComponentsList.Height := WizardForm.ComponentsList.Height - ScaleY(55);
   SelectAllExternalButton := TNewButton.Create(WizardForm);
   SelectAllExternalButton.Parent := WizardForm.SelectComponentsPage;
@@ -348,6 +355,17 @@ end;
 
 procedure CurPageChanged(CurPageID: Integer);
 begin
+  { InitializeWizard runs before Inno has applied its normal component
+    defaults. Apply the preservation default when the component page becomes
+    active so an interactive user can still deliberately reselect entries. }
+  if (CurPageID = wpSelectComponents) and
+     PreserveUserOwnedExternalDefault and
+     not ExternalDefaultApplied then
+  begin
+    WizardSelectComponents('native');
+    ExternalDefaultApplied := True;
+  end;
+
   { 설치 결과는 configure.ps1 이 판정한다(Python 적격성, 기존 런타임 소유권).
     위저드는 결과를 단정하지 않고 어디서 확인·변경하는지만 알린다. }
   if CurPageID <> wpFinished then
@@ -415,6 +433,10 @@ var
   HelperPath: String;
   Params: String;
 begin
+  { Silent installs never visit the component page. Enforce the same safe
+    default here, after Inno has finished resolving its default selection. }
+  if PreserveUserOwnedExternalDefault and WizardSilent then
+    WizardSelectComponents('native');
   ExtractTemporaryFile('stop-engram-processes.ps1');
   HelperPath := ExpandConstant('{tmp}\stop-engram-processes.ps1');
   Params := '-NoProfile -ExecutionPolicy Bypass -File "' + HelperPath +

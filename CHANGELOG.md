@@ -4,6 +4,25 @@ All notable changes to this project are documented in this file.
 
 ## Unreleased
 
+## [1.5.17] — 2026-09-12
+
+### Fixed
+
+- 기존 외부 오버레이 런타임이 사용자 소유로 판정된 업그레이드에서 설치기가
+  외부 컴포넌트 마이그레이션을 암묵적으로 요청해 구성이 실패하던 문제를 고쳤다.
+  이 상태에서는 내장 Engram만 갱신하고 기존 외부 런타임과 시작 설정을 보존한다.
+- 패키징 직전에 다시 생성되는 Inno component include의 생성기에 보존 가드를
+  두어, 빌드 과정에서 안전 분기가 사라지지 않도록 했다.
+
+### Validation
+
+- `1.5.17.746` clean frozen build와 역할별 smoke를 통과했다.
+- 사용자 소유 외부 런타임이 있는 실제 Windows 환경에서 무인 업그레이드를
+  수행해 configure 완료, 외부 payload 미추출, 기존 marker·`pyvenv.cfg`·패키지
+  metadata 해시 불변, 설치 경로 frozen host 및 `/health` 정상을 확인했다.
+- `v1.5.16` 설치기는 이 업그레이드 조건에서 구성 실패가 발생할 수 있으므로
+  `v1.5.17`로 대체한다.
+
 ## [1.5.16] — 2026-09-12
 
 ### Added
