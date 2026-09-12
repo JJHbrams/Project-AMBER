@@ -42,6 +42,7 @@ NUL
 
 # Test artifacts
 _test_*.py
+.tmp/
 
 # Logs
 overlay_debug.log
@@ -64,3 +65,7 @@ resource/overlay.png
 AMBER_*_x64-setup.exe
 AMBER_*_ModelPack.zip
 debug.log
+# build-installer.ps1 이 핀 버전 wheel 을 여기로 스테이징한다. 빌드 산출물이므로
+# 저장소에 담지 않는다 — 버전은 installer/external-overlay.pin 이 말한다.
+installer/external-overlay.whl
+installer/external-components/

@@ -28,6 +28,8 @@ EXCLUDED_PARTS = {
     ".ruff_cache",
     "temp",
     "tmp",
+    "target",
+    "gen",
 }
 
 
@@ -49,7 +51,7 @@ def _is_allowed(root: Path, path: Path) -> bool:
 
 def input_files(root: Path) -> list[Path]:
     files: set[Path] = set()
-    for name in ("overlay", "core", "discord_bot", "scripts/kg"):
+    for name in ("overlay", "core", "discord_bot", "scripts/kg", "native-bubble-shell"):
         directory = root / name
         if directory.is_dir():
             files.update(path for path in directory.rglob("*") if path.is_file())

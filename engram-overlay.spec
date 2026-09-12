@@ -75,6 +75,10 @@ def _collect_tcl_tk() -> list[tuple[str, str]]:
 
 _tcl_tk_datas = _collect_tcl_tk()
 
+_native_bubble = Path('native-bubble-shell/target/release/native-bubble-shell.exe')
+if not _native_bubble.is_file():
+    raise FileNotFoundError('Native bubble shell missing; run installer/build-native-bubble.ps1 first')
+
 
 def _collect_tk_python_runtime() -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:
     """Collect tkinter even when PyInstaller's isolated Tcl probe is unreliable.
@@ -143,7 +147,7 @@ a = Analysis(
     ['engram_overlay_entry.py'],
     # scripts/kg 를 추가해 멀티콜 백엔드용 kg_watcher 를 top-level 모듈로 수집한다.
     pathex=['scripts\\kg'],
-    binaries=[*_streamlit_binaries, *_mcp_binaries, *_tk_python_binaries],
+    binaries=[*_streamlit_binaries, *_mcp_binaries, *_tk_python_binaries, (str(_native_bubble), 'native-bubble-shell')],
     datas=[
         ('resource\\icon.png', 'resource'),
         ('resource\\overlay.png', 'resource'),

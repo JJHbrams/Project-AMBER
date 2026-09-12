@@ -147,10 +147,11 @@ source file. A simplified example:
 
 Native Bolttagu is the default, but AMBER can also install compatible external
 overlay components without activating one automatically. Their authenticated
-local Event API publishes only metadata such as display hints and lifecycle
+loopback Event API publishes only metadata such as display hints and lifecycle
 state; renderer design, animation, and renderer-specific settings remain
 renderer-owned.
 
+- [External overlay renderer repository](https://github.com/JJHbrams/engram-overlay)
 - [External Overlay Event API v2](docs/overlay-event-api-v2.md)
 - [External component installation guide](docs/dev/external-overlay-install-plan.md)
 - [Joint startup guide](docs/dev/joint-startup.md)

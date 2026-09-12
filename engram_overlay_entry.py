@@ -167,6 +167,10 @@ def _dispatch_backend_role() -> bool:
         if role == 'service-config':
             from core.install.service_config import main as service_config_main
             raise SystemExit(service_config_main(rest))
+        if role == "bubble-smoke":
+            from scripts.dev.smoke_native_bubble import main as bubble_smoke
+            sys.argv = [sys.argv[0], *argv[2:]]
+            raise SystemExit(bubble_smoke())
         if role == "runtime-contract":
             from core.install.runtime_contract import main as runtime_contract_main
 
