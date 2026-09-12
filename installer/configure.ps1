@@ -410,7 +410,14 @@ if (Merge-JsonMcp -Path (Join-Path $env:USERPROFILE ".claude.json") -ServersKey 
 Write-Step "Claude session lifecycle hooks (compatible CLI only)"
 $claudeHooks = Get-EngramLaunchContract -Executable $DistExe -Role claude-monitor-hooks
 Write-Host ("  Claude hooks: applied={0}, changed={1}, count={2}, reason={3}" -f $claudeHooks.applied, $claudeHooks.changed, $claudeHooks.hook_count, $claudeHooks.reason)
-Write-Step "Codex session lifecycle hooks (existing roots only)"
+# Codex's root/config must exist before the hook writer scans it.  This is
+# deliberately separate from trust: provisioning definitions never approves
+# their native hashes.
+$codexRoot = Join-Path $env:USERPROFILE ".codex"
+if (-not (Test-Path $codexRoot)) { New-Item -ItemType Directory -Path $codexRoot -Force | Out-Null }
+$codexConfig = Join-Path $codexRoot "config.toml"
+if (-not (Test-Path $codexConfig)) { [System.IO.File]::WriteAllText($codexConfig, "", $Utf8NoBom) }
+Write-Step "Codex session lifecycle hooks (review required; trust is never automatic)"
 $codexHooks = Get-EngramLaunchContract -Executable $DistExe -Role codex-monitor-hooks
 Write-Host ("  Codex hooks: applied={0}, changed={1}, roots={2}, review_required={3}" -f $codexHooks.applied, $codexHooks.changed, $codexHooks.root_count, $codexHooks.trust_required)
 if ($codexHooks.trust_required) { Write-Warn 'Codex: review the changed hooks with /hooks in each affected CLI/Orca configuration. Trust is not automatically granted.' }
@@ -473,13 +480,23 @@ foreach ($skillName in $sharedSkillNames) {
     foreach ($skillRoot in @(
         (Join-Path $env:USERPROFILE ".agents\skills"),
         (Join-Path $env:USERPROFILE ".claude\skills"),
-        (Join-Path $env:USERPROFILE ".copilot\skills")
+            (Join-Path $env:USERPROFILE ".copilot\skills"),
+            (Join-Path $env:USERPROFILE ".codex\skills")
     )) {
         $skillDir = Join-Path $skillRoot $skillName
         if (-not (Test-Path $skillDir)) { New-Item $skillDir -ItemType Directory -Force | Out-Null }
         Copy-Item $skillSrc (Join-Path $skillDir "SKILL.md") -Force
         Write-Ok (Join-Path $skillDir "SKILL.md")
     }
+}
+$codexSkillNames = @("engram-connect", "engram-hook-trust")
+foreach ($skillName in $codexSkillNames) {
+    $skillSrc = Join-Path $WorkflowSkillsSource $skillName
+    $skillDir = Join-Path $env:USERPROFILE ".codex\skills\$skillName"
+    if (-not (Test-Path $skillSrc)) { Write-Warn "Skill source 없음: $skillSrc"; continue }
+    if (-not (Test-Path $skillDir)) { New-Item $skillDir -ItemType Directory -Force | Out-Null }
+    Copy-Item (Join-Path $skillSrc "*") $skillDir -Recurse -Force
+    Write-Ok $skillDir
 }
 $copilotEngramSkill = Join-Path $WorkflowSkillsSource "engram\SKILL.md"
 if (Test-Path $copilotEngramSkill) {

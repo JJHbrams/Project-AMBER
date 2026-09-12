@@ -43,8 +43,8 @@ class NativeBolttaguTests(unittest.TestCase):
         monitor.assert_called_once_with(-1700, -780)
 
     def test_upstream_clock_recipe_parity_2112_samples(self):
-        # Captured from unmodified engram-overlay d795f5a71ea23c11e09882f6537ee011790f371b.
-        # CI does not need that repository or the installed provider package.
+        # Golden trace for the packaged product mapping. CI does not need an
+        # installed provider package or a per-user mapping file.
         values = []
         for seed in (0, 42):
             for hint in STATE_POSES:
@@ -54,7 +54,7 @@ class NativeBolttaguTests(unittest.TestCase):
                     values.extend(model.resolve(stamp) for stamp in (0, 49, 100, 250, 550, 999, 1000, 2500, 2710, 6000, 12345))
         self.assertEqual(len(values), 2112)
         self.assertEqual(hashlib.sha256(json.dumps(values, separators=(',', ':')).encode()).hexdigest(),
-                         'bb1ec96ffd4ab426b8a3530eadf40af762a0344246bed06bb021b6420e36fe20')
+                         '0111831341ce25ccafb13b75c501bc67fb9e304ec920e0661b16da90a7970088')
 
     def test_every_bundled_recipe_is_drawable(self):
         sheets, cell = load_atlas()
@@ -77,28 +77,28 @@ class NativeBolttaguTests(unittest.TestCase):
 
     def test_idle_has_independent_blink_and_steam(self):
         model = BolttaguAnimator(intro=None)
-        self.assertEqual(model.resolve(0), (('idle', 0), ('steam', 0)))
-        self.assertEqual(model.resolve(100), (('idle', 0), ('steam', 1)))
-        self.assertEqual(model.resolve(2500)[0], ('idle', 1))
-        self.assertEqual(model.resolve(2550)[0], ('idle', 2))
-        self.assertEqual(model.resolve(2710)[0], ('idle', 0))
+        self.assertEqual(model.resolve(0), (('trickcal-idle', 0), ('trickcal-steam', 0)))
+        self.assertEqual(model.resolve(100), (('trickcal-idle', 0), ('trickcal-steam', 1)))
+        self.assertEqual(model.resolve(2500)[0], ('trickcal-idle', 1))
+        self.assertEqual(model.resolve(2550)[0], ('trickcal-idle', 2))
+        self.assertEqual(model.resolve(2710)[0], ('trickcal-idle', 0))
 
     def test_hint_category_success_and_lifecycle(self):
         model = BolttaguAnimator(intro=None)
         model.apply_hint('generating', 0, 'write')
-        self.assertEqual(model.resolve(0), (('writing', 0),))
+        self.assertEqual(model.resolve(0), (('trickcal-writing', 0),))
         model.apply_hint('memory', 1, 'read')
-        self.assertEqual(model.resolve(1), (('searching', 0),))
+        self.assertEqual(model.resolve(1), (('trickcal-searching', 0),))
         model.apply_hint('success', 2)
         self.assertEqual(model.resolve(2), (('success', 0),))
-        self.assertEqual(model.resolve(1002)[0][0], 'idle')
+        self.assertEqual(model.resolve(1002)[0][0], 'trickcal-idle')
         duration = model.play_lifecycle('exit', 2000, hold_last=True)
         self.assertEqual(duration, 700)
         self.assertEqual(model.resolve(9000), (('exit', 2),))
 
     def test_explicit_mapping_only_no_external_user_lookup(self):
         with patch('pathlib.Path.home', side_effect=AssertionError('no home lookup')):
-            self.assertEqual(load_mapping().hints['memory'], 'searching')
+            self.assertEqual(load_mapping().hints['memory'], 'trickcal-searching')
 
     def test_corrupt_and_escaping_atlas_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -136,7 +136,7 @@ class NativeBolttaguTests(unittest.TestCase):
             with self.assertLogs('overlay.character', level='WARNING') as captured:
                 view = CharacterOverlay._create_native_view(cfg, SimpleNamespace(native_enabled=True))
             self.assertIsNotNone(view)
-            self.assertEqual(view.mapping.hints['idle'], 'idle')
+            self.assertEqual(view.mapping.hints['idle'], 'trickcal-idle')
             self.assertEqual(len(captured.output), 1)
             self.assertNotIn('private-fixture-content', captured.output[0])
 

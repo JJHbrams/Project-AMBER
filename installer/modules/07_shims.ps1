@@ -312,7 +312,8 @@ foreach ($skillName in @("orchestrate", "engram-new-session", "engram-task-workf
         foreach ($skillRoot in @(
             (Join-Path $env:USERPROFILE ".agents\skills"),
             (Join-Path $env:USERPROFILE ".claude\skills"),
-            (Join-Path $env:USERPROFILE ".copilot\skills")
+            (Join-Path $env:USERPROFILE ".copilot\skills"),
+            (Join-Path $env:USERPROFILE ".codex\skills")
         )) {
             $skillBase = Join-Path $skillRoot $skillName
             if (-not (Test-Path $skillBase)) { New-Item -Path $skillBase -ItemType Directory -Force | Out-Null }
@@ -322,6 +323,15 @@ foreach ($skillName in @("orchestrate", "engram-new-session", "engram-task-workf
     } else {
         Write-Warn "Skill source not found: $skillSrc"
     }
+}
+foreach ($skillName in @("engram-connect", "engram-hook-trust")) {
+    $skillSrc = Join-Path $ProjectRoot ".github\skills\$skillName"
+    $skillDest = Join-Path $env:USERPROFILE ".codex\skills\$skillName"
+    if (Test-Path $skillSrc) {
+        if (-not (Test-Path $skillDest)) { New-Item -Path $skillDest -ItemType Directory -Force | Out-Null }
+        Copy-Item (Join-Path $skillSrc '*') $skillDest -Recurse -Force
+        Write-Ok $skillDest
+    } else { Write-Warn "Skill source not found: $skillSrc" }
 }
 
 # 7e. Provider-owned subagent definitions (planner / coder / servant)

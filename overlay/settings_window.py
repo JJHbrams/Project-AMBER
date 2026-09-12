@@ -51,6 +51,7 @@ from overlay.remote_tunnel import sanitize_for_display
 from overlay.cli_capabilities import effort_key, efforts as provider_efforts, model_key, models as provider_models, validate as validate_cli
 from core.identity import get_persona_db_baseline, set_persona_baseline
 from core.config.runtime_config import normalize_policy_guidance_level
+from core.install.versioning import resolve_version
 from core.tutorial import complete_tutorial_step, has_user_persona_override, reset_tutorial_state
 
 _PROVIDER_OPTIONS = [
@@ -77,6 +78,15 @@ _PROVIDER_VALUE_TO_DISPLAY = {
     "claude-code-ollama": "claude-code(ollama)",
     "ollama": "ollama",
 }
+
+
+def settings_product_identity() -> str:
+    """Keep Settings identity tied to the source/frozen version resolver."""
+    try:
+        version = resolve_version().version
+    except (OSError, ValueError):
+        version = "version unavailable"
+    return f"AMBER (ENGRAM) {version} · DRTECH"
 _POLICY_LEVEL_OPTIONS = ["끔", "경고만", "Agent 강제 · 사람 경고 (권장)"]
 _POLICY_LEVEL_DISPLAY_TO_VALUE = {
     "끔": "off",
@@ -761,6 +771,10 @@ class _SettingsWindow:
 
         self._save_feedback_var = tk.StringVar(value="")
         ttk.Label(self.window, textvariable=self._save_feedback_var, foreground="gray").pack(fill="x", padx=12, pady=(0, 4))
+
+        ttk.Label(self.window, text=settings_product_identity(), foreground="gray").pack(
+            fill="x", padx=12, pady=(0, 4)
+        )
 
         # 하단 버튼
         btn_frame = ttk.Frame(self.window)

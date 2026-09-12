@@ -20,7 +20,8 @@ class HookConflict(ValueError):
     """A user-modified monitor definition cannot be safely adopted."""
 
 TOOL = 'engram_report_codex_event'
-EVENTS = ('UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'PermissionRequest', 'Stop', 'Interrupt')
+EVENTS = ('UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'PermissionRequest', 'Stop', 'Interrupt',
+          'SubagentStart', 'SubagentStop')
 SUBAGENT_EVENTS = ('SubagentStart', 'SubagentStop')
 TITLE_REMINDER = (
     'Engram Codex session monitor: before answering the first substantive request '
@@ -53,12 +54,16 @@ def supported_title_commands():
             for windows in (True, False) for identity in (True, False)}
 
 
-def generated_hooks(server='engram', *, native_identity=False, subagent_activity=False):
+def generated_hooks(server='engram', *, native_identity=False, subagent_activity=True):
+    """Return the canonical eight monitored events plus SessionStart.
+
+    Definition installation is intentionally distinct from Codex trust review.
+    """
     native_identity = native_identity or subagent_activity
     if not isinstance(server, str) or not re.fullmatch(r'[A-Za-z0-9_.:-]{1,80}', server):
         raise ValueError('invalid server')
     result = {}
-    for event in EVENTS + (SUBAGENT_EVENTS if subagent_activity else ()):
+    for event in EVENTS if subagent_activity else tuple(event for event in EVENTS if event not in SUBAGENT_EVENTS):
         payload = {'event': event, 'turn_id': '${turn_id}'}
         if event in SUBAGENT_EVENTS:
             payload['agent_id'] = '${agent_id}'
@@ -86,7 +91,7 @@ def merge_settings(settings, server='engram', *, upgrade_native_identity=False, 
         raise ValueError('hooks must be an object')
     generated = generated_hooks(server, native_identity=upgrade_native_identity, subagent_activity=upgrade_subagent_activity)
     newest = generated_hooks(server, subagent_activity=True)
-    supported = (generated_hooks(server), generated_hooks(server, native_identity=True), newest)
+    supported = (generated_hooks(server, subagent_activity=False), generated_hooks(server, native_identity=True, subagent_activity=False), newest)
     owned_commands = supported_title_commands()
     present = set()
     for event, groups in hooks.items():
@@ -185,8 +190,13 @@ def configure_root(root, *, server='engram', apply=False, inspect=True, upgrade_
     path = root / 'hooks.json'
     original = _read(path, binary=True)
     document = json.loads(original.decode('utf-8-sig')) if original is not None else {}
+    # A genuinely new Codex root receives the complete current contract.  An
+    # existing hooks.json keeps its supported legacy shape unless the user
+    # explicitly requests the trust-changing subagent upgrade.
+    install_subagent_activity = upgrade_subagent_activity or original is None
     try:
-        merged = merge_settings(document, server, upgrade_native_identity=upgrade_native_identity, upgrade_subagent_activity=upgrade_subagent_activity)
+        merged = merge_settings(document, server, upgrade_native_identity=upgrade_native_identity,
+                                upgrade_subagent_activity=install_subagent_activity)
     except HookConflict:
         return {**result, 'reason': 'modified-monitor-definition-preserved', 'conflict': True,
                 'status': 'conflict', 'review_instruction':
@@ -214,7 +224,7 @@ def configure_root(root, *, server='engram', apply=False, inspect=True, upgrade_
     status = inspect_root(root, server=server) if inspect and (apply or not changed) else {
         'status': 'unknown', 'trust_required': False, 'reason': 'planned-hooks-not-inspected'}
     return {**result, **status, 'changed': changed, 'applied': bool(apply),
-            'hook_count': len(EVENTS) + 1 + sum(
+            'hook_count': len(EVENTS) - len(SUBAGENT_EVENTS) + 1 + sum(
                 generated_hooks(server, subagent_activity=True)[event][0] in merged.get('hooks', {}).get(event, [])
                 for event in SUBAGENT_EVENTS)}
 
