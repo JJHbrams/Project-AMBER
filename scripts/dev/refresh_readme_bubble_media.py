@@ -9,6 +9,8 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import io
+import subprocess
 from pathlib import Path
 
 from PIL import Image
@@ -40,15 +42,35 @@ def edge_alpha(image: Image.Image) -> Image.Image:
 
 
 def retime_gif(source: Path, output: Path) -> dict:
-    with Image.open(source) as raw:
+    # Immutable original capture, so repeated runs never consume edited output.
+    original = subprocess.run(
+        ['git', 'show', 'b9377b0:resource/asset/readme/native-bolttagu-trickcal-v1.5.15.gif'],
+        cwd=Path(__file__).resolve().parents[2], check=True, capture_output=True,
+    ).stdout
+    with Image.open(io.BytesIO(original)) as raw:
         frames = []
         for index in range(raw.n_frames):
             raw.seek(index)
             frames.append(raw.convert("RGBA").copy())
-    # One continuous cup-holding take. Later source frames jump between
-    # dropped cup, book and writing props without connecting motion.
-    frames = frames[:12]
-    durations = [2400, 100, 100, 180, 180, 180, 220, 220, 220, 220, 220, 1800]
+    captured = frames
+    frames, durations = [], []
+    # Each scene keeps its own prop and facing direction. Fade through the
+    # matte between scenes instead of implying a physically continuous action.
+    scenes = [([0, 1, 2, 3], [2400, 100, 100, 1200]),
+              ([12], [3400]),
+              ([19, 20, 21, 22, 23], [1800, 220, 220, 220, 1400]),
+              ([24, 25, 26], [2000, 200, 1400]),
+              ([13], [3200])]
+    matte = Image.new('RGBA', captured[0].size, (0, 0, 0, 255))
+    for indexes, timing in scenes:
+        first, last = captured[indexes[0]], captured[indexes[-1]]
+        for alpha in (.2, .4, .6, .8):
+            frames.append(Image.blend(matte, first, alpha)); durations.append(100)
+        for index, duration in zip(indexes, timing):
+            frames.append(captured[index]); durations.append(duration)
+        for alpha in (.8, .6, .4, .2):
+            frames.append(Image.blend(matte, last, alpha)); durations.append(100)
+        frames.append(matte.copy()); durations.append(160)
     frames[0].save(
         output,
         format="GIF",
@@ -128,10 +150,10 @@ def main() -> None:
     provenance_path = asset_dir / "trickcal-demo-v1.5.15.provenance.json"
     provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
     provenance["evidence"]["gif_encoded_frames"] = timing["frames"]
-    provenance["evidence"]["events"] = "Continuous cup-holding idle take; unrelated event poses intentionally omitted for prop continuity."
+    provenance["evidence"]["events"] = "Five separate scenes: coffee idle, reading, writing, success, alert; consistent facing direction."
     provenance["evidence"]["gif_duration_ms"] = timing["duration_ms"]
     provenance["evidence"]["gif_frame_durations_ms"] = timing["durations_ms"]
-    provenance["evidence"]["gif_timing_refresh"] = "Single continuous cup-holding take (original frames 0-11), with relaxed holds and a short blink. Disconnected alert, prop changes and mirrored cuts removed; no generated motion."
+    provenance["evidence"]["gif_timing_refresh"] = "Original b9377b0 capture grouped into five scenes held for 3.2-3.86 seconds each, with 400ms fade-out, 160ms matte pause, and 400ms fade-in between props. Blink remains 100ms. No invented in-between character poses."
     provenance["evidence"]["bubble"] = "Actual source-native synthetic-QA input and active response captures; no provider query or private reply."
     provenance["evidence"]["bubble_composite"] = {
         "runtime": "source native Tauri shell with synthetic QA host",

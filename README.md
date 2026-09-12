@@ -16,7 +16,7 @@ AMBER gives configured **Claude Code**, **Codex CLI**, and **GitHub Copilot CLI*
 a shared project-memory layer. Move between coding sessions with decisions and
 project context ready to retrieve instead of rebuilding everything from scratch.
 
-<p align="center"><img src="resource/asset/readme/native-bolttagu-trickcal-v1.5.15.gif" width="262" alt="Trickcal-style Bolttagu holding a coffee cup with a relaxed blink and idle motion." /></p>
+<p align="center"><img src="resource/asset/readme/native-bolttagu-trickcal-v1.5.15.gif" width="262" alt="Trickcal-style Bolttagu: coffee, reading, writing, success and alert poses in a relaxed showcase." /></p>
 
 <p align="center"><sub>AMBER v1.5.15.736 · packaged Trickcal-style art with a custom event mapping, not the default mapping. <a href="resource/asset/readme/trickcal-demo-v1.5.15.provenance.json">Capture details</a> · <a href="resource/asset/readme/native-bolttagu-trickcal-v1.5.15.png">Poster</a></sub></p>
 
