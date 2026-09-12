@@ -1,7 +1,8 @@
 """Refresh README GIF timing and compose verified native bubble QA surfaces.
 
-This script never redraws product UI.  It only re-times the approved GIF frames
-and composites captured RGBA WebView surfaces with the approved character poster.
+This script never redraws product UI. It only re-times approved GIF frames and
+composites captured native WebView surfaces with already-approved monitor and
+character captures.
 """
 from __future__ import annotations
 
@@ -44,8 +45,8 @@ def retime_gif(source: Path, output: Path) -> dict:
         for index in range(raw.n_frames):
             raw.seek(index)
             frames.append(raw.convert("RGBA").copy())
-    durations = [120] * len(frames)
-    durations[-1] = 240
+    durations = [180] * len(frames)
+    durations[-1] = 500
     frames[0].save(
         output,
         format="GIF",
@@ -63,18 +64,36 @@ def retime_gif(source: Path, output: Path) -> dict:
     return {"frames": len(actual), "duration_ms": sum(actual), "durations_ms": actual}
 
 
-def compose_bubbles(character_path: Path, input_path: Path, history_path: Path, output: Path) -> None:
+def resize_to_width(image: Image.Image, width: int) -> Image.Image:
+    height = round(image.height * width / image.width)
+    return image.resize((width, height), Image.Resampling.LANCZOS)
+
+
+def compose_bubbles(
+    character_path: Path,
+    monitor_path: Path,
+    input_path: Path,
+    speech_path: Path,
+    output: Path,
+) -> None:
     background = (39, 39, 39, 255)
-    canvas = Image.new("RGBA", (980, 650), background)
+    canvas = Image.new("RGBA", (1280, 720), background)
     with Image.open(character_path) as raw:
-        character = edge_alpha(raw)
+        character = resize_to_width(edge_alpha(raw), 220)
+    with Image.open(monitor_path) as raw:
+        monitor_surface = raw.convert("RGBA").crop((0, 0, raw.width, 220))
+        monitor = resize_to_width(monitor_surface, 250)
     with Image.open(input_path) as raw:
-        input_bubble = raw.convert("RGBA")
-    with Image.open(history_path) as raw:
-        history = raw.convert("RGBA")
-    canvas.alpha_composite(character, (28, 326))
-    canvas.alpha_composite(history, (265, 22))
-    canvas.alpha_composite(input_bubble, (425, 330))
+        input_bubble = resize_to_width(raw.convert("RGBA"), 640)
+    with Image.open(speech_path) as raw:
+        speech = resize_to_width(raw.convert("RGBA"), 640)
+    # Dense 16:9 documentation layout: monitor/character on the left and the
+    # active response plus composer on the right. Every foreground surface is
+    # a captured product surface; this function only changes scale/placement.
+    canvas.alpha_composite(monitor, (42, 44))
+    canvas.alpha_composite(character, (77, 430))
+    canvas.alpha_composite(speech, (565, 72))
+    canvas.alpha_composite(input_bubble, (565, 470))
     canvas.convert("RGB").save(output, format="PNG", optimize=True)
 
 
@@ -82,8 +101,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--asset-dir", type=Path, required=True)
     parser.add_argument("--input-capture", type=Path, required=True)
-    parser.add_argument("--history-capture", type=Path, required=True)
+    parser.add_argument("--speech-capture", type=Path, required=True)
     parser.add_argument("--source-commit", required=True)
+    parser.add_argument("--shell-exe", type=Path, required=True)
     args = parser.parse_args()
 
     asset_dir = args.asset_dir.resolve()
@@ -91,25 +111,41 @@ def main() -> None:
     poster = asset_dir / "native-bolttagu-trickcal-v1.5.15.png"
     bubble = asset_dir / "bubble-mode-history-20260912.png"
     timing = retime_gif(gif, gif)
-    compose_bubbles(poster, args.input_capture.resolve(), args.history_capture.resolve(), bubble)
+    monitor = asset_dir / "session-monitor-trickcal-v1.5.15.png"
+    compose_bubbles(
+        poster,
+        monitor,
+        args.input_capture.resolve(),
+        args.speech_capture.resolve(),
+        bubble,
+    )
 
     provenance_path = asset_dir / "trickcal-demo-v1.5.15.provenance.json"
     provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
     provenance["evidence"]["gif_encoded_frames"] = timing["frames"]
     provenance["evidence"]["gif_duration_ms"] = timing["duration_ms"]
     provenance["evidence"]["gif_frame_durations_ms"] = timing["durations_ms"]
-    provenance["evidence"]["gif_timing_refresh"] = "Same approved captured frames re-encoded only; no generated or interpolated art."
-    provenance["evidence"]["bubble_history"] = {
+    provenance["evidence"]["gif_timing_refresh"] = "Same approved captured frames re-encoded at a regular 180 ms cadence with a 500 ms final hold; no generated or interpolated art."
+    provenance["evidence"]["bubble"] = "Actual source-native synthetic-QA input and active response captures; no provider query or private reply."
+    provenance["evidence"]["bubble_composite"] = {
         "runtime": "source native Tauri shell with synthetic QA host",
         "source_commit": args.source_commit,
+        "shell_exe_sha256": sha256(args.shell_exe.resolve()),
         "input_capture_sha256": sha256(args.input_capture.resolve()),
-        "history_capture_sha256": sha256(args.history_capture.resolve()),
-        "composition": "Actual RGBA WebView captures plus the approved installed character poster on a neutral matte.",
+        "speech_capture_sha256": sha256(args.speech_capture.resolve()),
+        "monitor_capture_sha256": sha256(monitor),
+        "character_capture_sha256": sha256(poster),
+        "composition": "Actual source-runtime RGBA input and active-speech WebView captures, plus the upper session-stack crop and character from approved installed captures, on a neutral matte. Crop, scale and placement only; no UI redraw.",
     }
+    provenance["evidence"].pop("bubble_history", None)
     provenance["sha256"][gif.name] = sha256(gif)
     provenance["sha256"][bubble.name] = sha256(bubble)
-    limitation = "The response-history README composition is source-runtime synthetic QA, not a provider conversation or frozen-release proof."
-    provenance["limitations"] = [item for item in provenance["limitations"] if item != limitation]
+    limitation = "The dense bubble README composition is source-runtime synthetic QA, not a provider conversation or frozen-release proof."
+    legacy_limitation = "The response-history README composition is source-runtime synthetic QA, not a provider conversation or frozen-release proof."
+    provenance["limitations"] = [
+        item for item in provenance["limitations"]
+        if item not in {limitation, legacy_limitation}
+    ]
     provenance["limitations"].append(limitation)
     provenance_path.write_text(json.dumps(provenance, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 

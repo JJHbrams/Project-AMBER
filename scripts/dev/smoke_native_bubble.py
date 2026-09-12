@@ -144,10 +144,11 @@ async def run(args):
                         host.refresh_positions();host.publish();await asyncio.sleep(.1)
                         await evaluate('resumePresentationFade()')
                         await asyncio.sleep(.08)
-                        host._present('speech','synthetic replacement')
+                        host._present('speech','[합성 QA] 최근 응답은 한 줄 카드로 정리되고, 필요한 답을 다시 열어볼 수 있어요.')
                         host.refresh_positions();host.publish();await asyncio.sleep(.7)
                         assert 'speech' not in host._dismissed,'stale_fade_closed_replacement'
-                        assert await evaluate("document.querySelector('#content').textContent.includes('synthetic replacement')"),'new_speech_missing'
+                        assert await evaluate("document.querySelector('#content').textContent.includes('최근 응답')"),'new_speech_missing'
+                        await capture('speech-active')
                         if args.restoration:
                             original_cfg=dict(host.cfg)
                             host.update_cfg({**original_cfg,'font_family':'Arial','font_size':18,'speech_max_height_ratio':.20})
