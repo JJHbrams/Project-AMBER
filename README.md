@@ -130,7 +130,7 @@ To choose event poses in the Windows settings UI:
 2. Choose **Edit mapping…**.
 3. Pick a state, tool category, or launcher transition. The editor previews the
    packaged atlas using the same layers and frame timing as the runtime.
-4. Choose **Apply preparation**, then choose **Save** in the main Settings
+4. Choose **Apply**, then choose **Save** in the main Settings
    window. The running overlay reloads the mapping immediately and keeps it
    across restarts.
 
@@ -179,7 +179,7 @@ For source changes, see the [architecture](docs/architecture.md),
 ## Troubleshooting
 
 - **The overlay does not change after editing a mapping:** choose **Save** in
-  the main Settings window after **Apply preparation**. If live reload rejects
+  the main Settings window after **Apply**. If live reload rejects
   the file, correct the invalid mapping and save again; the last good mapping
   remains active.
 - **A coding tool has no remembered project context:** confirm its local MCP
