@@ -4,6 +4,26 @@ All notable changes to this project are documented in this file.
 
 ## Unreleased
 
+## [1.5.18] — 2026-09-12
+
+### Added
+
+- Codex에 `engram-connect`와 `engram-hook-trust` skill 전체를 설치해 로컬 MCP
+  연결 진단·복구와 Engram 소유 훅의 명시적 검토·복구 경로를 제공한다.
+- 대화 원문을 별도 append-only `archive.db`에 보존하고, 프로젝트 scope를
+  유지한 검색과 제한된 앞뒤 문맥 조회를 제공한다.
+
+### Changed
+
+- 내장 볼따구의 기본 이벤트 매핑을 검증된 Trickcal 중심 매핑으로 갱신하고,
+  매핑 편집기의 기본 높이와 하단 동작 영역을 보정했다. 버튼명은 `적용`으로
+  통일했다.
+- 설정 창 하단에 `AMBER (ENGRAM) <4자리 버전> · DRTECH` 제품 표기를 추가했다.
+- 새 Codex 설정 root에는 8개 MCP lifecycle 훅과 `SessionStart`를 설치한다.
+  기존 사용자 훅은 보존하며 trust 승인은 자동으로 변경하지 않는다.
+- README의 첫 GIF 간격과 말풍선 모드 이미지를 현재 native UI 구성에 맞게
+  갱신했다.
+
 ## [1.5.17] — 2026-09-12
 
 ### Fixed
