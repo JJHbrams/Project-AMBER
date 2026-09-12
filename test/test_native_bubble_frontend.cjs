@@ -1,10 +1,13 @@
 const test=require('node:test'),assert=require('node:assert/strict'),vm=require('node:vm'),fs=require('node:fs'),path=require('node:path');
 function fixture(){
- let now=0,id=0,hover=false;const timers=new Map(),actions=[],classes=new Set();
+ let now=0,id=0,hover=false;const timers=new Map(),actions=[],classes=new Set(),nodes={
+  rotor:{classList:{toggle(){}},},speechLive:{inert:false,setAttribute(){}},speechHistory:{inert:true,setAttribute(){}},speechHistoryList:{focus(){}}
+ };
  const context=vm.createContext({performance:{now:()=>now},setTimeout:(fn,ms)=>{timers.set(++id,{fn,at:now+ms});return id;},clearTimeout:i=>timers.delete(i),
   crypto:{randomUUID:()=>String(++id)},document:{body:{matches:()=>hover,classList:{add:x=>classes.add(x),remove:x=>classes.delete(x)}},getElementById:()=>null},
   window:{__TAURI__:{core:{invoke:(name,p)=>{actions.push(p);return Promise.resolve();}},event:{listen:()=>{}},window:{getCurrentWindow:()=>({label:'speech'})}}}});
  const source=fs.readFileSync(path.join(__dirname,'../native-bubble-shell/frontend/app.js'),'utf8');
+ context.document.getElementById=id=>nodes[id]||null;
  vm.runInContext(source.slice(0,source.lastIndexOf('init().catch')),context);
  vm.runInContext('render=()=>{};resize=()=>{};',context);
  return {run:s=>vm.runInContext(s,context),actions,classes,timers,hover:v=>hover=v,advance(ms){const end=now+ms;for(;;){const next=[...timers].filter(([,v])=>v.at<=end).sort((a,b)=>a[1].at-b[1].at)[0];if(!next)break;now=next[1].at;timers.delete(next[0]);next[1].fn();}now=end;}};
@@ -44,4 +47,13 @@ test('approval clearing restarts same-revision presentation fade',()=>{
  f.advance(1000);assert.equal(f.actions.length,0);
  f.run('state.approval=null;renderPresentation()');f.advance(520);
  assert.equal(f.actions.length,1);
+});
+test('speech archive selection survives the flip and holds fade until latest returns',()=>{
+ const f=fixture();f.run(`renderPresentation=()=>{};presentationFade.phase='dwell';presentationFade.remaining=50;selectedSpeechHistory='1';flipSpeechHistory(false,true);`);
+ assert.equal(f.run('historyOpen'),false);assert.equal(f.run('selectedSpeechHistory'),'1');assert.equal(f.timers.size,0);
+ f.run('flipSpeechHistory(false)');assert.equal(f.run('selectedSpeechHistory'),null);assert.equal(f.timers.size,1);
+});
+test('speech measurement targets the nested live face introduced by the rotor',()=>{
+ const source=fs.readFileSync(path.join(__dirname,'../native-bubble-shell/frontend/app.js'),'utf8');
+ assert.match(source,/querySelector\('#bubble \.face\.front, #bubble>\.face'\)/);
 });

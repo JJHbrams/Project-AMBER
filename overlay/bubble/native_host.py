@@ -83,6 +83,10 @@ class NativeBubbleHost:
         self._input_height=185
         self._presentation_sizes={}
         self.speech={'text':''}
+        # This is deliberately private-shell state: recent displayed answers
+        # never enter the provider payload, public renderer protocol, or DB.
+        self.speech_history=[]
+        self._speech_history_id=0
         self.thought={'text':''}
         self.blocks={}
         self.presentation_revision={'speech':0,'thought':0}
@@ -95,6 +99,21 @@ class NativeBubbleHost:
             on_geometry=lambda r:self.schedule(0,lambda:self._geometry(r)))
 
     def _present(self, kind, text, **extra):
+        if kind=='speech':
+            previous=getattr(self,'speech',{})
+            if previous.get('text','').strip() and not previous.get('nudge'):
+                self._speech_history_id+=1
+                archived={'id':str(self._speech_history_id),'text':previous['text'][-32000:],
+                    'summary':previous['text'].replace('\n',' ').strip()[:160]}
+                self.speech_history.insert(0,archived)
+                del self.speech_history[20:]
+            # A resize belongs to the presentation it was made on, not the
+            # speech window forever. Position remains a separate preference.
+            self.manual_size.discard('speech')
+            self._manual_rects.get('speech',{}).pop('width',None)
+            self._manual_rects.get('speech',{}).pop('height',None)
+            self._presentation_sizes.pop('speech',None)
+            self._sent_geometry.pop('speech',None)
         if kind=='speech' and self._nudge and not self._nudge['settled']:
             self._settle_nudge('ignored')
         if kind=='speech' and not extra.get('nudge'):self._nudge=None
@@ -343,7 +362,8 @@ class NativeBubbleHost:
         return {'version':self.version,'queue':cards,'recent':recent,'presentation_style':self._presentation_style(x,y,w),
             'busy':snap.active is not None,'held':snap.held,'edit':edit,'approval':approval,
             'accepted_request_id':self.accepted,'rejected_request_id':self.rejected,
-            'notice':self.notice,'speech':self.speech,'thought':self.thought}
+            'notice':self.notice,'speech':self.speech,'speech_history':self.speech_history,
+            'thought':self.thought}
 
     def publish(self):
         if self._publish_pending: return

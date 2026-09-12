@@ -62,7 +62,8 @@ async def run(args):
         return NativeBubbleShell(action,on_crash,executable=args.exe,**kw)
     anchor=[850,550,120,120]
     host=NativeBubbleHost(schedule=schedule,get_session=lambda:provider,get_anchor=lambda:tuple(anchor),
-        on_fallback=crashes.append,shell_factory=factory,version='SYNTHETIC QA')
+        on_fallback=crashes.append,shell_factory=factory,version='UI PREVIEW',
+        cfg={'font_family':'Noto Sans KR Medium','font_size':13})
     async def until(predicate,seconds=8):
         deadline=loop.time()+seconds
         while loop.time()<deadline:
@@ -214,6 +215,30 @@ async def run(args):
                             assert after['width']>before['width'] and after['height']>before['height'],'os_resize_not_applied'
                             print(json.dumps({'os_speech_resize':True,'before':[before['width'],before['height']],'after':[after['width'],after['height']]}))
                             await capture('speech-resized')
+                            host._present('speech','리사이즈 뒤의 짧은 새 응답');host.refresh_positions();host.publish()
+                            await until(lambda:'speech' not in host.manual_size)
+                            await asyncio.sleep(.6)
+                            reset_size=await evaluate('[innerWidth,innerHeight]')
+                            print(json.dumps({'speech_resize_reset_debug':True,'host_rect':host.rects.get('speech'),'manual_size':sorted(host.manual_size),'presentation_size':host._presentation_sizes.get('speech'),'webview':reset_size}))
+                            assert reset_size!=[after['width'],after['height']] and host._presentation_sizes.get('speech')=={'width':reset_size[0],'height':reset_size[1]},'next_response_kept_manual_size'
+                            print(json.dumps({'speech_resize_reset_on_next_response':True,'manual':[after['width'],after['height']],'next':reset_size}))
+                        host._present('speech','지난 응답은 한 줄 카드로 정리되어 다시 볼 수 있어요.');host.refresh_positions();host.publish();await asyncio.sleep(.2)
+                        host._present('speech','현재 응답은 내용 길이에 맞춰 크기가 달라집니다.');host.refresh_positions();host.publish();await asyncio.sleep(.4)
+                        await evaluate("document.querySelector('#speechFlip').click()")
+                        await asyncio.sleep(.3)
+                        assert await evaluate("document.querySelector('#rotor').classList.contains('flipped')"),'speech_history_not_flipped'
+                        assert await evaluate("document.querySelectorAll('.history-card').length>=2"),'speech_history_cards_missing'
+                        await capture('speech-history')
+                        await evaluate("document.querySelectorAll('.history-card')[1].click()")
+                        await asyncio.sleep(.3)
+                        assert await evaluate("document.querySelector('#content').textContent.includes('한 줄 카드')"),'archived_response_not_opened'
+                        assert await evaluate("selectedSpeechHistory!==null && !historyOpen"),'archived_response_selection_lost'
+                        await evaluate("document.querySelector('#speechFlip').click()")
+                        await asyncio.sleep(.25)
+                        await evaluate("document.querySelectorAll('.history-card')[0].click()")
+                        await asyncio.sleep(.25)
+                        assert await evaluate("document.querySelector('#content').textContent.includes('내용 길이')"),'latest_response_not_restored'
+                        print(json.dumps({'speech_history_flip':True,'archive_opened':True,'latest_restored':True}))
                         host.show_nudge('synthetic native initiative',dwell_ms=20000)
                         await asyncio.sleep(.12)
                         assert not host.composer_visible,'nudge_opened_composer'
@@ -236,15 +261,15 @@ async def run(args):
                         print(json.dumps({'thought_short':small,'thought_long':large}))
                         host.update_cfg(saved_cfg)
                     if label!='input':continue
-                    await evaluate("document.querySelector('#draft').value='synthetic first';document.querySelector('#send').click()")
+                    await evaluate("document.querySelector('#draft').value='기억 연결 상태 확인';document.querySelector('#send').click()")
                     await until(lambda:len(provider.sent)==1)
                     await until(lambda:host.accepted==provider.sent[0][0].request_id)
                     await asyncio.sleep(.15)
                     assert await evaluate("document.querySelector('#draft').value===''"),'draft_ack'
-                    await evaluate("document.querySelector('#draft').value='synthetic second';document.querySelector('#send').click()")
+                    await evaluate("document.querySelector('#draft').value='말풍선 기록 보기';document.querySelector('#send').click()")
                     await until(lambda:len(host.queue.snapshot().waiting)==1)
                     await asyncio.sleep(.15)
-                    await evaluate("document.querySelector('#draft').value='synthetic third';document.querySelector('#send').click()")
+                    await evaluate("document.querySelector('#draft').value='README 화면 갱신';document.querySelector('#send').click()")
                     await until(lambda:len(host.queue.snapshot().waiting)==2)
                     await asyncio.sleep(.15)
                     await capture('compact-input')
@@ -252,6 +277,21 @@ async def run(args):
                     assert await evaluate('window.innerHeight<=430'),'compact_height_regression'
                     assert await evaluate("getComputedStyle(document.querySelector('#heading')).display==='none'"),'heading_not_removed'
                     assert await evaluate("document.querySelector('#send').getBoundingClientRect().left >= document.querySelector('#draft').getBoundingClientRect().right"),'send_not_beside_editor'
+                    if args.os_resize:
+                        hwnd=window_handles['Engram input'];user32.SetForegroundWindow(hwnd);await asyncio.sleep(.2)
+                        grip=await evaluate("(()=>{const r=document.querySelector('.resize-handle').getBoundingClientRect();return [r.x+r.width/2,r.y+r.height/2]})()")
+                        before=dict(host.rects['input']);scale=before['scale'];point=wintypes.POINT();user32.GetCursorPos(ctypes.byref(point))
+                        x=int(before['x']+grip[0]*scale);y=int(before['y']+grip[1]*scale)
+                        try:
+                            user32.SetCursorPos(x,y);await asyncio.sleep(.1);user32.mouse_event(2,0,0,0,0);await asyncio.sleep(.15)
+                            for step in range(1,6):user32.SetCursorPos(x+step*12,y+step*8);await asyncio.sleep(.08)
+                        finally:
+                            user32.mouse_event(4,0,0,0,0);user32.SetCursorPos(point.x,point.y)
+                        await until(lambda:'input' in host.manual_size)
+                        after=host.rects['input'];assert after['width']>before['width'] and after['height']>before['height'],'os_input_resize_not_applied'
+                        input_size=await evaluate('[innerWidth,innerHeight]')
+                        print(json.dumps({'os_input_resize':True,'before':[before['width'],before['height']],'after':input_size}))
+                        await capture('input-resized')
                     await evaluate("document.querySelector('#flip').click()")
                     await asyncio.sleep(.3)
                     assert await evaluate("document.querySelector('#inputFace').inert && !document.querySelector('#queueFace').inert"),'flip_inert'
@@ -270,7 +310,7 @@ async def run(args):
                     await evaluate("document.querySelector('#back').click()")
                     await asyncio.sleep(.3)
                     assert await evaluate("!document.querySelector('#inputFace').inert && document.querySelector('#queueFace').inert"),'flip_restore'
-                    assert not (host.manual_position-({'speech'} if args.restoration else set())) and not (host.manual_size-({'speech'} if args.os_resize else set())),'passive_geometry_marked_manual'
+                    assert not (host.manual_position-({'speech'} if args.restoration else set())) and not (host.manual_size-({'input'} if args.os_resize else set())),'passive_geometry_marked_manual'
                     # Exercise completed recent-slot expiry without deleting queue history.
                     key=provider.active;provider.active=None
                     host.cfg['echo_dwell_ms']=50
