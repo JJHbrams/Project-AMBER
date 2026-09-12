@@ -37,6 +37,10 @@ function Get-EngramInstallerInputFiles([string]$Root, [string]$DistDir) {
         $path = Join-Path $Root $relative
         if (Test-Path -LiteralPath $path -PathType Leaf) { $files.Add($path) }
     }
+    $skillDir = Join-Path $Root ".github\skills"
+    if (Test-Path -LiteralPath $skillDir) {
+        Get-ChildItem -LiteralPath $skillDir -File -Recurse | ForEach-Object { $files.Add($_.FullName) }
+    }
     $templateDir = Join-Path $Root "installer\templates"
     if (Test-Path -LiteralPath $templateDir) {
         Get-ChildItem -LiteralPath $templateDir -File -Recurse |

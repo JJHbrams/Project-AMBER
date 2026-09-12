@@ -10,7 +10,9 @@ from datetime import datetime, timezone
 from typing import Any, List, Optional, Dict
 
 from core.storage.db import get_connection
+from core.storage.archive import append_turn as archive_append_turn
 from core.common.sanitizer import sanitize
+from core.memory.transcript_capture import redact_secrets
 from core.config.runtime_config import get_cfg_value, get_default_fallback_scope_key
 from core.context.project_scope import resolve_kg_node_id, resolve_project_key
 from core.memory.daily_checkpoint import append_session_close_daily_note
@@ -203,11 +205,23 @@ def save_message(session_id: int, role: str, content: str):
     safe_content = sanitize(content, max_length=4000)
     conn = get_connection()
     with conn:
-        open_row = conn.execute("SELECT 1 FROM sessions WHERE id=? AND ended_at IS NULL", (session_id,)).fetchone()
+        open_row = conn.execute(
+            "SELECT scope_key FROM sessions WHERE id=? AND ended_at IS NULL", (session_id,)
+        ).fetchone()
         if not open_row:
             raise ValueError("session is not open")
         conn.execute("INSERT INTO messages (session_id, role, content) VALUES (?,?,?)", (session_id, role, safe_content))
     conn.close()
+
+    # 주입용 사본(messages)은 위에서 4000자로 잘렸다. 되짚기용 원문은 따로 남긴다.
+    # 비밀값만 마스킹하고 길이는 건드리지 않는다 — 요약이 버린 디테일을 복구할
+    # 유일한 경로라서, 여기서 또 자르면 계층을 나눈 의미가 없다.
+    archive_append_turn(
+        session_id,
+        role,
+        redact_secrets(content or ""),
+        scope_key=str(open_row["scope_key"] or ""),
+    )
 
 
 def resolve_session_id_by_scope(scope_key: Optional[str]) -> Optional[int]:

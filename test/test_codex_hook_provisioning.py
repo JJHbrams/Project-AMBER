@@ -26,10 +26,16 @@ class CodexHookProvisioningTests(unittest.TestCase):
             self.assertEqual(handler['type'], 'mcp_tool')
             self.assertEqual(handler['tool'], 'engram_report_codex_event')
             self.assertEqual(handler['input']['turn_id'], '${turn_id}')
-            self.assertLessEqual(set(handler['input']), {'event', 'turn_id', 'tool_name', 'tool_use_id'})
+            self.assertLessEqual(
+                set(handler['input']),
+                {'event', 'turn_id', 'tool_name', 'tool_use_id', 'native_session_id', 'agent_id'},
+            )
+            self.assertEqual(handler['input']['native_session_id'], '${session_id}')
+            if event in hooks.SUBAGENT_EVENTS:
+                self.assertEqual(handler['input']['agent_id'], '${agent_id}')
         self.assertNotIn('tool_use_id', generated['PermissionRequest'][0]['hooks'][0]['input'])
         text = json.dumps(generated)
-        for forbidden in ('${prompt}', '${session_id}', '${agent_id}', '${transcript_path}', '${tool_input}', '${tool_response}'):
+        for forbidden in ('${prompt}', '${transcript_path}', '${tool_input}', '${tool_response}'):
             self.assertNotIn(forbidden, text)
 
     def test_merge_preserves_foreign_and_is_idempotent(self):
@@ -73,6 +79,25 @@ class CodexHookProvisioningTests(unittest.TestCase):
             self.assertEqual(next(root.glob('*.engram-monitor-backup-*')).read_bytes(), before)
             self.assertFalse(hooks.configure_root(root, apply=True)['changed'])
             self.assertEqual(len(list(root.glob('*.engram-monitor-backup-*'))), 1)
+
+    def test_clean_root_gets_nine_hooks_without_upgrading_existing_legacy_root(self):
+        with tempfile.TemporaryDirectory() as directory:
+            clean = Path(directory) / 'clean'
+            clean.mkdir()
+            (clean / 'config.toml').write_bytes(b'')
+            installed = hooks.configure_root(clean, apply=True, inspect=False)
+            document = json.loads((clean / 'hooks.json').read_text(encoding='utf-8'))
+            self.assertEqual(set(document['hooks']), set(hooks.EVENTS) | {'SessionStart'})
+            self.assertEqual(installed['hook_count'], 9)
+
+            legacy = Path(directory) / 'legacy'
+            legacy.mkdir()
+            (legacy / 'config.toml').write_bytes(b'')
+            legacy_hooks = hooks.generated_hooks(subagent_activity=False)
+            (legacy / 'hooks.json').write_text(json.dumps({'hooks': legacy_hooks}), encoding='utf-8')
+            preserved = hooks.configure_root(legacy, apply=True, inspect=False)
+            self.assertFalse(preserved['changed'])
+            self.assertEqual(preserved['hook_count'], 7)
 
     def test_explicit_disable_and_absent_root_never_written(self):
         with tempfile.TemporaryDirectory() as directory:

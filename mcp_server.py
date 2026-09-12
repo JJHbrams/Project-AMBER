@@ -28,6 +28,10 @@ from mcp.server.fastmcp import FastMCP, Context
 from mcp.types import CallToolResult, TextContent
 
 from core.storage.db import initialize_db, get_connection
+from core.storage.archive import (
+    search_turns as archive_search_turns,
+    scroll_turns as archive_scroll_turns,
+)
 from core.identity import (
     get_identity,
     update_narrative,
@@ -2812,6 +2816,95 @@ def engram_peek_stm(
 
     msgs = get_recent_messages_by_scope(resolved_scope, limit=limit, within_minutes=within_minutes)
     return {"scope_key": resolved_scope, "source": "direct", "messages": msgs}
+
+
+# ── 원문 아카이브 ──────────────────────────────────────────
+
+_TRANSCRIPT_RESULT_CHARS = 64_000
+
+
+def _transcript_scope(scope_key: str, cwd: str, ctx: Context | None) -> str:
+    resolved = scope_key.strip()
+    if not resolved:
+        fingerprint = _context_session_fingerprint(ctx)
+        session_id = _FINGERPRINT_TO_SESSION.get(fingerprint, 0) if fingerprint else 0
+        if session_id:
+            conn = get_connection()
+            try:
+                row = conn.execute("SELECT scope_key FROM sessions WHERE id = ?", (session_id,)).fetchone()
+            finally:
+                conn.close()
+            if row and row["scope_key"]:
+                resolved = row["scope_key"]
+    return resolved or resolve_scope_key(None, cwd=cwd or None)
+
+
+def _bounded_transcript_result(turns: list[dict]) -> tuple[list[dict], bool]:
+    """Bound MCP output without truncating the append-only archive itself."""
+    remaining, bounded, truncated = _TRANSCRIPT_RESULT_CHARS, [], False
+    for turn in turns:
+        item = dict(turn)
+        content = str(item.get("content", ""))
+        if len(content) > remaining:
+            item["content_chars"] = len(content)
+            item["content"] = content[:max(0, remaining)]
+            item["content_truncated"] = True
+            truncated = True
+        bounded.append(item)
+        remaining -= len(item["content"])
+        if remaining <= 0:
+            truncated |= len(bounded) < len(turns)
+            break
+    return bounded, truncated
+
+
+@engramMCP.tool()
+def engram_search_transcript(
+    query: str,
+    limit: int = 10,
+    scope_key: str = "",
+    cwd: str = "",
+    ctx: Context | None = None,
+) -> dict:
+    """과거 대화 '원문'을 전문검색합니다. 요약본(memories/STM)이 아닌 잘리지 않은 기록입니다.
+
+    "그때 뭐라고 했더라", "이거 전에 논의했었나", "내가 그렇게 말했나?" 처럼
+    과거를 되짚어야 할 때 사용합니다. search_memories 가 승격된 요약을 찾는 반면
+    이 도구는 실제로 오간 문장을 찾습니다.
+
+    결과는 snippet(매칭 구간)만 싣습니다. 앞뒤 흐름이 필요하면 반환된 turn id 로
+    engram_read_transcript 를 호출하세요 — 검색과 확장은 별개 연산입니다.
+
+    한국어는 3자 이상 질의를 권장합니다(2자 이하는 느린 LIKE 스캔으로 내려갑니다).
+    limit: 최대 결과 수 (기본 10, 최대 50)."""
+    resolved_scope = _transcript_scope(scope_key, cwd, ctx)
+    hits = archive_search_turns(query, limit=limit, scope_key=resolved_scope)
+    return {"query": query, "scope_key": resolved_scope, "count": len(hits), "hits": hits}
+
+
+@engramMCP.tool()
+def engram_read_transcript(
+    turn_id: int,
+    before: int = 3,
+    after: int = 3,
+    scope_key: str = "",
+    cwd: str = "",
+    ctx: Context | None = None,
+) -> dict:
+    """검색으로 찾은 턴의 앞뒤 대화를 원문 그대로 읽습니다.
+
+    engram_search_transcript 가 돌려준 turn id 를 앵커로 주면 같은 세션 안에서
+    앞 before 턴, 뒤 after 턴을 붙여 돌려줍니다. 턴 하나는 평균 몇백 바이트라
+    한 줄만 봐서는 맥락을 읽을 수 없습니다.
+
+    before/after 는 각각 최대 10이며 MCP 응답은 64,000자로 제한됩니다. 저장 원문은 자르지 않습니다."""
+    resolved_scope = _transcript_scope(scope_key, cwd, ctx)
+    turns = archive_scroll_turns(
+        turn_id, before=min(before, 10), after=min(after, 10), scope_key=resolved_scope
+    )
+    bounded, truncated = _bounded_transcript_result(turns)
+    return {"anchor_id": turn_id, "scope_key": resolved_scope, "count": len(bounded),
+            "truncated": truncated, "turns": bounded}
 
 
 # ── Reflection ────────────────────────────────────────────

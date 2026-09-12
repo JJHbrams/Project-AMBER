@@ -153,6 +153,7 @@ class CopilotBootstrapInstallTests(unittest.TestCase):
         self.assertIn('Source: "..\\config\\clients\\copilot.md"', iss)
         self.assertIn('Source: "..\\config\\overlay.yaml"', iss)
         self.assertIn('Source: "..\\config\\config.yaml"', iss)
+        self.assertIn('Source: "..\\.github\\skills\\*"', iss)
         for skill_name in (
             "engram",
             "orchestrate",
@@ -161,7 +162,7 @@ class CopilotBootstrapInstallTests(unittest.TestCase):
             "engram-wiki-workflow",
             "engram-close-session",
         ):
-            self.assertIn(f'.github\\skills\\{skill_name}\\SKILL.md"', iss)
+            self.assertTrue((ROOT / ".github" / "skills" / skill_name / "SKILL.md").is_file())
             self.assertIn(skill_name, configure)
         self.assertIn("터미널과 CLI 세션을 새로 시작하세요", configure)
 

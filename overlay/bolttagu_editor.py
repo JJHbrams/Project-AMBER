@@ -21,6 +21,13 @@ def _choice_value(value: object) -> str | None:
     return value if isinstance(value, str) else None
 
 
+def editor_geometry(screen_width: int, screen_height: int) -> tuple[str, tuple[int, int]]:
+    """Choose a useful editor size without exceeding a small/DPI-scaled work area."""
+    width = max(720, min(860, screen_width - 80))
+    height = max(620, min(860, screen_height - 120))
+    return f'{width}x{height}', (720, 620)
+
+
 def sparse_mapping_document(
     schema: SpriteMap, document: dict, selections: dict[tuple[str, str], str | None]
 ) -> dict:
@@ -71,7 +78,9 @@ class BolttaguMappingEditor:
         # All asset/schema/file validation precedes creating any native window.
         self.window = tk.Toplevel(parent)
         self.window.title('볼따구 · 이벤트와 포즈 매핑')
-        self.window.geometry('820x760')
+        geometry, minimum = editor_geometry(self.window.winfo_screenwidth(), self.window.winfo_screenheight())
+        self.window.minsize(*minimum)
+        self.window.geometry(geometry)
         self.variables = {}
         self._preview_after_id: str | None = None
         self._preview_started_ms = int(time.monotonic() * 1000)
@@ -79,7 +88,6 @@ class BolttaguMappingEditor:
         self._preview_photo: ImageTk.PhotoImage | None = None
         self._preview_sheets, self._preview_cell = load_atlas()
         notebook = ttk.Notebook(self.window)
-        notebook.pack(fill='both', expand=True, padx=12, pady=12)
         for section in self.schema.sections:
             if section.hidden:
                 continue
@@ -96,7 +104,7 @@ class BolttaguMappingEditor:
                 self.variables[(section.key, row.key)] = variable
             frame.columnconfigure(1, weight=1)
         preview = ttk.LabelFrame(self.window, text='선택한 동작 미리보기 · packaged native atlas')
-        preview.pack(fill='x', padx=12, pady=(0, 12))
+        preview.pack(side='bottom', fill='x', padx=12, pady=(0, 12))
         self._preview_caption = tk.StringVar(value='')
         ttk.Label(preview, textvariable=self._preview_caption).pack(anchor='w', padx=8, pady=(6, 0))
         self._preview_canvas = tk.Canvas(
@@ -106,12 +114,13 @@ class BolttaguMappingEditor:
         self._preview_canvas.pack(padx=8, pady=8)
         self._preview_image_id = self._preview_canvas.create_image(0, 0, anchor='nw')
         actions = ttk.Frame(self.window)
-        actions.pack(fill='x', padx=12, pady=(0, 12))
+        actions.pack(side='bottom', fill='x', padx=12, pady=(0, 12))
         ttk.Button(actions, text='가져오기…', command=self._import).pack(side='left')
         ttk.Button(actions, text='내보내기…', command=self._export).pack(side='left', padx=8)
         ttk.Button(actions, text='모두 기본값', command=self._defaults).pack(side='left')
-        ttk.Button(actions, text='적용 준비', command=self._save).pack(side='right')
+        ttk.Button(actions, text='적용', command=self._save).pack(side='right')
         ttk.Label(actions, text='설정 창의 저장을 눌러 최종 적용').pack(side='right', padx=8)
+        notebook.pack(side='top', fill='both', expand=True, padx=12, pady=12)
         self.window.bind('<Destroy>', self._on_destroy, add='+')
         self._load()
 
@@ -212,4 +221,4 @@ class BolttaguMappingEditor:
             self.on_save(str(path))
             self.window.destroy()
         except (OSError, ValueError) as exc:
-            messagebox.showerror('적용 준비 실패', str(exc), parent=self.window)
+            messagebox.showerror('적용 실패', str(exc), parent=self.window)

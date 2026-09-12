@@ -416,20 +416,20 @@ IDLE_POSE = "idle"
 # may rest in the retouch while a flourish plays from the original, or the reverse.
 IDLE_POSES = (IDLE_POSE, TRICKCAL + IDLE_POSE)
 STATE_POSES: dict[str, str] = {
-    "default": IDLE_POSE,
-    "idle": IDLE_POSE,
+    "default": TRICKCAL + IDLE_POSE,
+    "idle": TRICKCAL + IDLE_POSE,
     # The success one-shot plays over this pose and settles back into it.
-    "success": IDLE_POSE,
-    "hover": "alert",
-    "click": "alert",
-    "input": "listening",
-    "generating": "speaking",
-    "thought": "wondering",
-    "search": "searching",
+    "success": TRICKCAL + IDLE_POSE,
+    "hover": TRICKCAL + "alert",
+    "click": TRICKCAL + "alert",
+    "input": TRICKCAL + "listening",
+    "generating": TRICKCAL + "speaking",
+    "thought": TRICKCAL + "wondering",
+    "search": TRICKCAL + "searching",
     # Consulting stored notes reads the same as consulting documents.
-    "memory": "searching",
-    "error": "error",
-    "provider_error": "error",
+    "memory": TRICKCAL + "searching",
+    "error": TRICKCAL + "error",
+    "provider_error": TRICKCAL + "error",
 }
 
 # payload.category refines "generating", which is Engram's catch-all for every tool
@@ -443,9 +443,13 @@ UNREACHABLE_CATEGORIES = frozenset({"search", "memory"})
 REFINABLE_CATEGORIES = frozenset({'search', 'memory', 'write', 'execute', 'read', 'communication', 'other'}) - UNREACHABLE_CATEGORIES
 
 CATEGORY_POSES: dict[str, str] = {
-    "write": "writing",     # code, docs, artifacts: write/edit/patch/delete tools
-    "execute": "waiting",   # shell, build, test, run: work to wait on
-    "read": "searching",    # opening a document
+    "write": TRICKCAL + "writing",     # code, docs, artifacts: write/edit/patch/delete tools
+    "execute": TRICKCAL + "waiting",   # shell, build, test, run: work to wait on
+    "read": TRICKCAL + "searching",    # opening a document
+    # These two mixed-set choices are deliberate compatibility defaults from
+    # the selected local Bolttagu mapping.
+    "communication": "speaking",
+    "other": TRICKCAL + "tool_use",
 }
 
 # A hint that warrants a one-shot the moment the renderer enters it.
@@ -463,7 +467,7 @@ LIFECYCLE_CLIPS = ("enter", "exit")
 # What the launcher's own transitions play. overlay.show and overlay.hide are
 # events in their own right, so which clip each one runs is chosen here rather
 # than hardcoded at the call site.
-LIFECYCLE_TRANSITIONS: dict[str, str] = {"show": "enter", "hide": "exit"}
+LIFECYCLE_TRANSITIONS: dict[str, str] = {"show": TRICKCAL + "enter", "hide": "enter"}
 
 
 def selectable_poses() -> list[str]:

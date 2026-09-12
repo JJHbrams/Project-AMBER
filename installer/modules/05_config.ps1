@@ -143,7 +143,13 @@ Write-Ok $ClaudeMcpConfigPath
 Write-Step "Claude session lifecycle hooks (compatible CLI only)"
 & $PythonExe (Join-Path $ProjectRoot 'engram_overlay_entry.py') --role claude-monitor-hooks --provision --apply
 if ($LASTEXITCODE -ne 0) { throw 'Claude lifecycle hook provisioning failed; inspect settings JSON before retrying.' }
-Write-Step "Codex session lifecycle hooks (existing configuration roots only; /hooks review required)"
+# Ensure clean profiles have a discoverable Codex root before the native hook
+# provisioner enumerates roots; it still never grants hook trust.
+$CodexRoot = Join-Path $env:USERPROFILE '.codex'
+if (-not (Test-Path $CodexRoot)) { New-Item -Path $CodexRoot -ItemType Directory -Force | Out-Null }
+$CodexConfigPath = Join-Path $CodexRoot 'config.toml'
+if (-not (Test-Path $CodexConfigPath)) { [System.IO.File]::WriteAllText($CodexConfigPath, '', [System.Text.UTF8Encoding]::new($false)) }
+Write-Step "Codex session lifecycle hooks (/hooks review required; trust is never automatic)"
 & $PythonExe (Join-Path $ProjectRoot 'engram_overlay_entry.py') --role codex-monitor-hooks --provision --apply
 if ($LASTEXITCODE -ne 0) { throw 'Codex lifecycle hook provisioning failed; inspect settings JSON before retrying.' }
 

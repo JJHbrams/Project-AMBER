@@ -80,12 +80,7 @@ Source: "..\config\clients\copilot.md"; DestDir: "{app}\config\clients"; Flags: 
 Source: "..\config\agents\*"; DestDir: "{app}\config\agents"; Flags: recursesubdirs createallsubdirs ignoreversion
 Source: "deploy_agent_definitions.ps1"; DestDir: "{app}\installer"; Flags: ignoreversion
 Source: "templates\*"; DestDir: "{app}\installer\templates"; Flags: recursesubdirs createallsubdirs ignoreversion
-Source: "..\.github\skills\engram\SKILL.md"; DestDir: "{app}\.github\skills\engram"; Flags: ignoreversion
-Source: "..\.github\skills\orchestrate\SKILL.md"; DestDir: "{app}\.github\skills\orchestrate"; Flags: ignoreversion
-Source: "..\.github\skills\engram-new-session\SKILL.md"; DestDir: "{app}\.github\skills\engram-new-session"; Flags: ignoreversion
-Source: "..\.github\skills\engram-task-workflow\SKILL.md"; DestDir: "{app}\.github\skills\engram-task-workflow"; Flags: ignoreversion
-Source: "..\.github\skills\engram-wiki-workflow\SKILL.md"; DestDir: "{app}\.github\skills\engram-wiki-workflow"; Flags: ignoreversion
-Source: "..\.github\skills\engram-close-session\SKILL.md"; DestDir: "{app}\.github\skills\engram-close-session"; Flags: ignoreversion
+Source: "..\.github\skills\*"; DestDir: "{app}\.github\skills"; Flags: recursesubdirs createallsubdirs ignoreversion
 ; 설치타임 구성기
 Source: "configure.ps1"; DestDir: "{app}\installer"; Flags: ignoreversion
 Source: "joint-startup.ps1"; DestDir: "{app}\installer"; Flags: ignoreversion
