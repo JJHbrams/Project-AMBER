@@ -261,22 +261,6 @@ async def run(args):
                         print(json.dumps({'thought_short':small,'thought_long':large}))
                         host.update_cfg(saved_cfg)
                     if label!='input':continue
-                    await evaluate("document.querySelector('#draft').value='기억 연결 상태 확인';document.querySelector('#send').click()")
-                    await until(lambda:len(provider.sent)==1)
-                    await until(lambda:host.accepted==provider.sent[0][0].request_id)
-                    await asyncio.sleep(.15)
-                    assert await evaluate("document.querySelector('#draft').value===''"),'draft_ack'
-                    await evaluate("document.querySelector('#draft').value='말풍선 기록 보기';document.querySelector('#send').click()")
-                    await until(lambda:len(host.queue.snapshot().waiting)==1)
-                    await asyncio.sleep(.15)
-                    await evaluate("document.querySelector('#draft').value='README 화면 갱신';document.querySelector('#send').click()")
-                    await until(lambda:len(host.queue.snapshot().waiting)==2)
-                    await asyncio.sleep(.15)
-                    await capture('compact-input')
-                    input_size=await evaluate('[innerWidth,innerHeight]')
-                    assert await evaluate('window.innerHeight<=430'),'compact_height_regression'
-                    assert await evaluate("getComputedStyle(document.querySelector('#heading')).display==='none'"),'heading_not_removed'
-                    assert await evaluate("document.querySelector('#send').getBoundingClientRect().left >= document.querySelector('#draft').getBoundingClientRect().right"),'send_not_beside_editor'
                     if args.os_resize:
                         hwnd=window_handles['Engram input'];user32.SetForegroundWindow(hwnd);await asyncio.sleep(.2)
                         grip=await evaluate("(()=>{const r=document.querySelector('.resize-handle').getBoundingClientRect();return [r.x+r.width/2,r.y+r.height/2]})()")
@@ -289,8 +273,31 @@ async def run(args):
                             user32.mouse_event(4,0,0,0,0);user32.SetCursorPos(point.x,point.y)
                         await until(lambda:'input' in host.manual_size)
                         after=host.rects['input'];assert after['width']>before['width'] and after['height']>before['height'],'os_input_resize_not_applied'
+                        print(json.dumps({'os_input_resize':True,'before':[before['width'],before['height']],'after':[after['width'],after['height']]}))
+                    ime_blocked=await evaluate("(()=>{const d=document.querySelector('#draft');d.oncompositionstart();d.value='기억 연결 상태 확인';d.dispatchEvent(new Event('input',{bubbles:true}));d.onkeydown(new KeyboardEvent('keydown',{key:'Enter'}));const blocked=pending===null;d.oncompositionend();d.onkeydown(new KeyboardEvent('keydown',{key:'Enter'}));return blocked})()")
+                    assert ime_blocked,'ime_enter_submitted_while_composing'
+                    await until(lambda:len(provider.sent)==1)
+                    await until(lambda:host.accepted==provider.sent[0][0].request_id)
+                    await asyncio.sleep(.15)
+                    assert await evaluate("document.querySelector('#draft').value===''"),'draft_ack'
+                    pasted=await evaluate("(async()=>{const d=document.querySelector('#draft'),bytes=Uint8Array.from(atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII='),c=>c.charCodeAt(0)),file=new File([bytes],'qa.png',{type:'image/png'}),event=new Event('paste',{bubbles:true,cancelable:true});Object.defineProperty(event,'clipboardData',{value:{files:[file]}});d.dispatchEvent(event);for(let i=0;i<50&&attachments.length<1;i++)await new Promise(r=>setTimeout(r,10));return attachments.length===1&&document.querySelectorAll('.preview img').length===1})()")
+                    assert pasted,'post_resize_image_paste_failed'
+                    await evaluate("document.querySelector('.preview button').click()")
+                    assert await evaluate("attachments.length===0"),'pasted_image_not_removable'
+                    print(json.dumps({'post_resize_ime_guard_and_submit':True,'post_resize_image_paste_and_remove':True}))
+                    await evaluate("document.querySelector('#draft').value='말풍선 기록 보기';document.querySelector('#send').click()")
+                    await until(lambda:len(host.queue.snapshot().waiting)==1)
+                    await asyncio.sleep(.15)
+                    await evaluate("document.querySelector('#draft').value='README 화면 갱신';document.querySelector('#send').click()")
+                    await until(lambda:len(host.queue.snapshot().waiting)==2)
+                    await asyncio.sleep(.15)
+                    await capture('compact-input')
+                    input_size=await evaluate('[innerWidth,innerHeight]')
+                    assert await evaluate('window.innerHeight<=430'),'compact_height_regression'
+                    assert await evaluate("getComputedStyle(document.querySelector('#heading')).display==='none'"),'heading_not_removed'
+                    assert await evaluate("document.querySelector('#send').getBoundingClientRect().left >= document.querySelector('#draft').getBoundingClientRect().right"),'send_not_beside_editor'
+                    if args.os_resize:
                         input_size=await evaluate('[innerWidth,innerHeight]')
-                        print(json.dumps({'os_input_resize':True,'before':[before['width'],before['height']],'after':input_size}))
                         await capture('input-resized')
                     await evaluate("document.querySelector('#flip').click()")
                     await asyncio.sleep(.3)

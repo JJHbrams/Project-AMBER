@@ -83,8 +83,8 @@
     "gif_timing_refresh": "Same approved captured frames re-encoded only; no generated or interpolated art.",
     "bubble_history": {
       "runtime": "source native Tauri shell with synthetic QA host",
-      "source_commit": "131f428",
-      "input_capture_sha256": "aad317a42288255561d1050bccaaa9d5f3b32fa9a99f814e09c7178e8cd849b7",
+      "source_commit": "d6aace3",
+      "input_capture_sha256": "0c42d880986946759bdf48b56c6e6514f2ad28bd9639cab224715c0801978646",
       "history_capture_sha256": "68d4335fcd4b18eb1fd187f5f7b3bba9f6e4f76799dcc6c1c21b13edecaa293a",
       "composition": "Actual RGBA WebView captures plus the approved installed character poster on a neutral matte."
     }
@@ -94,7 +94,7 @@
     "native-bolttagu-trickcal-v1.5.15.png": "fbc77e981c7b540ac00c6bb2e5300dd1e0e6bbc97da09a32b8fe66027c4355bd",
     "session-monitor-trickcal-v1.5.15.png": "0f313e0828935c4b94da1359caaf5362ce90cef40d8a62dc26f5fd5ada7f7522",
     "bubble-mode-trickcal-v1.5.15.png": "c4cd2eb86fc552feba9294081766946d39b1ee39f55c78dedf55003700fd001e",
-    "bubble-mode-history-20260912.png": "b2b16056c9c5ac3e092b2023ca2ec6de886a312d3a554e856e41cd603f1b2d9f"
+    "bubble-mode-history-20260912.png": "5256637ba641110013e3a4bb1bc3e8537e6baf138bdf4d44c686c94349f86dee"
   },
   "limitations": [
     "Custom mapping and colors, not the default install appearance",
