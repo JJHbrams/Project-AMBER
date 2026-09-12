@@ -45,8 +45,10 @@ def retime_gif(source: Path, output: Path) -> dict:
         for index in range(raw.n_frames):
             raw.seek(index)
             frames.append(raw.convert("RGBA").copy())
-    durations = [180] * len(frames)
-    durations[-1] = 500
+    # One continuous cup-holding take. Later source frames jump between
+    # dropped cup, book and writing props without connecting motion.
+    frames = frames[:12]
+    durations = [2400, 100, 100, 180, 180, 180, 220, 220, 220, 220, 220, 1800]
     frames[0].save(
         output,
         format="GIF",
@@ -77,23 +79,26 @@ def compose_bubbles(
     output: Path,
 ) -> None:
     background = (39, 39, 39, 255)
-    canvas = Image.new("RGBA", (1280, 720), background)
+    canvas = Image.new("RGBA", (800, 500), background)
     with Image.open(character_path) as raw:
-        character = resize_to_width(edge_alpha(raw), 220)
+        character = edge_alpha(raw)
+        character = character.crop(character.getbbox())
+        character = character.resize((round(character.width * 210 / character.height), 210), Image.Resampling.LANCZOS)
     with Image.open(monitor_path) as raw:
         monitor_surface = raw.convert("RGBA").crop((0, 0, raw.width, 220))
-        monitor = resize_to_width(monitor_surface, 250)
+        monitor = resize_to_width(monitor_surface, 300)
     with Image.open(input_path) as raw:
-        input_bubble = resize_to_width(raw.convert("RGBA"), 640)
+        # Exclude the separate QA preview launcher below the native window.
+        input_bubble = raw.convert("RGBA").crop((0, 0, raw.width, 164))
     with Image.open(speech_path) as raw:
-        speech = resize_to_width(raw.convert("RGBA"), 640)
-    # Dense 16:9 documentation layout: monitor/character on the left and the
+        speech = raw.convert("RGBA")
+    # Shared desktop-scale layout: monitor/character on the left and the
     # active response plus composer on the right. Every foreground surface is
     # a captured product surface; this function only changes scale/placement.
-    canvas.alpha_composite(monitor, (42, 44))
-    canvas.alpha_composite(character, (77, 430))
-    canvas.alpha_composite(speech, (565, 72))
-    canvas.alpha_composite(input_bubble, (565, 470))
+    canvas.alpha_composite(monitor, (20, 65))
+    canvas.alpha_composite(character, (95, 270))
+    canvas.alpha_composite(speech, (350, 95))
+    canvas.alpha_composite(input_bubble, (300, 325))
     canvas.convert("RGB").save(output, format="PNG", optimize=True)
 
 
@@ -123,9 +128,10 @@ def main() -> None:
     provenance_path = asset_dir / "trickcal-demo-v1.5.15.provenance.json"
     provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
     provenance["evidence"]["gif_encoded_frames"] = timing["frames"]
+    provenance["evidence"]["events"] = "Continuous cup-holding idle take; unrelated event poses intentionally omitted for prop continuity."
     provenance["evidence"]["gif_duration_ms"] = timing["duration_ms"]
     provenance["evidence"]["gif_frame_durations_ms"] = timing["durations_ms"]
-    provenance["evidence"]["gif_timing_refresh"] = "Same approved captured frames re-encoded at a regular 180 ms cadence with a 500 ms final hold; no generated or interpolated art."
+    provenance["evidence"]["gif_timing_refresh"] = "Single continuous cup-holding take (original frames 0-11), with relaxed holds and a short blink. Disconnected alert, prop changes and mirrored cuts removed; no generated motion."
     provenance["evidence"]["bubble"] = "Actual source-native synthetic-QA input and active response captures; no provider query or private reply."
     provenance["evidence"]["bubble_composite"] = {
         "runtime": "source native Tauri shell with synthetic QA host",
@@ -135,7 +141,7 @@ def main() -> None:
         "speech_capture_sha256": sha256(args.speech_capture.resolve()),
         "monitor_capture_sha256": sha256(monitor),
         "character_capture_sha256": sha256(poster),
-        "composition": "Actual source-runtime RGBA input and active-speech WebView captures, plus the upper session-stack crop and character from approved installed captures, on a neutral matte. Crop, scale and placement only; no UI redraw.",
+        "composition": "800x500 desktop-scale composition: character silhouette 210px high, monitor 300px wide above it, speech and input at original capture scale. Separate QA preview launcher cropped below input. No UI redraw.",
     }
     provenance["evidence"].pop("bubble_history", None)
     provenance["sha256"][gif.name] = sha256(gif)
