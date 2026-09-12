@@ -460,26 +460,28 @@ def set_cli_provider(provider: str, sync_user: bool = False) -> str:
     return normalized
 
 
-def get_bubble_session_id() -> str | None:
+def get_bubble_session_id(provider: str = 'claude') -> str | None:
     """말풍선 모드의 resume 대상 claude 세션 id. state.yaml에 영속화된다."""
     state = _safe_load_yaml(_STATE_PATH)
     bubble_cfg = state.get("bubble") if isinstance(state, dict) else None
     if not isinstance(bubble_cfg, dict):
         return None
-    sid = bubble_cfg.get("claude_session_id")
+    sid = bubble_cfg.get('codex_session_id' if provider == 'codex' else 'claude_session_id')
     return str(sid) if sid else None
 
 
-def set_bubble_session_id(session_id: str | None) -> None:
+def set_bubble_session_id(session_id: str | None, provider: str = 'claude') -> None:
     """resume용 claude 세션 id를 state.yaml에 저장한다(None이면 제거)."""
+    session_key='codex_session_id' if provider == 'codex' else 'claude_session_id'
+    title_key='codex_title_metadata' if provider == 'codex' else 'title_metadata'
     def update(state: dict) -> None:
         bubble_cfg = state.get("bubble") if isinstance(state.get("bubble"), dict) else {}
-        if not session_id or bubble_cfg.get("claude_session_id") != session_id:
-            bubble_cfg.pop("title_metadata", None)
+        if not session_id or bubble_cfg.get(session_key) != session_id:
+            bubble_cfg.pop(title_key, None)
         if session_id:
-            bubble_cfg["claude_session_id"] = session_id
+            bubble_cfg[session_key] = session_id
         else:
-            bubble_cfg.pop("claude_session_id", None)
+            bubble_cfg.pop(session_key, None)
         if bubble_cfg:
             state["bubble"] = bubble_cfg
         else:
@@ -493,13 +495,13 @@ def validate_bubble_title_metadata(metadata):
     return validate(metadata)
 
 
-def get_bubble_title_metadata(session_id):
+def get_bubble_title_metadata(session_id, provider='claude'):
     if not session_id:
         return None
     bubble = get_overlay_state().get('bubble', {})
-    if not isinstance(bubble, dict) or bubble.get('claude_session_id') != session_id:
+    if not isinstance(bubble, dict) or bubble.get('codex_session_id' if provider=='codex' else 'claude_session_id') != session_id:
         return None
-    saved = bubble.get('title_metadata')
+    saved = bubble.get('codex_title_metadata' if provider=='codex' else 'title_metadata')
     if not isinstance(saved, dict) or saved.get('provider_session_id') != session_id:
         return None
     return validate_bubble_title_metadata({key:saved.get(key) for key in ('producer','manual')})
@@ -511,15 +513,15 @@ def claim_bubble_title_owner(owner):
         _BUBBLE_TITLE_OWNER = owner
 
 
-def set_bubble_title_metadata(session_id, metadata, *, owner=None, is_current=lambda: True):
+def set_bubble_title_metadata(session_id, metadata, *, owner=None, is_current=lambda: True, provider='claude'):
     checked = validate_bubble_title_metadata(metadata)
     if not session_id or checked is None:
         return False
     def update(state):
         bubble = state.get('bubble')
         if (isinstance(bubble, dict)
-                and bubble.get('claude_session_id') == session_id):
-            bubble['title_metadata'] = {'provider_session_id':session_id, **checked}
+                and bubble.get('codex_session_id' if provider=='codex' else 'claude_session_id') == session_id):
+            bubble['codex_title_metadata' if provider=='codex' else 'title_metadata'] = {'provider_session_id':session_id, **checked}
     # Serialize acceptance/enqueue with lifetime replacement. Already accepted
     # writes survive normal retirement; later old-lifetime calls cannot enqueue.
     with _BUBBLE_TITLE_LOCK:

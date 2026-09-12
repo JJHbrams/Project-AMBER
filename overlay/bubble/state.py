@@ -7,7 +7,9 @@ from overlay.state_api import validate_payload
 
 
 class BubbleStateController:
-    def __init__(self, registry, session_id=None, *, resume_session_id=None, saved_title=None):
+    def __init__(self, registry, session_id=None, *, resume_session_id=None, saved_title=None, provider='claude'):
+        if provider not in ('claude','codex'): raise ValueError('unsupported bubble provider')
+        self.provider=provider
         self.registry = registry
         self.session_id = session_id or uuid.uuid4().hex
         self.env_overrides = {'ENGRAM_BUBBLE_SESSION_ID': self.session_id}
@@ -35,7 +37,7 @@ class BubbleStateController:
             if not self._active:
                 return
             if self._attempt_started:
-                current = self.registry.title_metadata(f'claude:{self.session_id}')
+                current = self.registry.title_metadata(f'{self.provider}:{self.session_id}')
                 candidate = (current if self._confirmed_provider_id == resume_session_id and resume_session_id
                              else self._saved_candidate if self._expected_resume_id == resume_session_id and resume_session_id
                              else None)
@@ -48,8 +50,8 @@ class BubbleStateController:
             self._attempt_started = True
 
     def _rotate_owner(self):
-        old = next((r for r in self.registry.snapshot() if r['key'] == f'claude:{self.session_id}'), None)
-        self.registry.remove('claude', self.session_id)
+        old = next((r for r in self.registry.snapshot() if r['key'] == f'{self.provider}:{self.session_id}'), None)
+        self.registry.remove(self.provider, self.session_id)
         self.session_id = uuid.uuid4().hex
         self.env_overrides = {'ENGRAM_BUBBLE_SESSION_ID': self.session_id}
         self._pending.clear()
@@ -57,11 +59,11 @@ class BubbleStateController:
         self._saved_title_signature = None
         self._publish()
         if old and old.get('project_name'):
-            self.registry.set_project_name('claude', self.session_id, old['project_name'])
+            self.registry.set_project_name(self.provider, self.session_id, old['project_name'])
 
     def _publish(self):
         if self._active:
-            self.registry.claim({'provider': 'claude', 'session_id': self.session_id,
+            self.registry.claim({'provider': self.provider, 'session_id': self.session_id,
                                  'state': 'needs_input' if self._pending else self._base_state,
                                  'is_bubble': True})
 
@@ -87,7 +89,7 @@ class BubbleStateController:
             self._publish()
 
     def bind_provider_session(self, session_id):
-        payload, error = validate_payload({'provider': 'claude', 'session_id': session_id, 'state': 'unknown'})
+        payload, error = validate_payload({'provider': self.provider, 'session_id': session_id, 'state': 'unknown'})
         if error:
             return
         with self._lock:
@@ -95,7 +97,7 @@ class BubbleStateController:
                 if self._confirmed_provider_id and self._confirmed_provider_id != session_id:
                     self._rotate_owner()
                     self._saved_candidate = None
-                key = f'claude:{self.session_id}'
+                key = f'{self.provider}:{self.session_id}'
                 if self._confirmed_provider_id is None:
                     current = self.registry.title_metadata(key)
                     if self._expected_resume_id == session_id and self._saved_candidate:
@@ -109,7 +111,7 @@ class BubbleStateController:
                         self.registry.restore_title_metadata(key, {'producer':None, 'manual':None})
                     self._saved_candidate = None
                 self._confirmed_provider_id = session_id
-                self.registry.bind_alias('claude', payload['session_id'], self.session_id)
+                self.registry.bind_alias(self.provider, payload['session_id'], self.session_id)
 
     def missing_title(self):
         # Host-owned bubble has a fixed effective title, independent of saved metadata.
@@ -119,7 +121,7 @@ class BubbleStateController:
         with self._lock:
             if not self._active or not self._confirmed_provider_id:
                 return None
-            metadata = self.registry.title_metadata(f'claude:{self.session_id}')
+            metadata = self.registry.title_metadata(f'{self.provider}:{self.session_id}')
             if metadata is None:
                 return None
             signature = (self.session_id, self._confirmed_provider_id, metadata['producer'], metadata['manual'])
@@ -135,7 +137,7 @@ class BubbleStateController:
                 return False
             if self._active:
                 if (signature == self._saved_title_signature
-                        or self.registry.title_metadata(f'claude:{self.session_id}') != metadata):
+                        or self.registry.title_metadata(f'{self.provider}:{self.session_id}') != metadata):
                     return False
             elif checkpoint is not self._terminal_title_checkpoint:
                 return False
@@ -152,7 +154,7 @@ class BubbleStateController:
     def set_label(self, label):
         """Explicit local metadata only; no inference from conversation text."""
         with self._lock:
-            changed = self._active and self.registry.set_label(f'claude:{self.session_id}', label)
+            changed = self._active and self.registry.set_label(f'{self.provider}:{self.session_id}', label)
             if changed:
                 self._manual_touched = True
             return changed
@@ -161,7 +163,7 @@ class BubbleStateController:
         from overlay.state_api import project_display_name
         name = project_display_name(project_name,cwd)
         with self._lock:
-            return bool(self._active and name and self.registry.set_project_name('claude',self.session_id,name))
+            return bool(self._active and name and self.registry.set_project_name(self.provider,self.session_id,name))
 
     def retire(self):
         with self._lock:
@@ -169,7 +171,7 @@ class BubbleStateController:
                 return None
             self._active = False
             self._pending.clear()
-            metadata = self.registry.retire_title_owner('claude', self.session_id)
+            metadata = self.registry.retire_title_owner(self.provider, self.session_id)
             if self._confirmed_provider_id and metadata is not None:
                 signature = (self.session_id, self._confirmed_provider_id,
                              metadata['producer'], metadata['manual'])

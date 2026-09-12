@@ -1,5 +1,32 @@
 # Release Notes
 
+## 2026-09-12 - v1.5.16: Native Bubble Workspace
+
+### Highlights
+
+- Bubble mode now uses private native WebView tool windows that stay out of the
+  taskbar while retaining the comic speech-bubble shape.
+- The compact composer supports `Shift+Enter`, pasted PNG/JPEG images, a
+  scrollable waiting queue, editing/canceling, and interrupt-then-send.
+- Speech and thought bubbles size themselves to their content and configured
+  font limits. Manual size and relative placement survive character movement.
+- Claude and Codex keep separate resumable bubble sessions and title metadata.
+
+### Validation
+
+- Built from Project_Engram `dev` commit `b0b2be8` as `1.5.16.740` with a clean
+  PyInstaller build and frozen runtime/role smoke checks.
+- The packaged native shell passed real Windows window-style, dynamic sizing,
+  relative drag-follow, OS resize, queue, and owned-child shutdown checks.
+- Full provider-specific IME/image/approval/interrupt coverage and multi-DPI
+  visual review remain environment-specific follow-up checks; this release
+  does not claim those unverified scenarios are complete.
+
+### Upgrade
+
+- Run `AMBER_1.5.16.740_x64-setup.exe`. Existing Engram configuration, memory,
+  mappings, and user-owned agent definitions are preserved by the installer.
+
 ## 2026-09-10 - v1.5.15: Native Bolttagu and Selectable Overlay Components
 
 ### Highlights

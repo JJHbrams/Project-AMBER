@@ -1,0 +1,13 @@
+{
+  "$schema":"https://schema.tauri.app/config/2",
+  "productName":"Engram Native Bubble Shell",
+  "version":"0.1.0",
+  "identifier":"com.antio.engram.native-bubble-shell",
+  "build":{"frontendDist":"frontend"},
+  "app":{"withGlobalTauri":true,"windows":[
+    {"label":"input","title":"Engram input","width":460,"height":185,"minWidth":320,"minHeight":170,"transparent":true,"decorations":false,"skipTaskbar":true,"minimizable":false,"maximizable":false,"shadow":false,"resizable":true,"visible":false},
+    {"label":"speech","title":"Engram speech","width":420,"height":220,"minWidth":220,"minHeight":140,"transparent":true,"decorations":false,"skipTaskbar":true,"minimizable":false,"maximizable":false,"shadow":false,"resizable":true,"visible":false},
+    {"label":"thought","title":"Engram thought","width":300,"height":160,"minWidth":180,"minHeight":120,"transparent":true,"decorations":false,"skipTaskbar":true,"minimizable":false,"maximizable":false,"shadow":false,"resizable":true,"visible":false}
+  ],"security":{"csp":"default-src 'self'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'"}},
+  "bundle":{"active":false,"icon":["../gui/src-tauri/icons/icon.ico"]}
+}

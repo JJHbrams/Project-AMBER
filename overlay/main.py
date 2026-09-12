@@ -1,6 +1,7 @@
 """오버레이 진입점 — 트레이 아이콘 + 전역 단축키 (Alt+F12) + 캐릭터 창."""
 
 import ctypes
+from copy import deepcopy
 import json
 import logging
 import os
@@ -363,9 +364,23 @@ def _try_start_discord_bot():
         return None
 
 
+def _bubble_presentation_only_change(previous, current):
+    """Visual settings must not terminate an in-flight provider session."""
+    if previous is None:return False
+    def relevant(cfg):
+        result=deepcopy(cfg)
+        for key in ('font_family','font_size','speech_max_height_ratio','thought_max_height_ratio','width_to_char_ratio','min_width'):
+            (result.get('bubble') or {}).pop(key,None)
+        for key in ('base_font_size','ref_screen_height'):
+            (result.get('terminal') or {}).pop(key,None)
+        return result
+    return relevant(previous)==relevant(current)
+
+
 class OverlayApp:
     def __init__(self):
         cfg = load_cfg(migrate_native=True)
+        self._runtime_config_snapshot=deepcopy(cfg)
         hotkey = cfg["overlay"]["hotkey"]
         self._cli_provider = get_cli_provider(cfg)
         self._ollama_model = get_ollama_model(cfg)
@@ -1277,6 +1292,8 @@ class OverlayApp:
             log.warning("[overlay] settings reload rejected; keeping last good runtime configuration")
             return
         cfg = load_cfg()
+        presentation_only=_bubble_presentation_only_change(getattr(self,'_runtime_config_snapshot',None),cfg)
+        self._runtime_config_snapshot=deepcopy(cfg)
         if getattr(self, '_session_stack', None) is not None:
             self._session_stack.update_theme()
         ext = ((cfg.get("overlay") or {}).get("external_renderer") or {}) if isinstance(cfg.get("overlay"), dict) else {}
@@ -1291,15 +1308,20 @@ class OverlayApp:
         self._apply_tunnels()
         # 기존 세션은 시작 시점 컨텍스트(페르소나/권한 수준)를 유지하므로,
         # 설정 저장 후에는 세션을 닫아 다음 채팅에서 최신 설정을 적용한다.
-        self.chat.kill()
-        if self._bubble_session is not None:
-            self._bubble_session.stop()
+        if not presentation_only:self.chat.kill()
+        if not presentation_only and self._bubble_session is not None:
+            previous=self._bubble_session
+            stopped=previous.stop()
+            native=getattr(self,'_native_bubble_host',None)
+            if stopped is True and native is not None:native.provider_stopped(previous)
             self._bubble_session = None
         # Config reload must preserve legacy claude-code + ollama_model routing.
-        self._set_provider_model(new_provider, None if new_provider == "claude-code" else get_cli_model(new_provider, cfg))
+        if not presentation_only:self._set_provider_model(new_provider, None if new_provider == "claude-code" else get_cli_model(new_provider, cfg))
 
         # 말풍선 색상 테마 등 — 재시작 없이 바로 반영(안 그러면 다음 프로세스 재시작까지 안 보임).
         bubble_cfg = get_bubble_cfg(cfg)
+        native=getattr(self,'_native_bubble_host',None)
+        if native is not None:native.update_cfg(bubble_cfg,terminal_cfg=cfg.get('terminal') or {})
         self._bubble_manager.update_cfg(bubble_cfg)
         self._bubble_input.update_cfg(bubble_cfg)
         self._publish_external_size("config_reload")
@@ -1458,6 +1480,11 @@ class OverlayApp:
 
     def _dismiss_popup_conversation(self) -> None:
         """Collapse only the popup conversation and child, retaining host services."""
+        native=getattr(self,'_native_bubble_host',None)
+        if native is not None:
+            if native.defer_nudge():self._initiative.defer_active()
+            native.hide()
+            native.stop()
         if hasattr(self, "_bubble_manager") and self._bubble_manager.defer_nudge():
             self._initiative.defer_active()
         self._nudge_awaiting_reply = False
@@ -1498,7 +1525,10 @@ class OverlayApp:
 
         def stop_and_reap() -> None:
             try:
-                session.stop()
+                stopped=session.stop()
+                native=getattr(self,'_native_bubble_host',None)
+                if stopped is True and native is not None:
+                    self.root.after(0,lambda:native.provider_stopped(session))
             except Exception:
                 log.exception("[overlay] launcher collapse bubble session stop failed")
             finally:
@@ -1544,6 +1574,8 @@ class OverlayApp:
         if source != "observer":
             self._active_observer_id = None
         self._bubble_anchor = source
+        native=getattr(self,'_native_bubble_host',None)
+        if native is not None:native.refresh_positions()
         # Reflow existing speech/thought bubbles as well as the next input.
         if hasattr(self, "_bubble_manager"):
             self._bubble_manager.refresh_positions()
@@ -1561,8 +1593,12 @@ class OverlayApp:
 
     def _ensure_tui_mode(self) -> None:
         """TUI 세션을 열기 전, 같은 scope_key="overlay"를 쓰는 bubble 세션을 먼저 정리한다."""
+        native=getattr(self,'_native_bubble_host',None)
+        if native is not None:native.hide();native.stop()
         if self._bubble_session is not None:
-            self._bubble_session.stop()
+            previous=self._bubble_session
+            stopped=previous.stop()
+            if stopped is True and native is not None:native.provider_stopped(previous)
             self._bubble_session = None
 
     def _ensure_bubble_session(self) -> None:
@@ -1574,19 +1610,24 @@ class OverlayApp:
         if self._bubble_session is not None and self._bubble_session.is_alive():
             return
         if self._bubble_session is not None:
-            self._bubble_session.stop()
+            previous=self._bubble_session
+            stopped=previous.stop()
+            native=getattr(self,'_native_bubble_host',None)
+            if stopped is False:raise RuntimeError('previous bubble provider has not stopped')
+            if stopped is True and native is not None:native.provider_stopped(previous)
             self._bubble_session = None
         cfg = load_cfg()
         bubble_cfg = get_bubble_cfg(cfg)
         workdir = str(get_workdir(cfg))
-        resume_id = get_bubble_session_id()
-        saved_title = get_bubble_title_metadata(resume_id)
+        provider='codex' if get_cli_provider(cfg)=='codex' else 'claude'
+        resume_id = get_bubble_session_id(provider)
+        saved_title = get_bubble_title_metadata(resume_id,provider)
         title_owner = object()
         claim_bubble_title_owner(title_owner)
         state = None
         if getattr(getattr(self, '_stm_server', None), 'listening', False):
             state = BubbleStateController(self._session_registry, resume_session_id=resume_id,
-                                         saved_title=saved_title)
+                                         saved_title=saved_title,provider=provider)
         self._bubble_state = state
 
         def dispatch(callback, argument):
@@ -1598,7 +1639,7 @@ class OverlayApp:
 
         def persist_session_id(sid):
             if self._bubble_session is session:
-                set_bubble_session_id(sid)
+                set_bubble_session_id(sid,provider)
                 return True
             return False
 
@@ -1610,15 +1651,21 @@ class OverlayApp:
                     request.deny('Session detached')
                     return
                 try:
-                    self._bubble_manager.show_approval_request(request)
+                    native=getattr(self,'_native_bubble_host',None)
+                    if native is not None and native.shell.is_ready:native.show_approval(request)
+                    else:self._bubble_manager.show_approval_request(request)
                 except Exception:
                     request.deny('Approval UI unavailable')
                     log.exception('Bubble approval UI failed')
             self.root.after(0, deliver)
 
-        session = BubbleSessionManager(
+        manager=BubbleSessionManager
+        if provider=='codex':
+            from .bubble.codex_session import CodexBubbleSession
+            manager=CodexBubbleSession
+        session = manager(
             cwd=workdir,
-            env_overrides={"ENGRAM_SCOPE_KEY": "overlay", "ENGRAM_CLI_PROVIDER": "claude-code"},
+            env_overrides={"ENGRAM_SCOPE_KEY": "overlay", "ENGRAM_CLI_PROVIDER": "codex" if provider=='codex' else "claude-code"},
             permission_level=get_permission_level(cfg),
             on_event=lambda ev: dispatch(self._on_bubble_event, ev),
             on_approval_request=request_approval,
@@ -1642,7 +1689,53 @@ class OverlayApp:
             self._bubble_session = None
             raise
 
+    def _ensure_native_bubble_host(self):
+        """Create the private shell lazily; creation alone never opens composer."""
+        if getattr(self,'_native_bubble_failed',False):return None
+        native=getattr(self,'_native_bubble_host',None)
+        if native is None:
+                from .bubble.native_host import NativeBubbleHost
+                def session():
+                    self._ensure_bubble_session()
+                    return self._bubble_session
+                def fallback(code):
+                    self._native_bubble_failed=True
+                    log.warning('[bubble] native renderer unavailable: %s',code)
+                    if native.composer_visible:
+                        def submit_recovery(text):
+                            import uuid
+                            native.action({'action_id':uuid.uuid4().hex,'action':'submit',
+                                'request_id':uuid.uuid4().hex,'payload':{'text':text,'attachments':[]}})
+                        self._bubble_input.show(on_submit=submit_recovery,on_close=native.hide)
+                def reply(token):
+                    self._bubble_last_activity=time.monotonic()
+                    self._nudge_engage_live=self._initiative.has_pending_outcome()
+                    self._nudge_awaiting_reply=True
+                    self._pending_nudge_text=self._initiative.active_nudge_text()
+                    self._native_nudge_context_claimed=False
+                    self._native_reply_token=token
+                def defer():
+                    self._on_nudge_input_closed()
+                native=NativeBubbleHost(schedule=self.root.after,get_session=session,
+                    get_anchor=self._get_bubble_anchor_rect,
+                    on_dispatch=lambda text:self._on_bubble_submit(text,send_provider=False),
+                    on_history=lambda:self._bubble_history.show(),
+                    on_activity=self._on_bubble_input_activity,on_fallback=fallback,
+                    on_nudge_reply=reply,on_nudge_defer=defer,on_nudge_ignored=self._initiative.notify_ignored,
+                    on_nudge_accepted=self._native_nudge_accepted,on_composer_closed=self._on_nudge_input_closed,
+                    cfg=get_bubble_cfg(load_cfg()),terminal_cfg=(load_cfg().get('terminal') or {}))
+                self._native_bubble_host=native
+        return native
+
     def _toggle_bubble_input(self) -> None:
+        if not getattr(self,'_native_bubble_failed',False):
+            native=self._ensure_native_bubble_host()
+            if native is None:return
+            if native.composer_visible:native.hide()
+            else:
+                self._bubble_manager.clear_all();self._bubble_input.hide()
+                native.show();self._mark_overlay_engaged()
+            return
         # 캐릭터를 옮긴 뒤 다시 클릭한 경우 — 이전 응답의 말풍선/생각풍선이 아직 떠 있다면
         # 캐릭터의 새 위치를 따라가게 다시 배치한다(콘텐츠 이벤트 없이는 저절로 안 움직임).
         self._bubble_manager.refresh_positions()
@@ -1657,7 +1750,7 @@ class OverlayApp:
         self._bubble_input.show(on_submit=self._on_bubble_submit)
         self._mark_overlay_engaged()
 
-    def _on_bubble_submit(self, text: str) -> None:
+    def _on_bubble_submit(self, text: str, *, send_provider: bool = True) -> None:
         self._bubble_semantic = None
         # 내 메시지는 입력창이 있던 자리에 "에코 말풍선"으로 잠깐 남긴다(응답과 별개).
         # 응답 말풍선은 입력창과 무관하게 자기 위치(마지막 드래그 위치 또는 캐릭터 옆
@@ -1684,9 +1777,10 @@ class OverlayApp:
                 self._initiative.notify_engaged()
             else:
                 self._initiative.notify_late_engaged()
-        self._bubble_manager.show_echo(text, self._bubble_input.get_last_rect())
-        self._bubble_manager.show_user_message(text)
-        if self._bubble_session is not None:
+        if send_provider:
+            self._bubble_manager.show_echo(text, self._bubble_input.get_last_rect())
+            self._bubble_manager.show_user_message(text)
+        if send_provider and self._bubble_session is not None:
             self._bubble_session.send(text)
 
     def _on_bubble_input_activity(self, active: bool) -> None:
@@ -1702,17 +1796,20 @@ class OverlayApp:
     def _on_bubble_event(self, ev: dict) -> None:
         """세션 이벤트를 렌더러로 넘기면서, initiative 발화 판정에 필요한 상태
         (마지막 활동 시각 + 턴 진행 여부)를 갱신한다."""
+        native=getattr(self,'_native_bubble_host',None)
+        native_active=native is not None and not getattr(self,'_native_bubble_failed',False)
+        if native is not None and ev.get('request_key') and not native.handle_event(ev):return
         self._bubble_last_activity = time.monotonic()
         kind = ev.get("kind") if isinstance(ev, dict) else None
         if kind in ("turn_end", "error", "result"):
             self._bubble_turn_active = False
         self._initiative.feed_event(ev)
-        self._bubble_manager.handle_event(ev)
+        if not native_active:self._bubble_manager.handle_event(ev)
         from .event_api import event_for_bubble
         owner = getattr(self, '_bubble_state', None)
         semantic = event_for_bubble(ev)
         if owner is not None and semantic is not None:
-            self._bubble_semantic = (f'claude:{owner.session_id}', semantic)
+            self._bubble_semantic = (f'{getattr(owner, "provider", "claude")}:{owner.session_id}', semantic)
         try:
             self._refresh_session_stack(schedule=False)
             selected = getattr(self, '_session_selection', None)
@@ -1723,7 +1820,7 @@ class OverlayApp:
                     and selected is not None):
                 row = selected.selected_row()
                 token = (row['key'], row.get('state_since')) if row else None
-                publish_terminal = (row is not None and row['key'] == f'claude:{owner.session_id}'
+                publish_terminal = (row is not None and row['key'] == f'{getattr(owner, "provider", "claude")}:{owner.session_id}'
                     and row['state'] == 'ready' and self._session_stack.presentation.state(row) == 'ready'
                     and token != getattr(self, '_bubble_completion_semantic_token', None))
                 if publish_terminal:
@@ -1747,7 +1844,7 @@ class OverlayApp:
         if not getattr(self._stm_server, 'listening', False):
             return False
         bubble = getattr(self, '_bubble_state', None)
-        if bubble is not None and key == f'claude:{bubble.session_id}':
+        if bubble is not None and key == f'{getattr(bubble, "provider", "claude")}:{bubble.session_id}':
             changed = bubble.set_label(label)
         else:
             changed = self._session_registry.set_label(key, label)
@@ -1760,7 +1857,7 @@ class OverlayApp:
         if selection is None or not getattr(getattr(self, '_stm_server', None), 'listening', False):
             return True
         state = getattr(self, '_bubble_state', None)
-        return state is not None and selection.selected_key == f'claude:{state.session_id}'
+        return state is not None and selection.selected_key == f'{getattr(state, "provider", "claude")}:{state.session_id}'
 
     def _session_stack_anchor(self):
         """Only visible character pixels anchor the persistent monitor, never a launcher."""
@@ -1795,7 +1892,7 @@ class OverlayApp:
                     and state._confirmed_provider_id == signature[1])
         state.accept_title_checkpoint(checkpoint, lambda: set_bubble_title_metadata(
             signature[1], metadata,
-            owner=getattr(session, '_title_owner', None), is_current=current))
+            owner=getattr(session, '_title_owner', None), is_current=current,provider=getattr(state,'provider','claude')))
 
     def _refresh_native_session_semantics(self, row, state):
         """Selected-only ordered native tool presentation, with a bounded dwell."""
@@ -1872,6 +1969,12 @@ class OverlayApp:
         if schedule:
             self._session_stack_after = None
         try:
+            native=getattr(self,'_native_bubble_host',None)
+            if native is not None and native.visible:
+                anchor=self._get_bubble_anchor_rect()
+                if anchor!=getattr(self,'_native_last_anchor',None):
+                    self._native_last_anchor=anchor
+                    native.refresh_positions()
             self._checkpoint_bubble_title()
             listening = getattr(getattr(self, '_stm_server', None), 'listening', False)
             self._session_stack.update_rows(self._session_registry.snapshot() if listening else [])
@@ -1925,6 +2028,9 @@ class OverlayApp:
         """Expose host-owned pointer semantics to observer renderers."""
         if action in {"left_click", "right_click"}:
             self._select_bubble_anchor("bundled")
+        if action in {"drag_move","drag_end"}:
+            native=getattr(self,'_native_bubble_host',None)
+            if native is not None:native.refresh_positions()
         mapping = {
             "pointer_enter": ("pointer.entered", "hover"),
             "pointer_leave": ("pointer.left", "idle"),
@@ -2205,6 +2311,8 @@ class OverlayApp:
                         preserve_position=startup_geometry,
                     )
                     self._replace_startup_geometry_pending = False
+                    native=getattr(self,'_native_bubble_host',None)
+                    if native is not None:native.refresh_positions()
                     self._overlay_events.publish(
                         "overlay.set_position", "idle", {"x": rect[0], "y": rect[1]}
                     )
@@ -2326,9 +2434,9 @@ class OverlayApp:
             reason = f"chat_mode={self._chat_mode}"
         elif self._bubble_turn_active:
             reason = "턴 진행 중"
-        elif self._bubble_input.is_showing():
+        elif self._bubble_input.is_showing() or bool(getattr(self,'_native_bubble_host',None) and self._native_bubble_host.composer_visible):
             reason = "입력창 열림"
-        elif not self._bubble_manager.is_idle():
+        elif not self._bubble_manager.is_idle() or bool(getattr(self,'_native_bubble_host',None) and not self._native_bubble_host.is_idle()):
             reason = "떠 있는 풍선 있음(speech_fade 설정 확인)"
         else:
             reason = ""
@@ -2354,9 +2462,35 @@ class OverlayApp:
             finally:
                 self._engage_nudge()
 
+        native=self._ensure_native_bubble_host()
+        if native is not None:
+            # The private shell owns the visible nudge; do not start a provider
+            # or expose an input field until the user deliberately replies.
+            def native_reply(token):
+                engine_on_click()
+                self._native_arm_nudge_reply(token)
+            native.on_nudge_reply=native_reply
+            native.show_nudge(text,dwell_ms=dwell)
+            return
         self._bubble_manager.show_nudge(
             text, _click, dwell_ms=dwell, on_ignored=self._initiative.notify_ignored,
         )
+
+    def _native_arm_nudge_reply(self, token=None) -> None:
+        self._native_reply_token=token
+        self._bubble_last_activity=time.monotonic()
+        self._nudge_engage_live=self._initiative.has_pending_outcome()
+        self._nudge_awaiting_reply=True
+        self._pending_nudge_text=self._initiative.active_nudge_text()
+        self._native_nudge_context_claimed=False
+
+    def _native_nudge_accepted(self, token=None) -> None:
+        if not self._nudge_awaiting_reply or token!=getattr(self,'_native_reply_token',None):return
+        self._native_reply_token=None
+        self._nudge_awaiting_reply=False
+        self._pending_nudge_text=''
+        if self._nudge_engage_live:self._initiative.notify_engaged()
+        else:self._initiative.notify_late_engaged()
 
     def _engage_nudge(self) -> None:
         """자율발화 풍선(또는 답장 아이콘)을 눌렀다 — **입력창을 연다.**
@@ -2511,11 +2645,19 @@ class OverlayApp:
         """
         def _reset() -> None:
             session = self._bubble_session
+            native=getattr(self,'_native_bubble_host',None)
+            if native is not None and native.queue.snapshot().waiting:
+                from tkinter.messagebox import askokcancel
+                if not askokcancel('새 대화','전송 대기 중인 요청을 버리고 새 대화를 시작할까요?',parent=self.root):return
+            if native is not None:
+                native.stop();self._native_bubble_host=None;self._native_bubble_failed=False
             # Revoke callback authority before clearing persisted resume data.
             self._bubble_session = None
             try:
                 try:
-                    set_bubble_session_id(None)
+                    provider=getattr(getattr(self,'_bubble_state',None),'provider','claude')
+                    if provider=='codex':set_bubble_session_id(None,'codex')
+                    else:set_bubble_session_id(None)
                 finally:
                     if session is not None:
                         session.stop()
@@ -2537,6 +2679,10 @@ class OverlayApp:
     def quit(self):
         if self._quitting:
             return
+        native=getattr(self,'_native_bubble_host',None)
+        if native is not None and native.queue.snapshot().waiting:
+            from tkinter.messagebox import askokcancel
+            if not askokcancel('AMBER 종료','전송 대기 중인 요청은 저장되지 않습니다. 종료할까요?',parent=self.root):return
         self._quitting = True
         if getattr(self, '_session_stack_after', None) is not None:
             self.root.after_cancel(self._session_stack_after)
@@ -2602,6 +2748,7 @@ class OverlayApp:
         makes the click feel answered.
         """
         for hide in (
+            lambda: getattr(self,'_native_bubble_host',None) and self._native_bubble_host.stop(),
             lambda: self._bubble_input.hide(),
             lambda: self._bubble_manager.clear_all(),
             lambda: self._bubble_history.hide(),

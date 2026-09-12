@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>AMBER 말풍선</title><link rel="stylesheet" href="style.css"></head>
+<body><svg id="tail" aria-hidden="true"><defs><linearGradient id="inputBubbleGradient" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#8dc8ff"/><stop offset=".52" stop-color="#82bafa"/><stop offset="1" stop-color="#91ceff"/></linearGradient></defs><rect id="bubbleBody"/><path id="tailPath"/></svg>
+<main id="bubble"><div id="rotor">
+<section id="inputFace" class="face front">
+ <header class="drag"><strong id="heading">무엇을 도와드릴까요?</strong></header>
+ <div class="recent-row"><div id="recent" class="recent" hidden></div><button id="flip" data-tip="보낸 메시지와 대기열 보기" aria-label="보낸 메시지와 대기열 보기">⟳<b id="count" hidden>0</b></button></div>
+ <div class="editor"><textarea id="draft" aria-label="메시지" placeholder="요청을 입력해주세요…" rows="2"></textarea><button id="send" class="send" data-tip="메시지 전송" aria-label="메시지 전송">➤</button><div id="previews" class="previews"></div></div>
+ <div id="notice" role="status" aria-live="polite"></div>
+ <footer><span id="keyHint">Shift+Enter 줄바꿈 · Enter 전송</span><button id="cancelEdit" hidden data-tip="수정 취소" aria-label="수정 취소">×</button></footer>
+</section>
+<section id="queueFace" class="face back" inert aria-hidden="true">
+ <header class="drag"><strong>보낸 메시지 · 대기열</strong><button id="back" data-tip="입력으로 돌아가기" aria-label="입력으로 돌아가기">⟳</button></header>
+ <div id="queue" aria-label="보낸 메시지와 대기열" tabindex="0"></div>
+ <footer><span class="queue-hint">▴▾ 휠로 메시지 탐색</span><button id="resume" class="pill" hidden>대기열 재개</button></footer>
+</section></div></main>
+<nav id="utility"><span id="version"></span><button id="history" data-tip="대화 기록" aria-label="대화 기록">◷</button><button id="close" data-tip="입력 닫기 · 대기열 보류" aria-label="입력 닫기">×</button></nav>
+<script src="text-render.js"></script><script src="app.js"></script></body></html>

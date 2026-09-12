@@ -304,6 +304,8 @@ class BubbleTitleRecoveryTests(unittest.TestCase):
             "Visible original user text"
         )
         self.registry.set_producer_label("claude", state.session_id, "Known task title")
+        # Simulate terminal completion between the fixture's two independent turns.
+        manager._terminal_gate.set()
         self.assertEqual(asyncio.run(send_once()), raw)
         policy = manager._build_options().append_system_prompt
         self.assertIn("Do not generate or report a session title", policy)

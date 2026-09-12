@@ -1,0 +1,1 @@
+{"identifier":"bubble-ui","description":"Private local bubble event transport only","windows":["input","speech","thought"],"permissions":["core:event:default"]}

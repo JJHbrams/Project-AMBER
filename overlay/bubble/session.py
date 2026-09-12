@@ -19,7 +19,6 @@ import os
 import threading
 from typing import Any, Callable, Optional
 
-from claude_code_sdk import query as _sdk_query
 from claude_code_sdk.types import (
     AssistantMessage,
     ClaudeCodeOptions,
@@ -129,6 +128,9 @@ class BubbleSessionManager:
         self._turn_seq = 0
         self._current_turn_seq = 0
         self._assistant_text_buf: list[str] = []
+        self._current_request_key = None
+        self._terminal_gate: Optional[asyncio.Event] = None
+        self._control = None
 
     # ── 공개 API ──────────────────────────────────────────────────────
 
@@ -149,21 +151,38 @@ class BubbleSessionManager:
     def is_alive(self) -> bool:
         return self._alive.is_set()
 
-    def send(self, text: str) -> None:
-        text = (text or "").strip()
-        if not text:
-            return
-        if self._loop is None or self._prompt_queue is None:
-            logger.warning("[bubble] send() 호출됐지만 세션이 준비되지 않음 — 무시: %r", text)
-            return
-        self._turn_seq += 1
-        if self._state_controller is not None:
-            self._state_controller.event('submit')
-        turn_seq = self._turn_seq
-        payload = {"type": "user", "message": {"role": "user", "content": text}}
-        self._loop.call_soon_threadsafe(self._prompt_queue.put_nowait, (turn_seq, payload))
+    def send(self, text: str) -> bool:
+        return self.send_rich(text, ())
 
-    def stop(self, timeout: float = 5.0) -> None:
+    def send_rich(self, text: str, attachments, request_key=None) -> bool:
+        """Preserves text send API; rich payload is private and correlation-aware."""
+        from overlay.bubble.claude_control import rich_user_payload, RequestKey
+        text = (text or "").strip()
+        if not text and not attachments: return False
+        if self._loop is None or self._prompt_queue is None or self._stopping.is_set(): return False
+        self._turn_seq += 1; turn_seq=self._turn_seq
+        key = request_key or RequestKey(self._resume_session_id or "pending", str(turn_seq), self._attempt_generation)
+        payload = rich_user_payload(text, tuple(attachments), key)
+        if key.attempt_generation != self._attempt_generation: return False
+        if self._state_controller is not None: self._state_controller.event('submit')
+        try:
+            self._loop.call_soon_threadsafe(self._prompt_queue.put_nowait, (turn_seq, payload, key))
+        except RuntimeError: return False
+        return True
+
+    def interrupt(self, request_key=None) -> bool:
+        """Request control interrupt only; queue terminal state stays active until ResultMessage."""
+        if self._loop is None or self._control is None or request_key != self._current_request_key: return False
+        async def request():
+            try:
+                accepted=await asyncio.wait_for(self._control.interrupt(request_key), timeout=10)
+                self._emit({'kind':'interrupt_ack' if accepted else 'interrupt_failed'}, request_key)
+            except Exception:
+                self._emit({'kind':'interrupt_failed'}, request_key)
+        self._loop.call_soon_threadsafe(lambda: asyncio.create_task(request()))
+        return True
+
+    def stop(self, timeout: float = 5.0) -> bool:
         self.retire_state()
         self._stopping.set()
         if self._loop is not None:
@@ -175,6 +194,7 @@ class BubbleSessionManager:
             self._thread.join(timeout=timeout)
             if self._thread.is_alive():
                 logger.warning("[bubble] 세션 스레드가 %.1fs 안에 종료되지 않음", timeout)
+                return False
         self._thread = None
         self._loop = None
         self._prompt_queue = None
@@ -183,6 +203,7 @@ class BubbleSessionManager:
                 self._stm_bridge.close()
             except Exception:
                 logger.exception("[bubble] STM close 실패")
+        return True
 
     # ── 내부 ──────────────────────────────────────────────────────────
 
@@ -245,9 +266,11 @@ class BubbleSessionManager:
                 break
             except asyncio.CancelledError:
                 break
-            except Exception as exc:
-                logger.warning("[bubble] 세션 시도 %d/%d 실패(resume=%s): %s", attempt_idx + 1, len(attempts), resume_id, exc)
-                self._emit(error_event(f"Claude 세션 오류, 재시도 중... ({exc})", self._current_turn_seq))
+            except Exception:
+                logger.warning("[bubble] provider attempt %d/%d failed", attempt_idx + 1, len(attempts))
+                if self._current_request_key is not None:
+                    self._emit({'kind':'provider_unknown','text':'연결이 종료되어 요청 상태를 확인할 수 없습니다.'},self._current_request_key)
+                    break  # Never replay an ambiguously sent request on retry.
                 await asyncio.sleep(_RETRY_BACKOFF_SECS)
         else:
             logger.error("[bubble] 모든 재시도 실패 — 세션을 시작할 수 없습니다.")
@@ -256,24 +279,35 @@ class BubbleSessionManager:
         self._alive.clear()
 
     async def _consume(self) -> None:
-        generation = self._attempt_generation
-        options = self._build_options()
-        prompt_gen = self._prompt_generator()
-        transport = make_transport(prompt_gen, options, _PASSTHROUGH_TYPES)
-        async for msg in _sdk_query(prompt=prompt_gen, options=options, transport=transport):
-            self._handle_message(msg, generation=generation)
+        from overlay.bubble.claude_control import ClaudeControl
+        generation = self._attempt_generation; options = self._build_options()
+        self._control = ClaudeControl(options, self._prompt_generator())
+        try:
+            await self._control.connect()
+            async for msg, key in self._control.messages():
+                if key is None or key.attempt_generation == generation: self._handle_message(msg, generation=generation, request_key=key)
+            if self._current_request_key is not None:
+                self._emit({'kind':'provider_unknown','text':'연결이 종료되어 요청 상태를 확인할 수 없습니다.'},self._current_request_key)
+        finally:
+            await self._control.close(); self._control = None
 
     async def _prompt_generator(self):
         assert self._prompt_queue is not None
         while True:
-            turn_seq, payload = await self._prompt_queue.get()
+            item = await self._prompt_queue.get()
+            turn_seq, payload, key = item if len(item) == 3 else (*item, None)
+            if self._terminal_gate is not None: await self._terminal_gate.wait()
+            self._terminal_gate = asyncio.Event(); self._current_request_key = key
             self._current_turn_seq = turn_seq
             self._assistant_text_buf = []
             if self._stm_bridge is not None:
                 try:
-                    self._stm_bridge.record_user(payload["message"]["content"])
+                    content=payload["message"]["content"]
+                    text=content if isinstance(content,str) else '\n'.join(b['text'] for b in content if b.get('type')=='text')
+                    self._stm_bridge.record_user(text or '[이미지 첨부]')
                 except Exception:
                     logger.exception("[bubble] STM 사용자 메시지 기록 실패")
+            if key is not None: payload = {**payload, "_private_request_key": key}
             yield payload
 
     def _build_options(self) -> ClaudeCodeOptions:
@@ -331,7 +365,7 @@ class BubbleSessionManager:
             mcp_servers=mcp_servers,
         )
 
-    def _handle_message(self, msg: Any, *, generation=None) -> None:
+    def _handle_message(self, msg: Any, *, generation=None, request_key=None) -> None:
         if self._stopping.is_set() or (generation is not None and generation != self._attempt_generation):
             return
         turn_seq = self._current_turn_seq
@@ -340,16 +374,16 @@ class BubbleSessionManager:
                 self._persist_session_id(msg.data['session_id'])
         elif isinstance(msg, StreamEvent):
             for ev in stream_event_to_bubble_events(msg, turn_seq):
-                self._emit(ev)
+                self._emit(ev, request_key)
         elif isinstance(msg, AssistantMessage):
             text = extract_final_text(msg)
             if text:
                 self._assistant_text_buf.append(text)
             for ev in assistant_message_to_bubble_events(msg, turn_seq):
-                self._emit(ev)
+                self._emit(ev, request_key)
         elif isinstance(msg, UserMessage):
             for ev in user_message_to_bubble_events(msg, turn_seq):
-                self._emit(ev)
+                self._emit(ev, request_key)
         elif isinstance(msg, ResultMessage):
             if self._state_controller is not None:
                 self._state_controller.event('turn_end', is_error=bool(msg.is_error))
@@ -361,7 +395,11 @@ class BubbleSessionManager:
                     self._stm_bridge.record_assistant(final_text)
                 except Exception:
                     logger.exception("[bubble] STM 어시스턴트 메시지 기록 실패")
-            self._emit(result_message_to_bubble_event(msg, turn_seq))
+            event=result_message_to_bubble_event(msg, turn_seq)
+            event.update(terminal=True, is_error=bool(msg.is_error), provider_status=msg.subtype)
+            self._emit(event, request_key)
+            if self._terminal_gate is not None: self._terminal_gate.set()
+            self._current_request_key = None
         # SystemMessage 등은 무시
 
     def _persist_session_id(self, session_id: str) -> None:
@@ -383,12 +421,13 @@ class BubbleSessionManager:
             self._env_overrides.update(self._state_controller.env_overrides)
         self._resume_session_id = session_id
 
-    def _emit(self, event: dict) -> None:
+    def _emit(self, event: dict, request_key=None) -> None:
         if self._stopping.is_set():
             return
         if self._state_controller is not None and event.get('kind') != 'turn_end':
             self._state_controller.event(event.get('kind'), is_error=bool(event.get('is_error')))
         try:
+            if request_key is not None: event = {**event, "request_key": {"session_id":request_key.session_id,"request_id":request_key.request_id,"attempt_generation":request_key.attempt_generation}}
             self._on_event(event)
         except Exception:
-            logger.exception("[bubble] on_event 콜백 실패: %r", event)
+            logger.warning("[bubble] on_event callback failed")

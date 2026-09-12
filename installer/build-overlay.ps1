@@ -420,6 +420,9 @@ try {
         exit 0
     }
 
+    & (Join-Path $PSScriptRoot 'build-native-bubble.ps1')
+    if ($LASTEXITCODE -ne 0) { throw 'Native bubble shell build failed' }
+
     $stoppedProcesses = Stop-EngramArtifactProcesses -ArtifactDir $deployTarget
     $previousOverlayPaths = @($stoppedProcesses.OverlayPaths)
     Write-OverlayOk "Deploy target: $deployTarget"

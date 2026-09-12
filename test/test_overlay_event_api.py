@@ -35,6 +35,9 @@ class OverlayEventApiTests(unittest.TestCase):
         app._bubble_input = Mock()
         app._bubble_input.is_showing.return_value = False
         app._ensure_bubble_session = Mock()
+        # This is an object.__new__ legacy Tk fallback fixture, not a native
+        # shell selection test.  Make its intended fallback explicit.
+        app._native_bubble_failed = True
 
         app._toggle_bubble_input()
 
@@ -77,6 +80,7 @@ class OverlayEventApiTests(unittest.TestCase):
 
     def test_launcher_and_full_presentation_records_use_separate_state_keys(self):
         overlay = object.__new__(CharacterOverlay)
+        overlay._native_bolttagu = None
         overlay._launcher_canvas = Mock()
         overlay._full_rect = (100, 200, 270, 302)
         overlay.root = Mock()
@@ -395,6 +399,7 @@ class OverlayEventApiTests(unittest.TestCase):
 
     def test_clamped_reopen_does_not_overwrite_preferred_offset(self):
         overlay = object.__new__(CharacterOverlay)
+        overlay._native_bolttagu = None
         overlay.root = Mock()
         overlay.root.winfo_x.return_value = 900
         overlay.root.winfo_y.return_value = 700
@@ -461,7 +466,8 @@ class OverlayEventApiTests(unittest.TestCase):
         overlay.root = Mock()
         overlay.root.winfo_x.return_value = -190
         overlay.root.winfo_y.return_value = 40
-        overlay.capture_launcher_expand_anchor()
+        with patch("overlay.character.get_overlay_state", return_value={}):
+            overlay.capture_launcher_expand_anchor()
         # Full target is deliberately clamped away from its launcher anchor.
         overlay.get_phys_rect = Mock(return_value=(-200, 0, 300, 400))
         state = {}
@@ -475,7 +481,8 @@ class OverlayEventApiTests(unittest.TestCase):
         overlay.root = Mock()
         overlay.root.winfo_x.return_value = -190
         overlay.root.winfo_y.return_value = 40
-        overlay.capture_launcher_expand_anchor()
+        with patch("overlay.character.get_overlay_state", return_value={}):
+            overlay.capture_launcher_expand_anchor()
         # Moving the full presentation is persisted independently and must not
         # influence the launcher captured before expansion.
         overlay.get_phys_rect = Mock(return_value=(-180, 120, 270, 302))
@@ -548,7 +555,8 @@ class OverlayEventApiTests(unittest.TestCase):
         overlay.root = Mock()
         overlay.root.winfo_x.return_value = 125
         overlay.root.winfo_y.return_value = 350
-        overlay.capture_launcher_expand_anchor()
+        with patch("overlay.character.get_overlay_state", return_value={}):
+            overlay.capture_launcher_expand_anchor()
         state = {}
         with patch("overlay.character.get_overlay_state", return_value=state), \
              patch("overlay.character.update_overlay_state", side_effect=lambda update: update(state)), \
