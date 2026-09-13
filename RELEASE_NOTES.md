@@ -18,9 +18,13 @@
   build `1.5.19.770`, including native-bubble smoke updates and focused
   automated tests for bootstrap, idle behavior, geometry, Codex hooks, and
   Sage definitions.
-- Real provider connection, image/approval paths, and visual behavior on
-  multi-DPI Windows displays must still be exercised in the release runtime;
-  they are not claimed by source tests alone.
+- The frozen and installer build passed. The isolated full-suite candidate
+  result was 553 passed, 10 failed, 1 skipped, and 1 deselected. The same ten
+  test IDs also failed against source 1.5.18 baseline `25a6d14` under the same
+  isolation; this does not establish identical failure causes.
+- No disposable-profile, setup-installed runtime smoke was performed. Real
+  provider connection, image/approval flows, and multi-DPI Windows visual
+  behavior remain UNVERIFIED in the frozen release runtime.
 
 ### Upgrade
 
