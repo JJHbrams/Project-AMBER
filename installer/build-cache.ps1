@@ -29,6 +29,7 @@ function Get-EngramInstallerInputFiles([string]$Root, [string]$DistDir) {
         "config\clients\copilot.md",
         ".github\skills\engram\SKILL.md",
         ".github\skills\orchestrate\SKILL.md",
+        ".github\skills\sage\SKILL.md",
         ".github\skills\engram-new-session\SKILL.md",
         ".github\skills\engram-task-workflow\SKILL.md",
         ".github\skills\engram-wiki-workflow\SKILL.md",

@@ -20,12 +20,14 @@ class HistoryPanel:
         scope_key: str = "overlay",
         cfg_bubble: Optional[dict] = None,
         get_anchor_rect: Optional[Callable[[], tuple[int, int, int, int]]] = None,
+        on_visibility: Optional[Callable[[bool], None]] = None,
     ):
         self._root = root
         self._get_stm_port = get_stm_port
         self._scope_key = scope_key
         self._cfg = cfg_bubble or {}
         self._get_anchor_rect = get_anchor_rect
+        self._on_visibility = on_visibility or (lambda _visible: None)
         self._win: Optional[tk.Toplevel] = None
         self._list_frame: Optional[ttk.Frame] = None
 
@@ -47,7 +49,7 @@ class HistoryPanel:
         top = ttk.Frame(self._win)
         top.pack(fill="x", padx=8, pady=8)
         ttk.Label(top, text="대화 기록", font=("", 10, "bold")).pack(side="left")
-        ttk.Button(top, text="닫기", command=self._win.destroy).pack(side="right")
+        ttk.Button(top, text="닫기", command=self.hide).pack(side="right")
         ttk.Button(top, text="새로고침", command=self._reload).pack(side="right", padx=(0, 6))
 
         container = ttk.Frame(self._win)
@@ -65,6 +67,8 @@ class HistoryPanel:
         scrollbar.pack(side="right", fill="y")
 
         self._reload()
+        self._win.protocol("WM_DELETE_WINDOW", self.hide)
+        self._on_visibility(True)
 
     def refresh_position(self) -> None:
         if self._win is None or not self._win.winfo_exists() or self._get_anchor_rect is None:
@@ -81,6 +85,7 @@ class HistoryPanel:
                 pass
         self._win = None
         self._list_frame = None
+        self._on_visibility(False)
 
     def _reload(self) -> None:
         if self._list_frame is None:

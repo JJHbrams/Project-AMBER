@@ -18,6 +18,7 @@ from .rich_input import validate_attachments
 from .turn_queue import TurnQueue, TurnKey, TurnState
 from . import geometry
 from overlay.chat_window import terminal_font_size
+from overlay.config import get_overlay_state, update_overlay_state_async
 
 LABELS={'waiting':'대기','editing':'수정 중','active':'처리 중','interrupt_requested':'중단 확인 중',
         'sent':'보냄','failed':'실패','interrupted':'중단됨','unknown':'상태 확인 필요'}
@@ -40,7 +41,8 @@ class NativeBubbleHost:
                  on_history=lambda:None, on_activity=lambda _:None, on_fallback=lambda _:None,
                  on_nudge_reply=lambda token:None, on_nudge_defer=lambda:None, on_nudge_ignored=lambda:None,
                  on_nudge_accepted=lambda token:None, on_composer_closed=lambda:None,
-                 cfg=None, terminal_cfg=None, shell_factory=NativeBubbleShell, version=None):
+                 cfg=None, terminal_cfg=None, shell_factory=NativeBubbleShell, version=None,
+                 geometry_state_getter=get_overlay_state, geometry_state_updater=update_overlay_state_async):
         self.schedule,self.get_session,self.get_anchor=schedule,get_session,get_anchor
         self.on_dispatch,self.on_history,self.on_activity=on_dispatch,on_history,on_activity
         self.on_fallback=on_fallback
@@ -50,6 +52,8 @@ class NativeBubbleHost:
         self._reply_token=None
         self.cfg=dict(cfg or {})
         self.terminal_cfg=dict(terminal_cfg or {})
+        self._geometry_state_getter=geometry_state_getter
+        self._geometry_state_updater=geometry_state_updater
         if version is None:
             try:
                 from core.install.versioning import resolve_version
@@ -71,6 +75,16 @@ class NativeBubbleHost:
         self.notice=''
         self.visible=False
         self.composer_visible=False
+        self._composer_generation=0
+        self._composer_idle_armed=False
+        self._composer_guard={'draft_nonempty':False,'attachments':0,'composing':False,
+            'readers':0,'pending':False,'editing':False,'queue_open':False,'hovered':False}
+        self._composer_input_active=False
+        self._history_open=False
+        self._speech_history_open=False
+        # The input WebView only re-sends bounded guard metadata when this
+        # visibility handshake changes; ordinary snapshots do not cause IPC.
+        self._composer_visibility_revision=0
         self._nudge=None
         self.rects={}
         self._sent_geometry={}
@@ -80,6 +94,7 @@ class NativeBubbleHost:
         self.manual_position=set()
         self.manual_size=set()
         self._manual_rects={}
+        self._restore_manual_geometry()
         self._input_height=185
         self._presentation_sizes={}
         self.speech={'text':''}
@@ -107,11 +122,8 @@ class NativeBubbleHost:
                     'summary':previous['text'].replace('\n',' ').strip()[:160]}
                 self.speech_history.insert(0,archived)
                 del self.speech_history[20:]
-            # A resize belongs to the presentation it was made on, not the
-            # speech window forever. Position remains a separate preference.
-            self.manual_size.discard('speech')
-            self._manual_rects.get('speech',{}).pop('width',None)
-            self._manual_rects.get('speech',{}).pop('height',None)
+            # Explicit native window sizes are user preferences.  A new answer
+            # must not erase their persisted speech geometry.
             self._presentation_sizes.pop('speech',None)
             self._sent_geometry.pop('speech',None)
         if kind=='speech' and self._nudge and not self._nudge['settled']:
@@ -125,11 +137,15 @@ class NativeBubbleHost:
     def show(self, *, composer=True):
         self.visible=True
         self.composer_visible=bool(composer)
+        self._composer_visibility_revision+=1
+        self._composer_generation+=1
+        self._composer_idle_armed=False
         for kind in ('speech','thought'):
             self.presentation_revision[kind]+=1
             getattr(self,kind)['presentation_revision']=self.presentation_revision[kind]
         if self._nudge:self._nudge['revision']=self.presentation_revision['speech']
         self._dismissed.clear();self._sent_geometry.clear()
+        self._arm_composer_idle_close()
         if self.shell.pid is None:
             return self.shell.start(self.snapshot())
         self.refresh_positions(focus=True)
@@ -138,9 +154,9 @@ class NativeBubbleHost:
 
     def hide(self):
         if self.composer_visible:
-            if self._reply_context and self._nudge:
-                self._nudge['replied']=False;self.speech['nudge']=True
-            self._reply_context=None;self._reply_token=None;self.on_composer_closed()
+            self._close_composer_only()
+        self._composer_input_active=False
+        self._composer_generation+=1;self._composer_idle_armed=False;self._composer_visibility_revision+=1
         self.visible=False
         self.composer_visible=False
         self.queue.hold()
@@ -153,7 +169,12 @@ class NativeBubbleHost:
     def stop(self):
         self._settle_nudge('ignored')
         if self.composer_visible:
-            self._reply_context=None;self._reply_token=None;self.on_composer_closed()
+            self._close_composer_only()
+        # The native speech WebView is being discarded.  Its flip state cannot
+        # survive into a cached/recreated shell; keep the independent Tk panel
+        # state untouched because it may still be visible.
+        self._composer_input_active=False;self._speech_history_open=False
+        self._composer_generation+=1;self._composer_idle_armed=False;self._composer_visibility_revision+=1
         self.composer_visible=False
         self.queue.hold()
         self.visible=False
@@ -162,8 +183,73 @@ class NativeBubbleHost:
     def open_composer(self):
         """Show a blank composer without replacing a nudge presentation."""
         self.composer_visible=True;self.visible=True
+        self._composer_generation+=1;self._composer_idle_armed=False;self._composer_visibility_revision+=1
+        self._arm_composer_idle_close()
         if self.shell.pid is None:return self.shell.start(self.snapshot())
         self.refresh_positions(focus=True);self.publish();return True
+
+    def _composer_idle_close_ms(self):
+        value=self.cfg.get('composer_idle_close_ms', 20000)
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value): return 20000
+        return max(0, min(86_400_000, int(value)))
+
+    def _composer_idle_eligible(self):
+        guard=self._composer_guard
+        return (self.composer_visible and self._composer_idle_close_ms() > 0 and not self.edit
+                and not self.approval and not self._history_open and not self._speech_history_open and not self._composer_input_active
+                and not self._reply_context and not self._reply_token
+                and not any((guard['draft_nonempty'],guard['attachments'],guard['composing'],guard['readers'],
+                             guard['pending'],guard['editing'],guard['queue_open'],guard['hovered'])))
+
+    def _arm_composer_idle_close(self):
+        if self._composer_idle_armed or not self._composer_idle_eligible(): return
+        self._composer_idle_armed=True;generation=self._composer_generation;delay=self._composer_idle_close_ms()
+        def expire():
+            if generation == self._composer_generation and self._composer_idle_eligible(): self._close_composer_only()
+        self.schedule(delay, expire)
+
+    def _close_composer_only(self):
+        if not self.composer_visible: return False
+        self._composer_generation+=1;self._composer_idle_armed=False;self.composer_visible=False;self._composer_visibility_revision+=1
+        # Match the old hide() rollback: closing an unanswered nudge composer
+        # never manufactures a reply, and keeps the nudge presentation state.
+        if self._reply_context and self._nudge:
+            self._nudge['replied']=False;self.speech['nudge']=True
+        self._reply_context=None;self._reply_token=None;self._sent_geometry.pop('input',None)
+        self.shell.set_geometry({'window':'input','visible':False});self.on_composer_closed()
+        return True
+
+    def _composer_state(self, data):
+        keys=('draft_nonempty','composing','pending','editing','queue_open','hovered');counts=('attachments','readers')
+        if not isinstance(data,dict) or any(not isinstance(data.get(key),bool) for key in keys): raise ValueError('invalid composer state')
+        if any(not isinstance(data.get(key),int) or isinstance(data.get(key),bool) or not 0<=data[key]<=4 for key in counts): raise ValueError('invalid composer count')
+        was_eligible=self._composer_idle_eligible();self._composer_guard={key:data[key] for key in (*keys,*counts)};is_eligible=self._composer_idle_eligible()
+        if not is_eligible:
+            self._composer_generation+=1;self._composer_idle_armed=False
+        elif not was_eligible:
+            self._composer_generation+=1;self._composer_idle_armed=False;self._arm_composer_idle_close()
+
+    def _input_activity(self, active):
+        self.on_activity(active)
+        if self._composer_input_active == active:
+            return
+        self._composer_input_active=active;self._composer_generation+=1;self._composer_idle_armed=False
+        if not active:
+            self._arm_composer_idle_close()
+
+    def set_history_open(self, visible):
+        if not isinstance(visible, bool) or self._history_open == visible:
+            return
+        self._history_open=visible;self._composer_generation+=1;self._composer_idle_armed=False
+        if not visible:
+            self._arm_composer_idle_close()
+
+    def set_speech_history_open(self, visible):
+        if not isinstance(visible, bool) or self._speech_history_open == visible:
+            return
+        self._speech_history_open=visible;self._composer_generation+=1;self._composer_idle_armed=False
+        if not visible:
+            self._arm_composer_idle_close()
 
     def is_idle(self):
         if self.queue.snapshot().active or self.queue.snapshot().waiting:return False
@@ -198,7 +284,12 @@ class NativeBubbleHost:
 
     def _crashed(self, code):
         self._settle_nudge('ignored')
-        self.visible=False
+        # A new WebView starts on its front face.  Clear only native-private
+        # guards so a stale speech flip or key activity cannot block its fresh
+        # composer; the separate Tk history popup remains authoritative.
+        self.visible=False;self.composer_visible=False
+        self._composer_input_active=False;self._speech_history_open=False
+        self._composer_generation+=1;self._composer_idle_armed=False;self._composer_visibility_revision+=1
         self.queue.hold()
         self.notice='말풍선 연결이 종료되었습니다. 대기 요청은 보류했습니다.'
         self.on_fallback(code)
@@ -250,15 +341,70 @@ class NativeBubbleHost:
             ax,ay,aw,ah=self.get_anchor()
             if aw<=0 or ah<=0:return
             self.manual_position.add(label);preferred.update(dx=(values['x']-ax)/aw,dy=(values['y']-ay)/ah)
+            self._persist_manual_geometry()
         elif origin=='user_resize':
             self.manual_size.add(label)
             preferred.update(width=values['width']/values['scale'],height=values['height']/values['scale'])
+            self._persist_manual_geometry()
             self.publish()
         # Only explicit completed native interactions become manual.  Passive
         # move/resize and DPI reports are informational and never persist.
         self.rects[label]={**old,**values}
         if old.get('scale')!=values['scale']:
             self.refresh_positions()
+
+    @staticmethod
+    def _finite(value, *, minimum, maximum):
+        return (isinstance(value, (int, float)) and not isinstance(value, bool)
+                and math.isfinite(value) and minimum <= value <= maximum)
+
+    def _restore_manual_geometry(self):
+        """Load only current, bounded manual geometry; legacy shapes are ignored."""
+        try:
+            stored=self._geometry_state_getter().get('native_bubble_geometry', {})
+        except Exception:
+            return
+        if not isinstance(stored, dict):
+            return
+        for label in ('input', 'speech', 'thought'):
+            record=stored.get(label)
+            if not isinstance(record, dict):
+                continue
+            preferred={}
+            position=record.get('position')
+            if isinstance(position, dict) and self._finite(position.get('dx'), minimum=-10, maximum=10) and self._finite(position.get('dy'), minimum=-10, maximum=10):
+                preferred.update(dx=float(position['dx']), dy=float(position['dy']))
+                self.manual_position.add(label)
+            size=record.get('size')
+            if isinstance(size, dict) and self._finite(size.get('width'), minimum=80, maximum=4096) and self._finite(size.get('height'), minimum=60, maximum=4096):
+                preferred.update(width=float(size['width']), height=float(size['height']))
+                self.manual_size.add(label)
+            if preferred:
+                self._manual_rects[label]=preferred
+
+    def _persist_manual_geometry(self):
+        """Persist only completed user drag/resize values, never passive DPI reports."""
+        records={}
+        for label, preferred in self._manual_rects.items():
+            record={}
+            if label in self.manual_position and self._finite(preferred.get('dx'), minimum=-10, maximum=10) and self._finite(preferred.get('dy'), minimum=-10, maximum=10):
+                record['position']={'dx':preferred['dx'], 'dy':preferred['dy']}
+            if label in self.manual_size and self._finite(preferred.get('width'), minimum=80, maximum=4096) and self._finite(preferred.get('height'), minimum=60, maximum=4096):
+                record['size']={'width':preferred['width'], 'height':preferred['height']}
+            if record:
+                records[label]=record
+        if not records:
+            return
+        def update(state):
+            saved=state.setdefault('native_bubble_geometry', {})
+            if not isinstance(saved, dict):
+                saved={};state['native_bubble_geometry']=saved
+            for label, record in records.items():
+                prior=saved.get(label)
+                merged=dict(prior) if isinstance(prior, dict) else {}
+                merged.update(record)
+                saved[label]=merged
+        self._geometry_state_updater(update)
 
     def refresh_positions(self, focus=False):
         if not self.shell.is_ready: return
@@ -320,7 +466,11 @@ class NativeBubbleHost:
     def update_cfg(self, cfg, terminal_cfg=None):
         self.cfg=dict(cfg or {})
         if terminal_cfg is not None:self.terminal_cfg=dict(terminal_cfg or {})
+        # A reloaded idle timeout must not leave a callback armed with the old
+        # duration.  Guard metadata remains host-private and is re-evaluated.
+        self._composer_generation+=1;self._composer_idle_armed=False
         self._presentation_sizes.clear();self._sent_geometry.clear();self.refresh_positions();self.publish()
+        self._arm_composer_idle_close()
 
     def _key(self, request_id):
         return next((key for key in self.payloads if key.request_id==request_id),None)
@@ -361,6 +511,7 @@ class NativeBubbleHost:
         x,y,w,_=self.get_anchor()
         return {'version':self.version,'queue':cards,'recent':recent,'presentation_style':self._presentation_style(x,y,w),
             'busy':snap.active is not None,'held':snap.held,'edit':edit,'approval':approval,
+            'composer_visibility_revision':self._composer_visibility_revision,
             'accepted_request_id':self.accepted,'rejected_request_id':self.rejected,
             'notice':self.notice,'speech':self.speech,'speech_history':self.speech_history,
             'thought':self.thought}
@@ -410,8 +561,10 @@ class NativeBubbleHost:
                 if self.queue.resume():self._dispatch()
             elif name=='close':
                 self._settle_nudge('ignored');self.hide()
-            elif name=='history':self.on_history()
-            elif name=='input_activity':self.on_activity(bool(data.get('active')))
+            elif name=='history':self.set_history_open(True);self.on_history()
+            elif name=='input_activity':self._input_activity(bool(data.get('active')))
+            elif name=='composer_state':self._composer_state(data)
+            elif name=='speech_history_state':self.set_speech_history_open(data.get('open'))
             elif name=='resize_input':
                 height=data.get('height')
                 if isinstance(height,(int,float)) and math.isfinite(height) and self.visible and 'input' not in self.manual_size:
@@ -444,6 +597,7 @@ class NativeBubbleHost:
             elif name=='approval' and self.approval and data.get('approval_id')==self.approval.id:
                 (self.approval.allow if data.get('allow') is True else self.approval.deny)()
                 self.approval=None
+                self._composer_generation+=1;self._composer_idle_armed=False;self._arm_composer_idle_close()
             elif name=='nudge_reply' and self._nudge and not self._nudge.get('replied'):
                 # A reply to a previously faded nudge is a late engagement,
                 # not a second ignored outcome.

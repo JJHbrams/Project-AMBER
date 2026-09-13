@@ -6,7 +6,10 @@ use serde_json::{json, Value};
 use windows::Win32::{Foundation::POINT, Graphics::Gdi::{CombineRgn, CreateEllipticRgn, CreatePolygonRgn, CreateRoundRectRgn, DeleteObject, SetWindowRgn, RGN_OR, WINDING}};
 
 const MAX_LINE: usize = 32 * 1024 * 1024;
-const ACTIONS: &[&str] = &["submit","edit","save_edit","cancel_edit","delete","interrupt","send_now","resume_queue","history","close","input_activity","resize_input","presentation_size","hover","dismiss","approval","nudge_reply","nudge_defer"];
+// Included in rustc's dependency fingerprint so frontendDist changes relink
+// the resource library into this executable (the value is never exposed).
+const _FRONTEND_REV: &str = env!("NATIVE_BUBBLE_FRONTEND_REV");
+const ACTIONS: &[&str] = &["submit","edit","save_edit","cancel_edit","delete","interrupt","send_now","resume_queue","history","close","input_activity","resize_input","presentation_size","hover","dismiss","approval","nudge_reply","nudge_defer","composer_state","speech_history_state"];
 type Output = Arc<Mutex<Box<dyn Write + Send>>>;
 type Targets = Arc<Mutex<HashMap<String, [f64; 2]>>>;
 #[derive(Clone, Copy, PartialEq)]

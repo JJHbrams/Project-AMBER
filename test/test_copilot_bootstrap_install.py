@@ -157,6 +157,7 @@ class CopilotBootstrapInstallTests(unittest.TestCase):
         for skill_name in (
             "engram",
             "orchestrate",
+            "sage",
             "engram-new-session",
             "engram-task-workflow",
             "engram-wiki-workflow",

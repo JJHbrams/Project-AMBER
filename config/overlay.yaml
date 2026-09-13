@@ -111,6 +111,9 @@ bubble:
   # - confirm_always: 모든 도구 호출마다 승인 풍선으로 확인
   permission_level: "auto"
 
+  # 비어 있고 방해 요소가 없는 native 입력창만 자동으로 접는다. 0이면 끈다.
+  composer_idle_close_ms: 20000
+
   # 대화/입력 풍선은 캐릭터 위가 아니라 옆(화면 중심 반대쪽)에 배치된다.
   # side_gap: 캐릭터와의 좌우 간격(px). anchor_y_ratio: 캐릭터 상단에서 이 비율만큼
   # 내려온 지점에 풍선의 세로 중심을 맞춤(캐릭터 폭/높이 기준 비율 — terminal 섹션과

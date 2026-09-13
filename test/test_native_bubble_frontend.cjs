@@ -57,3 +57,20 @@ test('speech measurement targets the nested live face introduced by the rotor',(
  const source=fs.readFileSync(path.join(__dirname,'../native-bubble-shell/frontend/app.js'),'utf8');
  assert.match(source,/querySelector\('#bubble \.face\.front, #bubble>\.face'\)/);
 });
+test('composer state is event-driven and deduplicated',()=>{
+ const source=fs.readFileSync(path.join(__dirname,'../native-bubble-shell/frontend/app.js'),'utf8');
+ assert.doesNotMatch(source,/setInterval\(composerState/);
+ assert.match(source,/lastComposerState/);
+ assert.match(source,/serialized===lastComposerState/);
+ assert.match(source,/document\.addEventListener\('input',composerState\)/);
+ assert.match(source,/composerState\(\);if\(on\)setTimeout/);
+ assert.match(source,/readers\+\+;composerState\(\)/);
+ assert.match(source,/finally\{readers--;\}previews\(\);resize\(\);composerState\(\)/);
+ assert.match(source,/onkeydown=e=>\{clearTimeout\(activityTimer\);action\('input_activity',\{active:true\}\)/);
+});
+test('composer state re-syncs once per host visibility handshake',()=>{
+ const source=fs.readFileSync(path.join(__dirname,'../native-bubble-shell/frontend/app.js'),'utf8');
+ assert.match(source,/composer_visibility_revision!==lastComposerVisibilityRevision/);
+ assert.match(source,/lastComposerVisibilityRevision=state\.composer_visibility_revision;lastComposerState=null;composerState\(\)/);
+ assert.match(source,/const changed=historyOpen!==on;historyOpen=on;if\(changed\)action\('speech_history_state',\{open:historyOpen\}\)/);
+});

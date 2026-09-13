@@ -470,7 +470,7 @@ if (Test-Path $CopilotInstructionsSource) {
 
 # ── 7. Copilot / Claude skills ──────────────────────────────
 Write-Step "Engram workflow skills"
-$sharedSkillNames = @("orchestrate", "engram-new-session", "engram-task-workflow", "engram-wiki-workflow", "engram-close-session")
+$sharedSkillNames = @("orchestrate", "sage", "engram-new-session", "engram-task-workflow", "engram-wiki-workflow", "engram-close-session")
 foreach ($skillName in $sharedSkillNames) {
     $skillSrc = Join-Path $WorkflowSkillsSource "$skillName\SKILL.md"
     if (-not (Test-Path $skillSrc)) {

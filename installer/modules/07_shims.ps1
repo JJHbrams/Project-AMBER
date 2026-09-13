@@ -306,7 +306,7 @@ if (Test-Path $ClaudeCommandSource) {
 
 # 7d-2. Engram 말풍선 새 세션 스킬 (agent skill) — claude-code SDK(말풍선)/CLI 및 Copilot 에서 발동
 Write-Step "Engram workflow skills..."
-foreach ($skillName in @("orchestrate", "engram-new-session", "engram-task-workflow", "engram-wiki-workflow", "engram-close-session")) {
+foreach ($skillName in @("orchestrate", "sage", "engram-new-session", "engram-task-workflow", "engram-wiki-workflow", "engram-close-session")) {
     $skillSrc = Join-Path $ProjectRoot ".github\skills\$skillName\SKILL.md"
     if (Test-Path $skillSrc) {
         foreach ($skillRoot in @(

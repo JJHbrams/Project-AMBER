@@ -68,10 +68,7 @@ class CodexBubbleSession:
         try:
             self._rpc('initialize',{'clientInfo':{'name':'engram-bubble','version':'1'},'capabilities':{}})
             self._write({'method':'initialized','params':{}})
-            params={'cwd':self._cwd,'approvalPolicy':'never' if self._permission=='auto' else 'untrusted',
-                'sandbox':'workspace-write'}
-            if self._bootstrap:params['developerInstructions']=self._bootstrap
-            if self._resume:params['threadId']=self._resume
+            params=self._thread_params()
             result=self._rpc('thread/resume' if self._resume else 'thread/start',params,timeout=15)
             sid=result.get('thread',{}).get('id')
             if not isinstance(sid,str) or not sid:raise RuntimeError('thread_start_invalid')
@@ -82,6 +79,16 @@ class CodexBubbleSession:
         except Exception:
             self.stop()
             raise RuntimeError('codex_session_start_failed') from None
+
+    def _thread_params(self):
+        """Build fresh and resume thread parameters from the same bubble policy."""
+        params={'cwd':self._cwd,'approvalPolicy':'never' if self._permission=='auto' else 'untrusted',
+            'sandbox':'workspace-write'}
+        if self._bootstrap:
+            params['developerInstructions']=self._bootstrap
+        if self._resume:
+            params['threadId']=self._resume
+        return params
 
     def is_alive(self):
         return bool(self._alive.is_set() and self._proc and self._proc.poll() is None and not self._stopping.is_set())

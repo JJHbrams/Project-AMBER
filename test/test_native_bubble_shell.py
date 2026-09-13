@@ -1,4 +1,5 @@
 import os, tempfile, time, unittest
+from pathlib import Path
 from overlay.bubble.native_shell import ALLOWED_ACTIONS, NativeBubbleShell
 from overlay.bubble.rich_input import MAX_DECODED_PIXELS, validate_attachments
 
@@ -35,5 +36,10 @@ class NativeShellTests(unittest.TestCase):
   self.assertTrue(shell.is_ready);self.assertFalse(crashes);shell.stop();shell.stop();self.assertIsNone(shell.pid)
  def test_private_actions_and_bad_attachment(self):
   self.assertIn('input_activity',ALLOWED_ACTIONS);self.assertNotIn('arbitrary_command',ALLOWED_ACTIONS)
+  self.assertIn('composer_state',ALLOWED_ACTIONS)
+  self.assertIn('speech_history_state',ALLOWED_ACTIONS)
+  source=(Path(__file__).resolve().parents[1]/'native-bubble-shell'/'src'/'main.rs').read_text(encoding='utf-8')
+  self.assertIn('"composer_state"',source)
+  self.assertIn('"speech_history_state"',source)
   with self.assertRaises(ValueError):validate_attachments(['data:image/png;base64,AA=='])
   self.assertGreater(MAX_DECODED_PIXELS,1)

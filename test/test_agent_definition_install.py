@@ -12,7 +12,7 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 AGENTS_ROOT = ROOT / "config" / "agents"
-ROLES = ("planner", "coder", "servant")
+ROLES = ("planner", "coder", "servant", "sage")
 
 
 def _read_markdown(path: Path):
@@ -27,16 +27,20 @@ def test_provider_owned_agent_sources_have_valid_syntax_and_role_parity():
         "planner": ("opus", {"Read", "Grep", "Glob"}),
         "coder": ("sonnet", {"Read", "Edit", "Grep", "Glob", "Bash"}),
         "servant": ("haiku", {"Read", "Grep", "Glob", "Bash"}),
+        # 현자는 최상위 티어다. 비싸므로 읽기 전용 자문만 하고 구현 루프에는 들어가지 않는다.
+        "sage": ("fable", {"Read", "Grep", "Glob"}),
     }
     expected_copilot = {
         "planner": ("gpt-5.3-codex", ["read", "search"]),
         "coder": ("gpt-4.1", ["read", "edit", "search", "execute"]),
         "servant": ("gpt-5-mini", ["read", "search", "execute"]),
+        "sage": ("claude-opus-4.6", ["read", "search"]),
     }
     expected_codex = {
         "planner": ("gpt-5.6-terra", "medium", "read-only"),
         "coder": ("gpt-5.6-terra", "medium", "workspace-write"),
         "servant": ("gpt-5.6-luna", "low", "read-only"),
+        "sage": ("gpt-6-astra", "high", "read-only"),
     }
 
     for role in ROLES:
