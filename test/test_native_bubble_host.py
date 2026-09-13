@@ -1,5 +1,6 @@
 import unittest
 from overlay.bubble.native_host import NativeBubbleHost, version_question
+from overlay.chat_window import logical_rect_to_physical
 
 
 class Shell:
@@ -67,7 +68,7 @@ class HostTests(unittest.TestCase):
         self.assertIn('speech',h.manual_size)
         self.assertGreater(h.presentation_revision['speech'],revision)
         h._present('speech','second answer')
-        self.assertNotIn('speech',h.manual_size)
+        self.assertIn('speech',h.manual_size)
         self.assertEqual(h.snapshot()['speech_history'][0]['text'],'first answer more')
         for i in range(25):h._present('speech',f'answer {i}')
         self.assertEqual(len(h.speech_history),20)
@@ -124,6 +125,119 @@ class HostTests(unittest.TestCase):
         h.visible=True;h.manual_size.add('input');h.rects['input']={'height':600,'scale':1}
         self.action('resize_input',height=240);self.assertEqual(h.rects['input']['height'],600)
 
+    def test_blank_composer_timeout_hides_input_only(self):
+        h=self.host;h.cfg['composer_idle_close_ms']=10;h.speech={'text':'answer'};h.thought={'text':'thinking'}
+        h.show();timer=next(callback for delay,callback in self.timers if delay==10);timer()
+        self.assertFalse(h.composer_visible);self.assertTrue(h.visible)
+        self.assertEqual(h.speech['text'],'answer');self.assertEqual(h.thought['text'],'thinking')
+
+    def test_composer_guard_restarts_timeout_and_rejects_stale_callback(self):
+        h=self.host;h.cfg['composer_idle_close_ms']=10;h.show();stale=next(callback for delay,callback in self.timers if delay==10)
+        h._composer_state({'draft_nonempty':True,'attachments':0,'composing':False,'readers':0,'pending':False,'editing':False,'queue_open':False,'hovered':False})
+        stale();self.assertTrue(h.composer_visible)
+        h._composer_state({'draft_nonempty':False,'attachments':0,'composing':False,'readers':0,'pending':False,'editing':False,'queue_open':False,'hovered':False})
+        fresh=[callback for delay,callback in self.timers if delay==10][-1];fresh();self.assertFalse(h.composer_visible)
+
+    def test_nudge_reply_blocks_idle_and_manual_close_rolls_back_once(self):
+        events=[];h=NativeBubbleHost(schedule=lambda delay,fn:self.timers.append((delay,fn)),get_session=lambda:self.provider,
+            get_anchor=lambda:(800,600,100,100),shell_factory=Shell,cfg={'composer_idle_close_ms':10},
+            on_composer_closed=lambda:events.append('closed'),geometry_state_getter=lambda:{},geometry_state_updater=lambda _:None)
+        # This was an ordinary blank-composer callback.  It must be stale after
+        # the user engages a nudge reply, and no replacement idle timer is
+        # allowed while the reply context/token remains active.
+        h.show();stale=next(callback for delay,callback in self.timers if delay==10)
+        h.show_nudge('synthetic');h.action({'action_id':'reply','action':'nudge_reply','request_id':None,'payload':{'presentation_revision':h.presentation_revision['speech']}})
+        self.assertEqual(len([1 for delay,_ in self.timers if delay==10]),1)
+        stale();self.assertTrue(h.composer_visible);self.assertIsNotNone(h._reply_context);self.assertIsNotNone(h._reply_token)
+        h.hide();h.hide()
+        self.assertEqual(events,['closed']);self.assertIsNone(h._reply_context);self.assertIsNone(h._reply_token)
+
+    def test_composer_idle_close_zero_disables(self):
+        h=self.host;h.cfg['composer_idle_close_ms']=0;h.show();self.assertFalse(any(delay==0 for delay,_ in self.timers))
+
+    def test_idle_timeout_reload_invalidates_old_callback(self):
+        h=self.host;h.cfg['composer_idle_close_ms']=20;h.show()
+        old=next(callback for delay,callback in self.timers if delay==20)
+        h.update_cfg({**h.cfg,'composer_idle_close_ms':10})
+        old();self.assertTrue(h.composer_visible)
+        next(callback for delay,callback in self.timers if delay==10)()
+        self.assertFalse(h.composer_visible)
+
+    def test_history_activity_and_approval_guard_idle_close(self):
+        h=self.host;h.cfg['composer_idle_close_ms']=10;h.show();first=next(callback for delay,callback in self.timers if delay==10)
+        h.set_history_open(True);first();self.assertTrue(h.composer_visible)
+        h.set_history_open(False);history_clear=[callback for delay,callback in self.timers if delay==10][-1]
+        h._input_activity(True);history_clear();self.assertTrue(h.composer_visible)
+        h._input_activity(False);[callback for delay,callback in self.timers if delay==10][-1]()
+        self.assertFalse(h.composer_visible)
+        h.show();speech_stale=[callback for delay,callback in self.timers if delay==10][-1]
+        h.set_speech_history_open(True);speech_stale();self.assertTrue(h.composer_visible)
+        h.set_speech_history_open(False);[callback for delay,callback in self.timers if delay==10][-1]()
+        self.assertFalse(h.composer_visible)
+        h.show();h.approval=type('Approval',(),{'id':'approval','allow':lambda self:None,'deny':lambda self:None})()
+        h._composer_generation+=1;h._composer_idle_armed=False;h._arm_composer_idle_close()
+        timer_count=len(self.timers)
+        h.action({'action_id':'approval-close','action':'approval','request_id':None,'payload':{'approval_id':'approval','allow':True}})
+        self.assertGreater(len(self.timers),timer_count)
+        self.timers[-1][1]()
+        self.assertFalse(h.composer_visible)
+
+    def test_stop_and_crash_clear_native_speech_history_guard_only(self):
+        h=self.host;h.cfg['composer_idle_close_ms']=10;h.show();h.set_speech_history_open(True);h._input_activity(True);h._history_open=True
+        h.stop();self.assertFalse(h._speech_history_open);self.assertFalse(h._composer_input_active);self.assertTrue(h._history_open)
+        h.set_history_open(False);h.shell.pid=123;h.show();[callback for delay,callback in self.timers if delay==10][-1]();self.assertFalse(h.composer_visible)
+        h.show();h.set_speech_history_open(True);h._input_activity(True);h._history_open=True;h._crashed(1)
+        self.assertFalse(h.composer_visible);self.assertFalse(h._speech_history_open);self.assertFalse(h._composer_input_active);self.assertTrue(h._history_open)
+
+    def test_hide_reopen_invalidates_stale_idle_callback_and_nudge_rolls_back(self):
+        events=[];h=NativeBubbleHost(schedule=lambda delay,fn:self.timers.append((delay,fn)),get_session=lambda:self.provider,
+            get_anchor=lambda:(800,600,100,100),shell_factory=Shell,cfg={'composer_idle_close_ms':10},
+            on_composer_closed=lambda:events.append('closed'),geometry_state_getter=lambda:{},geometry_state_updater=lambda _:None)
+        h.show();stale=next(callback for delay,callback in self.timers if delay==10);h._input_activity(True);h.hide();self.assertFalse(h._composer_input_active)
+        h.show();stale();self.assertTrue(h.composer_visible)
+        [callback for delay,callback in self.timers if delay==10][-1]();self.assertFalse(h.composer_visible)
+        h.show()
+        h.show_nudge('synthetic');h.action({'action_id':'reply-rollback','action':'nudge_reply','request_id':None,'payload':{'presentation_revision':h.presentation_revision['speech']}})
+        self.assertTrue(h._nudge['replied']);h._close_composer_only()
+        self.assertFalse(h._nudge['replied']);self.assertTrue(h.speech['nudge']);self.assertEqual(events.count('closed'),3)
+
+    def test_manual_geometry_round_trips_anchor_position_and_logical_size(self):
+        store={}
+        def update(mutator): mutator(store)
+        h=NativeBubbleHost(schedule=lambda *_:None,get_session=lambda:self.provider,
+            get_anchor=lambda:(100,200,200,100),shell_factory=Shell,
+            geometry_state_getter=lambda:store,geometry_state_updater=update)
+        h._geometry({'window':'thought','x':0,'y':150,'width':600,'height':300,'scale':2,'origin':'user_drag'})
+        h._geometry({'window':'thought','x':0,'y':150,'width':600,'height':300,'scale':2,'origin':'user_resize'})
+        self.assertEqual(store['native_bubble_geometry']['thought']['position'],{'dx':-0.5,'dy':-0.5})
+        self.assertEqual(store['native_bubble_geometry']['thought']['size'],{'width':300.0,'height':150.0})
+        restored=NativeBubbleHost(schedule=lambda *_:None,get_session=lambda:self.provider,
+            get_anchor=lambda:(-500,400,400,200),shell_factory=Shell,
+            geometry_state_getter=lambda:store,geometry_state_updater=update)
+        restored.refresh_positions()
+        self.assertEqual((restored.rects['thought']['x'],restored.rects['thought']['y']),(-700,300))
+        self.assertEqual((restored.rects['thought']['width'],restored.rects['thought']['height']),(300,150))
+        restored._geometry({'window':'thought','x':-700,'y':300,'width':600,'height':300,'scale':2,'origin':'dpi'})
+        self.assertEqual((restored.rects['thought']['width'],restored.rects['thought']['height']),(600,300))
+
+    def test_malformed_geometry_and_passive_dpi_are_not_persisted(self):
+        store={'native_bubble_geometry':{'input':{'position':{'dx':'bad','dy':0},'size':{'width':float('nan'),'height':20}},'speech':[1]}}
+        writes=[]
+        h=NativeBubbleHost(schedule=lambda *_:None,get_session=lambda:self.provider,
+            get_anchor=lambda:(0,0,100,100),shell_factory=Shell,
+            geometry_state_getter=lambda:store,geometry_state_updater=lambda update:writes.append(update))
+        self.assertFalse(h.manual_position);self.assertFalse(h.manual_size)
+        h._geometry({'window':'input','x':1,'y':2,'width':300,'height':200,'scale':2,'origin':'passive'})
+        h._geometry({'window':'input','x':1,'y':2,'width':300,'height':200,'scale':2,'origin':'dpi'})
+        self.assertEqual(writes,[])
+
+    def test_native_tail_uses_anchor_center_but_input_keeps_start_target(self):
+        self.host.get_anchor=lambda:(-400,100,200,120)
+        self.host.refresh_positions()
+        self.assertNotIn('tail_target',self.host.rects['input'])
+        self.assertEqual(self.host.rects['speech']['tail_target'],[-300,160])
+        self.assertEqual(self.host.rects['thought']['tail_target'],[-300,160])
+
     def test_stale_dismiss_cannot_hide_new_version_answer(self):
         self.submit('a','버전 뭐야');old=self.host.presentation_revision['speech']
         self.submit('b','AMBER 버전')
@@ -158,7 +272,8 @@ class HostTests(unittest.TestCase):
         self.provider=Provider();self.timers=[];self.calls=0
         def session():self.calls+=1;return self.provider
         self.host=NativeBubbleHost(schedule=lambda delay,f:self.timers.append((delay,f)),get_session=session,
-            get_anchor=lambda:(800,600,100,100),shell_factory=Shell,version='1.2.3.4')
+            get_anchor=lambda:(800,600,100,100),shell_factory=Shell,version='1.2.3.4',
+            geometry_state_getter=lambda:{},geometry_state_updater=lambda _update:None)
         self.counter=0
     def action(self,name,rid=None,**payload):
         self.counter+=1
@@ -244,6 +359,13 @@ class HostTests(unittest.TestCase):
         self.action('interrupt','a');self.host._interrupt_failed(key)
         self.terminal(key,provider_status='interrupted')
         self.assertEqual(self.host.cards['a']['state'],'interrupted')
+
+
+class NativeCoordinateTests(unittest.TestCase):
+    def test_logical_rect_to_physical_preserves_negative_monitor_origin(self):
+        from unittest.mock import patch
+        with patch('overlay.chat_window._get_monitor_info', return_value=((-1280, 0, 0, 720), (-1920, -100, 0, 980), 1.5)):
+            self.assertEqual(logical_rect_to_physical((-1180, 100, 200, 100)), (-1770, 50, 300, 150))
 
 
 if __name__=='__main__':unittest.main()

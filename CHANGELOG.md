@@ -4,6 +4,33 @@ All notable changes to this project are documented in this file.
 
 ## Unreleased
 
+## [1.5.19] — 2026-09-13
+
+### Fixed
+
+- Bubble-mode bootstrap now forwards the Codex caller correctly and avoids
+  conflicting Engram bootstrap instructions.
+- Native bubbles restore user-adjusted geometry after restart, calculate
+  response/thought tail positions with DPI-aware coordinates, and close an
+  empty composer after idle time without discarding a draft, attachment, IME
+  composition, queued work, or active mouse interaction.
+- Installation deploys the complete Codex hook and connection-recovery
+  sources while preserving the user's hook-trust choice.
+
+### Added
+
+- Sage escalation source and provider-owned definitions for Claude, Codex, and
+  Copilot are included for problems that require a one-shot top-tier review.
+
+### Validation notes
+
+- Source native-bubble smoke coverage and focused automated tests cover the
+  changed paths. Live provider connection, image/approval flows, and visual
+  review across multiple DPI environments remain release-environment checks.
+- The release installer is `AMBER_1.5.19.770_x64-setup.exe` (214,884,433
+  bytes, SHA-256
+  `8BC187348A77126E1D1086B2F0BE3C3B86BF430B0E71DD025845F8FF74896FA4`).
+
 ## [1.5.18] — 2026-09-12
 
 ### Added

@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from claude_code_sdk.types import SystemMessage
+from core.integrations.engram_bootstrap import bubble_bootstrap_prompt
 from overlay import config
 from overlay.bubble.session import BubbleSessionManager
 from overlay.bubble.state import BubbleStateController
@@ -69,6 +70,7 @@ class BubbleTitleRecoveryTests(unittest.TestCase):
         manager = BubbleSessionManager(
             cwd="C:/fixture/Project",
             resume_session_id=resume,
+            bootstrap_prompt=bubble_bootstrap_prompt("C:/fixture/Project"),
             state_controller=state,
             on_session_id=config.set_bubble_session_id,
             on_title_checkpoint=lambda checkpoint: app._checkpoint_bubble_title(
@@ -309,7 +311,8 @@ class BubbleTitleRecoveryTests(unittest.TestCase):
         self.assertEqual(asyncio.run(send_once()), raw)
         policy = manager._build_options().append_system_prompt
         self.assertIn("Do not generate or report a session title", policy)
-        self.assertIn("do not repeat engram_get_context_once", policy)
+        self.assertIn("select:mcp__engram__engram_get_context_once", policy)
+        self.assertNotIn("do not repeat engram_get_context_once", policy)
         manager.stop()
 
 

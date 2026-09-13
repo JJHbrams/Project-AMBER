@@ -81,7 +81,7 @@ foreach ($providerSpec in $providers) {
         New-Item -Path $providerSpec.DestinationDir -ItemType Directory -Force | Out-Null
     }
 
-    foreach ($role in @("planner", "coder", "servant")) {
+    foreach ($role in @("planner", "coder", "servant", "sage")) {
         $source = Join-Path $providerSpec.SourceDir ($role + $providerSpec.Extension)
         $destination = Join-Path $providerSpec.DestinationDir ($role + $providerSpec.Extension)
         if (-not (Test-Path -LiteralPath $source)) {

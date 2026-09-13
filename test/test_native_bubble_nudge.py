@@ -75,4 +75,12 @@ class NudgeTests(unittest.TestCase):
         app._initiative.notify_late_engaged.assert_called_once()
         app._initiative.notify_engaged.assert_not_called()
 
+    def test_main_converts_only_native_anchor_to_physical_coordinates(self):
+        from overlay.main import OverlayApp
+        app=object.__new__(OverlayApp)
+        app._get_bubble_anchor_rect=lambda:(-1200,100,200,120)
+        with patch('overlay.main.logical_rect_to_physical', return_value=(-1800,50,300,180)) as convert:
+            self.assertEqual(app._get_native_bubble_anchor_rect(),(-1800,50,300,180))
+        convert.assert_called_once_with((-1200,100,200,120))
+
 if __name__=='__main__':unittest.main()

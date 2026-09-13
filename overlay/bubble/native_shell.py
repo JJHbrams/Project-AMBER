@@ -15,7 +15,8 @@ MAX_LINE_BYTES = 32 * 1024 * 1024
 WINDOWS = frozenset({"input", "speech", "thought"})
 ALLOWED_ACTIONS = frozenset({"submit", "edit", "save_edit", "cancel_edit", "delete",
     "interrupt", "send_now", "resume_queue", "history", "close", "input_activity",
-    "resize_input", "presentation_size", "hover", "dismiss", "approval", "nudge_reply", "nudge_defer"})
+    "resize_input", "presentation_size", "hover", "dismiss", "approval", "nudge_reply", "nudge_defer",
+    "composer_state", "speech_history_state"})
 
 
 @dataclass(eq=False)

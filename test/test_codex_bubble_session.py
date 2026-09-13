@@ -61,5 +61,15 @@ class Tests(unittest.TestCase):
         self.assertEqual(captured[0][1]['input'][1]['url'],'data:image/png;base64,YWJj')
         self.assertEqual(self.out[0]['text'],'seen')
 
+    def test_fresh_and_resume_share_developer_bootstrap(self):
+        prompt = 'bootstrap caller=Codex title policy'
+        fresh = CodexBubbleSession('.', bootstrap_prompt=prompt)
+        resumed = CodexBubbleSession('.', bootstrap_prompt=prompt, resume_session_id='prior-thread')
+
+        self.assertEqual(fresh._thread_params()['developerInstructions'], prompt)
+        self.assertNotIn('threadId', fresh._thread_params())
+        self.assertEqual(resumed._thread_params()['developerInstructions'], prompt)
+        self.assertEqual(resumed._thread_params()['threadId'], 'prior-thread')
+
 
 if __name__=='__main__':unittest.main()

@@ -174,6 +174,22 @@ def _to_phys(lx: int, ly: int, log_work: tuple, phys_work: tuple) -> tuple:
     return (pl + round((lx - ll) * phys_w / log_w), pt + round((ly - lt) * phys_h / log_h))
 
 
+def logical_rect_to_physical(rect: tuple[int, int, int, int]) -> tuple[int, int, int, int]:
+    """Convert one Tk logical rect to physical desktop coordinates.
+
+    The character anchor belongs to one monitor.  Resolving the monitor from its
+    center keeps negative-origin secondary monitors correct and avoids changing
+    the existing Tk-only bubble paths.
+    """
+    lx, ly, width, height = (int(value) for value in rect)
+    if width <= 0 or height <= 0:
+        return lx, ly, max(1, width), max(1, height)
+    log_work, phys_work, _scale = _get_monitor_info(lx + width // 2, ly + height // 2)
+    left, top = _to_phys(lx, ly, log_work, phys_work)
+    right, bottom = _to_phys(lx + width, ly + height, log_work, phys_work)
+    return left, top, max(1, right - left), max(1, bottom - top)
+
+
 def _to_log(px: int, py: int, log_work: tuple, phys_work: tuple) -> tuple:
     """물리 점을 논리 점으로 변환 (wt --pos 용)."""
     ll, lt, lr, lb = log_work

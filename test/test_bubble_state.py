@@ -27,7 +27,7 @@ class BubbleStateTests(unittest.TestCase):
 
     def setUp(self):
         self.now = 0.0
-        self.registry = SessionStateRegistry(clock=lambda: self.now)
+        self.registry = SessionStateRegistry(clock=lambda: self.now, idle_timeout=600)
         self.state = BubbleStateController(self.registry, 'owner')
 
     def row(self):
@@ -270,6 +270,18 @@ class HostStateWiringTests(unittest.TestCase):
         self.app._ensure_bubble_session()
         self.assertIsNone(self.app._bubble_state)
         self.assertEqual(self.app._session_registry.snapshot(), [])
+
+    def test_host_passes_provider_specific_bubble_bootstrap_caller(self):
+        self.app._ensure_bubble_session()
+        self.host.bubble_bootstrap_prompt.assert_called_once_with('.', caller='claude-code')
+
+        self.app._bubble_session = None
+        self.host.bubble_bootstrap_prompt.reset_mock()
+        from overlay.bubble.codex_session import CodexBubbleSession
+        with patch.object(self.host, 'get_cli_provider', return_value='codex'), \
+             patch.object(CodexBubbleSession, 'start'):
+            self.app._ensure_bubble_session()
+        self.host.bubble_bootstrap_prompt.assert_called_once_with('.', caller='Codex')
 
 
 if __name__ == '__main__':

@@ -330,15 +330,12 @@ class BubbleSessionManager:
             extra_args["settings"] = json.dumps(
                 {"skipDangerousModePermissionPrompt": False, "skipAutoPermissionPrompt": False}
             )
-        # auto_inject(session.auto_inject) 가 켜지면 스타일 프롬프트 뒤에 engram 부트스트랩
-        # 지시문을 덧댄다 — 첫 응답 전 get_context_once 를 1회 부르도록 유도(중복은 무해).
+        # 스타일 프롬프트 뒤에 provider-specific bootstrap을 붙인다. 재개/재시도 때도
+        # 같은 지시문을 재구성하며, MCP 서버의 fingerprint/TTL dedupe가 이미 초기화된
+        # provider session의 중복 호출 여부를 결정한다.
         append_prompt = _BUBBLE_STYLE_PROMPT
         if self._bootstrap_prompt:
             append_prompt = f"{_BUBBLE_STYLE_PROMPT}\n\n{self._bootstrap_prompt}"
-        append_prompt += ("\n\nBubble monitor title policy: the host fixes this card's title to "
-            "오버레이 세션. Do not generate or report a session title for this bubble, even on "
-            "resume or retry. This overrides any earlier bootstrap title-generation instruction "
-            "only; do not repeat engram_get_context_once or other context bootstrap.")
         mcp_servers = {}
         if self._state_controller is not None:
             from overlay.config import load_cfg

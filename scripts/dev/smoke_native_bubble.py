@@ -57,13 +57,17 @@ async def run(args):
             schedule(200,finish)
             return True
     provider=Provider()
+    geometry_store={}
+    def update_geometry(mutator):
+        mutator(geometry_store)
     def factory(on_action,on_crash,**kw):
         def action(m):events.append(m['action']);on_action(m)
         return NativeBubbleShell(action,on_crash,executable=args.exe,**kw)
     anchor=[850,550,120,120]
     host=NativeBubbleHost(schedule=schedule,get_session=lambda:provider,get_anchor=lambda:tuple(anchor),
         on_fallback=crashes.append,shell_factory=factory,version='UI PREVIEW',
-        cfg={'font_family':'Noto Sans KR Medium','font_size':13})
+        cfg={'font_family':'Noto Sans KR Medium','font_size':13},
+        geometry_state_getter=lambda:geometry_store,geometry_state_updater=update_geometry)
     async def until(predicate,seconds=8):
         deadline=loop.time()+seconds
         while loop.time()<deadline:
@@ -144,11 +148,10 @@ async def run(args):
                         host.refresh_positions();host.publish();await asyncio.sleep(.1)
                         await evaluate('resumePresentationFade()')
                         await asyncio.sleep(.08)
-                        host._present('speech','[합성 QA] 최근 응답은 한 줄 카드로 정리되고, 필요한 답을 다시 열어볼 수 있어요.')
+                        host._present('speech','synthetic replacement')
                         host.refresh_positions();host.publish();await asyncio.sleep(.7)
                         assert 'speech' not in host._dismissed,'stale_fade_closed_replacement'
-                        assert await evaluate("document.querySelector('#content').textContent.includes('최근 응답')"),'new_speech_missing'
-                        await capture('speech-active')
+                        assert await evaluate("document.querySelector('#content').textContent.includes('synthetic replacement')"),'new_speech_missing'
                         if args.restoration:
                             original_cfg=dict(host.cfg)
                             host.update_cfg({**original_cfg,'font_family':'Arial','font_size':18,'speech_max_height_ratio':.20})
@@ -192,6 +195,7 @@ async def run(args):
                             native_rect=wintypes.RECT();user32.GetWindowRect.argtypes=[wintypes.HWND,ctypes.POINTER(wintypes.RECT)]
                             user32.GetWindowRect(hwnd,ctypes.byref(native_rect))
                             assert abs(native_rect.left-dragged['x']-100)<=1 and abs(native_rect.top-dragged['y']-50)<=1,'manual_bubble_did_not_follow_anchor'
+                            assert 'position' in geometry_store['native_bubble_geometry']['speech'],'manual_position_not_persisted'
                             print(json.dumps({'relative_anchor_follow':True,'delta':[100,50]}))
                         if args.os_resize:
                             # Actual Windows mouse input on this test's owned speech window only.
@@ -214,24 +218,29 @@ async def run(args):
                             await until(lambda:'speech' in host.manual_size)
                             after=host.rects['speech']
                             assert after['width']>before['width'] and after['height']>before['height'],'os_resize_not_applied'
+                            assert 'size' in geometry_store['native_bubble_geometry']['speech'],'manual_size_not_persisted'
                             print(json.dumps({'os_speech_resize':True,'before':[before['width'],before['height']],'after':[after['width'],after['height']]}))
                             await capture('speech-resized')
                             host._present('speech','리사이즈 뒤의 짧은 새 응답');host.refresh_positions();host.publish()
-                            await until(lambda:'speech' not in host.manual_size)
                             await asyncio.sleep(.6)
-                            reset_size=await evaluate('[innerWidth,innerHeight]')
-                            print(json.dumps({'speech_resize_reset_debug':True,'host_rect':host.rects.get('speech'),'manual_size':sorted(host.manual_size),'presentation_size':host._presentation_sizes.get('speech'),'webview':reset_size}))
-                            assert reset_size!=[after['width'],after['height']] and host._presentation_sizes.get('speech')=={'width':reset_size[0],'height':reset_size[1]},'next_response_kept_manual_size'
-                            print(json.dumps({'speech_resize_reset_on_next_response':True,'manual':[after['width'],after['height']],'next':reset_size}))
+                            retained_size=await evaluate('[innerWidth,innerHeight]')
+                            assert 'speech' in host.manual_size,'next_response_cleared_manual_size'
+                            assert retained_size==[after['width'],after['height']],'next_response_changed_manual_size'
+                            print(json.dumps({'speech_resize_persists_on_next_response':True,'size':retained_size}))
                         host._present('speech','지난 응답은 한 줄 카드로 정리되어 다시 볼 수 있어요.');host.refresh_positions();host.publish();await asyncio.sleep(.2)
                         host._present('speech','현재 응답은 내용 길이에 맞춰 크기가 달라집니다.');host.refresh_positions();host.publish();await asyncio.sleep(.4)
+                        assert await evaluate("flipSpeechHistory.toString().includes('speech_history_state')"),'stale_speech_frontend_asset'
                         await evaluate("document.querySelector('#speechFlip').click()")
                         await asyncio.sleep(.3)
                         assert await evaluate("document.querySelector('#rotor').classList.contains('flipped')"),'speech_history_not_flipped'
+                        await asyncio.sleep(.2)
+                        assert host._speech_history_open,f"speech_history_state_not_received:{sorted(set(events))}"
                         assert await evaluate("document.querySelectorAll('.history-card').length>=2"),'speech_history_cards_missing'
                         await capture('speech-history')
                         await evaluate("document.querySelectorAll('.history-card')[1].click()")
                         await asyncio.sleep(.3)
+                        await asyncio.sleep(.2)
+                        assert not host._speech_history_open,f"speech_history_close_not_received:{sorted(set(events))}"
                         assert await evaluate("document.querySelector('#content').textContent.includes('한 줄 카드')"),'archived_response_not_opened'
                         assert await evaluate("selectedSpeechHistory!==null && !historyOpen"),'archived_response_selection_lost'
                         await evaluate("document.querySelector('#speechFlip').click()")
@@ -262,6 +271,37 @@ async def run(args):
                         print(json.dumps({'thought_short':small,'thought_long':large}))
                         host.update_cfg(saved_cfg)
                     if label!='input':continue
+                    # Drive the *actual* WebView into a blank, front-face,
+                    # non-hover state.  Only composer_state's bounded booleans
+                    # and counts cross to the host; draft/image values remain
+                    # inside the isolated synthetic WebView.
+                    # The preceding nudge reply has an intentional host-side
+                    # reply context, which correctly blocks auto-close.  Use
+                    # the real close control to finish it, then reopen a normal
+                    # blank composer for the independent idle-close exercise.
+                    if host._reply_context or host._reply_token:
+                        await evaluate("document.querySelector('#close').click()")
+                        await until(lambda:not host.composer_visible,seconds=2)
+                        host.show();await until(lambda:host.composer_visible,seconds=2)
+                    original_cfg=dict(host.cfg)
+                    host.update_cfg({**original_cfg,'composer_idle_close_ms':150})
+                    await evaluate("document.querySelector('#draft').value='';attachments=[];pending=null;editing=null;queueOpen=false;flip(false);previews();resize();composerState();")
+                    if sys.platform=='win32':
+                        point=wintypes.POINT();user32.GetCursorPos(ctypes.byref(point))
+                        rect=host.rects['input']
+                        try:
+                            user32.SetCursorPos(int(rect['x']-16),int(rect['y']-16))
+                            await asyncio.sleep(.08)
+                            await evaluate('composerState()')
+                            await until(lambda:not any(host._composer_guard.values()),seconds=2)
+                            await until(lambda:not host.composer_visible,seconds=2)
+                        finally:
+                            user32.SetCursorPos(point.x,point.y)
+                    else:
+                        raise RuntimeError('composer_idle_close_requires_windows')
+                    assert host.visible and host.speech.get('text') is not None,'composer_idle_closed_presentation'
+                    print(json.dumps({'composer_idle_close':True,'timeout_ms':150,'guard':dict(host._composer_guard)}))
+                    host.update_cfg(original_cfg);host.show();await until(lambda:host.composer_visible)
                     if args.os_resize:
                         hwnd=window_handles['Engram input'];user32.SetForegroundWindow(hwnd);await asyncio.sleep(.2)
                         grip=await evaluate("(()=>{const r=document.querySelector('.resize-handle').getBoundingClientRect();return [r.x+r.width/2,r.y+r.height/2]})()")
@@ -318,7 +358,9 @@ async def run(args):
                     await evaluate("document.querySelector('#back').click()")
                     await asyncio.sleep(.3)
                     assert await evaluate("!document.querySelector('#inputFace').inert && document.querySelector('#queueFace').inert"),'flip_restore'
-                    assert not (host.manual_position-({'speech'} if args.restoration else set())) and not (host.manual_size-({'input'} if args.os_resize else set())),'passive_geometry_marked_manual'
+                    expected_positions={'speech'} if args.restoration else set()
+                    expected_sizes={'input','speech'} if args.os_resize else set()
+                    assert host.manual_position==expected_positions and host.manual_size==expected_sizes,'passive_geometry_marked_manual'
                     # Exercise completed recent-slot expiry without deleting queue history.
                     key=provider.active;provider.active=None
                     host.cfg['echo_dwell_ms']=50

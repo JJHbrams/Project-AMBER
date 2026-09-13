@@ -1,5 +1,46 @@
 # Release Notes
 
+## 2026-09-13 - v1.5.19: Bubble Bootstrap and Codex Recovery
+
+### Highlights
+
+- Bubble bootstrap correctly identifies Codex and no longer combines
+  incompatible bootstrap instructions. Native bubble windows restore saved
+  placement and sizing, use DPI-aware tail geometry, and close only a truly
+  empty idle composer.
+- AMBER ships the full Codex hook and connection-recovery source set without
+  changing a user's hook-trust decision. Sage escalation is available through
+  provider-owned definitions for Claude, Codex, and Copilot.
+
+### Validation and caveats
+
+- Curated public source is synchronized from Engram `d171c73` for release
+  build `1.5.19.770`, including native-bubble smoke updates and focused
+  automated tests for bootstrap, idle behavior, geometry, Codex hooks, and
+  Sage definitions.
+- Real provider connection, image/approval paths, and visual behavior on
+  multi-DPI Windows displays must still be exercised in the release runtime;
+  they are not claimed by source tests alone.
+
+### Upgrade
+
+- Install `AMBER_1.5.19.770_x64-setup.exe` (214,884,433 bytes) over the
+  existing version. Its SHA-256 is
+  `8BC187348A77126E1D1086B2F0BE3C3B86BF430B0E71DD025845F8FF74896FA4`.
+- The frozen EXE and Inno installer report ProductVersion `1.5.19.770`; the
+  frozen build manifest records source `d171c73`.
+
+## 2026-09-12 - v1.5.18: Codex Recovery and Durable Archive
+
+- Codex gained the complete local MCP connection-recovery and Engram-owned
+  hook-trust skills; installation preserves existing user hooks and does not
+  change trust approval automatically.
+- Conversation source text is retained in append-only `archive.db` with
+  project-scoped search and bounded neighboring-context retrieval.
+- Built from Engram `538507b` as `1.5.18.762`; the native Bolttagu mapping,
+  settings-footer product version, and current bubble-mode README media were
+  also refreshed.
+
 ## 2026-09-12 - v1.5.17: User-Owned Runtime Upgrade Fix
 
 ### Fixed

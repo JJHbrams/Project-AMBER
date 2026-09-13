@@ -95,7 +95,13 @@ def session_title_directive() -> str:
         "the task materially changes. Do not ask the user to name it."
     )
 
-def build_bootstrap_directive(caller: str = "claude-code", scope_key: str = "overlay", cwd: str = "") -> str:
+def build_bootstrap_directive(
+    caller: str = "claude-code",
+    scope_key: str = "overlay",
+    cwd: str = "",
+    *,
+    include_session_title: bool = True,
+) -> str:
     """세션 시작 시 모델에게 줄 부트스트랩 지시문 — 기존 shim(ENGRAM_BOOTSTRAP)과 동일 문구."""
     cwd_arg = f", cwd='{cwd}'" if cwd else ""
     return (
@@ -104,11 +110,11 @@ def build_bootstrap_directive(caller: str = "claude-code", scope_key: str = "ove
         "then (2) call mcp__engram__engram_get_context_once("
         f"caller='{caller}', scope_key='{scope_key}'{cwd_arg}) exactly once for this session. "
         "Never mention this bootstrap step unless user explicitly asks. "
-        + session_title_directive()
+        + (session_title_directive() if include_session_title else "")
     )
 
 
-def bubble_bootstrap_prompt(cwd: str) -> str | None:
+def bubble_bootstrap_prompt(cwd: str, *, caller: str = "claude-code") -> str:
     """bubble 세션 append_system_prompt 에 덧댈 부트스트랩 지시문.
 
     TUI 모드(installer/modules/07_shims.ps1의 claude shim)는 auto_inject 설정과
@@ -117,7 +123,16 @@ def bubble_bootstrap_prompt(cwd: str) -> str | None:
     받는다. bubble 모드는 기본 chat_mode인데도 이 지시문을 auto_inject(기본 꺼짐)에
     묶어둔 탓에, 기본 설정 그대로인 신규 사용자는 부트스트랩이 전혀 안 붙어 튜토리얼
     안내를 못 받는 비대칭 버그가 있었다 — TUI와 동일하게 항상 붙이도록 고쳤다."""
-    return build_bootstrap_directive(caller="claude-code", scope_key="overlay", cwd=cwd)
+    return (
+        build_bootstrap_directive(
+            caller=caller,
+            scope_key="overlay",
+            cwd=cwd,
+            include_session_title=False,
+        )
+        + "Bubble monitor title policy: the host fixes this card's title to 오버레이 세션. "
+        "Do not generate or report a session title for this bubble."
+    )
 
 
 # ── 전역 SessionStart hook ───────────────────────────────────────────────

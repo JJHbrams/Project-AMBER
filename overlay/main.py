@@ -23,7 +23,7 @@ from PIL import Image
 
 from .character import CharacterOverlay
 from .event_api import OverlayEventPublisher
-from .chat_window import ChatTerminal
+from .chat_window import ChatTerminal, logical_rect_to_physical
 from .config import (
     get_bubble_cfg,
     get_bubble_session_id,
@@ -486,6 +486,8 @@ class OverlayApp:
         self._bubble_history = HistoryPanel(
             self.root, get_stm_port=lambda: self._stm_server.port, scope_key="overlay",
             cfg_bubble=bubble_cfg, get_anchor_rect=self._get_bubble_anchor_rect,
+            on_visibility=lambda visible: getattr(self, '_native_bubble_host', None)
+            and self._native_bubble_host.set_history_open(visible),
         )
         # Bubbles hold topmost over a replace renderer only while the overlay is
         # actually in front; see _poll_overlay_foreground.
@@ -1387,6 +1389,10 @@ class OverlayApp:
             return self._observer_rect
         return self.character.get_bundled_phys_rect()
 
+    def _get_native_bubble_anchor_rect(self) -> tuple[int, int, int, int]:
+        """Native Tauri windows need the physical counterpart of Tk anchor geometry."""
+        return logical_rect_to_physical(self._get_bubble_anchor_rect())
+
     def _publish_external_size(self, reason: str) -> None:
         """Offer the current physical character size only to opted-in replace renderers."""
         if self._overlay_events.mode != "replace" or not self._overlay_events.supports("overlay.set_size"):
@@ -1678,7 +1684,10 @@ class OverlayApp:
             thinking_tokens=int(bubble_cfg.get("thinking_tokens", 2000)),
             # TUI 셔임과 동일하게 auto_inject와 무관하게 항상 부트스트랩 지시문을 덧댄다 —
             # 그래야 기본 chat_mode(bubble)로 시작하는 신규 사용자도 튜토리얼 안내를 받는다.
-            bootstrap_prompt=bubble_bootstrap_prompt(workdir),
+            bootstrap_prompt=bubble_bootstrap_prompt(
+                workdir,
+                caller="Codex" if provider == 'codex' else "claude-code",
+            ),
         )
         self._bubble_session = session
         session._title_owner = title_owner
@@ -1717,7 +1726,7 @@ class OverlayApp:
                 def defer():
                     self._on_nudge_input_closed()
                 native=NativeBubbleHost(schedule=self.root.after,get_session=session,
-                    get_anchor=self._get_bubble_anchor_rect,
+                    get_anchor=self._get_native_bubble_anchor_rect,
                     on_dispatch=lambda text:self._on_bubble_submit(text,send_provider=False),
                     on_history=lambda:self._bubble_history.show(),
                     on_activity=self._on_bubble_input_activity,on_fallback=fallback,
