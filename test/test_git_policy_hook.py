@@ -271,6 +271,7 @@ class GitPolicyHookIntegrationTests(_GitPolicyHookTestCase):
             db_dir = base / "db"
             env = {
                 "ENGRAM_DB_DIR": str(db_dir),
+                "ENGRAM_SMOKE_DB_DIR": str(db_dir),
                 "HOME": str(base),
                 "USERPROFILE": str(base),
             }
@@ -418,6 +419,7 @@ class GitPolicyHookIntegrationTests(_GitPolicyHookTestCase):
             )
             env = {
                 "ENGRAM_DB_DIR": str(db_dir),
+                "ENGRAM_SMOKE_DB_DIR": str(db_dir),
                 "HOME": str(base),
                 "USERPROFILE": str(base),
             }

@@ -27,6 +27,7 @@ from core.memory.daily_checkpoint import append_daily_checkpoint
 from core.observability.activity import log_activity
 from core.graph.knowledge import get_kg
 from .semantic_graph import get_semantic_graph, run_sg_coro
+from core.memory.scope import CONTINUUM_SCOPE
 
 logger = logging.getLogger(__name__)
 
@@ -121,6 +122,41 @@ def checkpoint_open_session(
             raise
 
 
+# cwd 가 붙은 메시지가 이 비율에 못 미치면 구간을 대표한다고 보지 않는다.
+# source_cwd 는 2026-09-17 에 도입돼서, 그 전 메시지는 전부 비어 있다. 한 구간에
+# 옛 메시지 1,497건과 새 메시지 119건이 섞였을 때 뒤의 119건만으로 프로젝트를
+# 판정했더니, 다른 창에서 하던 작업이 이 구간 전체의 프로젝트가 됐다.
+_CWD_COVERAGE_FLOOR = 0.5
+
+
+def _observed_project_keys(rows) -> list[str]:
+    """체크포인트 구간의 메시지에 붙은 cwd 에서 프로젝트 키를 뽑는다.
+
+    많이 등장한 순으로 돌려준다. cwd 를 가진 메시지가 구간의 과반이 안 되면
+    빈 목록 — 표본이 구간을 대표하지 못한다. 그때는 호출부가 예전처럼 인자
+    cwd(overlay workdir)로 떨어진다. 틀린 판정보다 판정 보류가 낫다.
+    """
+    counts: dict[str, int] = {}
+    total = 0
+    tagged = 0
+    for row in rows:
+        total += 1
+        try:
+            raw = row["source_cwd"]
+        except (KeyError, IndexError):
+            return []
+        if not raw:
+            continue
+        tagged += 1
+        key = resolve_project_key(cwd=str(raw))
+        if key:
+            counts[key] = counts.get(key, 0) + 1
+
+    if not total or tagged / total < _CWD_COVERAGE_FLOOR:
+        return []
+    return sorted(counts, key=lambda k: -counts[k])
+
+
 def _checkpoint_open_session_locked(
     session_id: int, scope_key: str, summary: str, open_intents: str = "", *,
     progress: str = "", cwd: str = "", external_daily_dir: str = "", source: str = "explicit",
@@ -137,8 +173,10 @@ def _checkpoint_open_session_locked(
             "SELECT last_message_id FROM session_checkpoints WHERE session_id=?", (session_id,)
         ).fetchone()
         watermark = int(checkpoint["last_message_id"] if checkpoint else 0)
+        # source_cwd 는 나중에 붙은 컬럼이라, 마이그레이션 전 DB 에도 뜨도록
+        # 열을 명시하지 않는다. 부재는 _observed_project_keys 가 흡수한다.
         rows = conn.execute(
-            "SELECT id, role, content FROM messages WHERE session_id=? AND id>? ORDER BY id",
+            "SELECT * FROM messages WHERE session_id=? AND id>? ORDER BY id",
             (session_id, watermark),
         ).fetchall()
         if not rows or not any(row["role"] in {"user", "assistant"} for row in rows):
@@ -153,8 +191,18 @@ def _checkpoint_open_session_locked(
     if claim_state != "acquired":
         return {"status": "busy", "session_id": session_id}
 
-    project_key = resolve_project_key(cwd=cwd) if cwd else ""
-    project_node_id = resolve_kg_node_id(project_key) if project_key else None
+    # 이 구간이 실제로 어느 프로젝트에서 일어났는지는 메시지에 붙은 cwd 가 안다.
+    # 인자로 온 cwd 는 overlay 의 고정 workdir 이라, 하루에 여러 프로젝트를 오가도
+    # 늘 같은 값이다(2026-09-17 실측: 30분 버킷 56개 중 35개가 2개 이상 섞임).
+    observed_keys = _observed_project_keys(rows)
+    project_keys = observed_keys or ([resolve_project_key(cwd=cwd)] if cwd else [])
+    project_keys = [k for k in project_keys if k]
+    project_key = project_keys[0] if project_keys else ""
+
+    # 구간에 프로젝트가 하나일 때만 그 노트의 Progress 를 갱신한다. 섞인 구간의
+    # 요약은 여러 프로젝트 이야기가 한 문장에 엉켜 있어서, 그걸 각 노트에 복사하면
+    # 문서마다 남의 작업이 실린다. 프로젝트별 요약 분리는 후속 과제다.
+    project_node_id = resolve_kg_node_id(project_key) if len(project_keys) == 1 else None
     if project_node_id:
         try:
             kg = get_kg()
@@ -178,6 +226,7 @@ def _checkpoint_open_session_locked(
     note_result = append_daily_checkpoint(
         checkpoint_id=checkpoint_id, now=datetime.now().astimezone(), summary=summary,
         open_intents=open_intents, project_key=project_key, project_node_id=project_node_id,
+        project_keys=project_keys,
         external_daily_dir=external_daily_dir,
         journal_transcript=[dict(row) for row in rows] if source == "automatic" else None,
     )
@@ -414,7 +463,7 @@ def _summarize_working_memory_with_claude(msgs: list[dict]) -> Optional[dict]:
     return {"summary": summary, "open_intents": open_intents}
 
 
-def update_working_memory_from_recent_session(scope_key: str = "overlay") -> bool:
+def update_working_memory_from_recent_session(scope_key: str = CONTINUUM_SCOPE) -> bool:
     """세션 종료 시 항상 실행 — Claude Code로 요약해 working_memory를 갱신한다."""
     msgs = _get_recent_messages_for_scope(scope_key)
     if not msgs:
@@ -430,7 +479,7 @@ def update_working_memory_from_recent_session(scope_key: str = "overlay") -> boo
     return True
 
 
-def update_working_memory_from_recent_session_async(scope_key: str = "overlay") -> threading.Thread:
+def update_working_memory_from_recent_session_async(scope_key: str = CONTINUUM_SCOPE) -> threading.Thread:
     t = threading.Thread(target=update_working_memory_from_recent_session, args=(scope_key,), daemon=True)
     t.start()
     return t
@@ -440,7 +489,7 @@ def update_working_memory_from_recent_session_async(scope_key: str = "overlay") 
 
 
 def maybe_promote(
-    scope_key: str = "overlay",
+    scope_key: str = CONTINUUM_SCOPE,
     *,
     summary_override: str = "",
     project: str = "",
@@ -503,24 +552,63 @@ def _save_auto_checkpoint_state(data: dict) -> None:
     os.replace(tmp, _AUTO_CHECKPOINT_STATE_FILE)
 
 
-def _get_auto_checkpoint_candidate(
+# 이 시간을 넘게 조용한 세션은 마감 대상으로 보지 않는다. 사람이 떠난 지
+# 오래라 지금 요약해봐야 맥락이 없고, 닫히지 않는 세션이 쌓여 있어서 상한이
+# 없으면 폴링마다 과거가 밀려 나온다.
+_STALE_SESSION_SECONDS = 6 * 3600
+
+
+def _get_auto_checkpoint_candidates(
     scope_key: str,
+    *,
+    idle_seconds: int,
+    min_user_turns: int,
+    stale_seconds: int = _STALE_SESSION_SECONDS,
+) -> list[dict]:
+    """마감할 만한 열린 세션을 돌려준다(갓 잠잠해진 것부터).
+
+    예전에는 scope 안 최신 세션 하나만 후보였고, 세션이 LLM 대화마다 갈리면
+    나머지가 영원히 마감을 못 받는다 — 2026-09-17 하루에만 423개 메시지가
+    그렇게 묻혔다.
+
+    다만 상한도 필요하다. 세션은 binding 없이는 닫히지 않아 몇 주씩 열려 있고
+    (2026-09-18 기준 254개), 그런 세션은 "유휴 30분"을 언제나 만족한다. 상한이
+    없으면 폴링마다 묵은 세션이 쏟아진다 — 실제로 1분 간격으로 9월 6일·7일·
+    12일자 세션의 체크포인트가 연달아 적혔다.
+    """
+    conn = get_connection()
+    try:
+        sessions = conn.execute(
+            """SELECT id FROM sessions
+               WHERE scope_key = ? AND ended_at IS NULL
+               ORDER BY started_at DESC""",
+            (scope_key,),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    found = []
+    for session in sessions:
+        candidate = _evaluate_checkpoint_candidate(
+            int(session["id"]), idle_seconds=idle_seconds, min_user_turns=min_user_turns
+        )
+        if candidate and candidate["idle_for"] <= stale_seconds:
+            found.append(candidate)
+    # 갓 잠잠해진 세션부터 처리한다. 오래된 쪽을 앞세우면 몇 주 묵은 세션이
+    # 줄을 서서, 지금 막 끝난 대화가 계속 뒤로 밀린다.
+    return sorted(found, key=lambda c: c["idle_for"])
+
+
+def _evaluate_checkpoint_candidate(
+    session_id: int,
     *,
     idle_seconds: int,
     min_user_turns: int,
 ) -> dict | None:
     conn = get_connection()
     try:
-        session = conn.execute(
-            """SELECT id FROM sessions
-               WHERE scope_key = ? AND ended_at IS NULL
-               ORDER BY started_at DESC LIMIT 1""",
-            (scope_key,),
-        ).fetchone()
-        if not session:
-            return None
         checkpoint = conn.execute(
-            "SELECT last_message_id FROM session_checkpoints WHERE session_id=?", (session["id"],)
+            "SELECT last_message_id FROM session_checkpoints WHERE session_id=?", (session_id,)
         ).fetchone()
         last_message_id = int(checkpoint["last_message_id"] if checkpoint else 0)
         rows = conn.execute(
@@ -528,10 +616,11 @@ def _get_auto_checkpoint_candidate(
                FROM messages
                WHERE session_id = ? AND id > ?
                ORDER BY id DESC LIMIT 200""",
-            (session["id"], last_message_id),
+            (session_id, last_message_id),
         ).fetchall()
     finally:
         conn.close()
+    session = {"id": session_id}
     rows = list(reversed(rows))
     if not rows or rows[-1]["role"] != "assistant":
         return None
@@ -549,44 +638,62 @@ def _get_auto_checkpoint_candidate(
         "last_message_id": int(rows[-1]["id"]),
         "messages": [{"role": row["role"], "content": row["content"]} for row in rows],
         "user_turns": user_turns,
+        "idle_for": idle_for,
     }
 
 
 def maybe_auto_checkpoint(
-    scope_key: str = "overlay",
+    scope_key: str = CONTINUUM_SCOPE,
     *,
     cwd: str = "",
     idle_seconds: int = 1800,
     min_user_turns: int = 5,
     external_daily_dir: str = "",
+    max_per_run: int = 3,
 ) -> dict:
-    """유휴 중인 열린 세션을 닫지 않고 기억·일지를 체크포인트한다."""
+    """유휴 중인 열린 세션을 닫지 않고 기억·일지를 체크포인트한다.
+
+    세션은 LLM 대화마다 갈리므로 후보가 여럿일 수 있다. 회차당 max_per_run 개까지
+    처리하고 나머지는 다음 회차로 넘긴다 — 요약이 세션마다 LLM 호출 1회라서,
+    밀린 것을 한 번에 다 돌리면 그 회차가 길어진다.
+    """
     if not _AUTO_CHECKPOINT_LOCK.acquire(blocking=False):
         return {"status": "busy"}
     try:
-        candidate = _get_auto_checkpoint_candidate(
+        candidates = _get_auto_checkpoint_candidates(
             scope_key,
             idle_seconds=max(60, int(idle_seconds)),
             min_user_turns=max(1, int(min_user_turns)),
         )
-        if candidate is None:
+        if not candidates:
             return {"status": "skipped"}
 
-        result = _summarize_working_memory_with_claude(candidate["messages"])
-        if not result:
-            return {"status": "summary_failed"}
+        done = []
+        for candidate in candidates[: max(1, int(max_per_run))]:
+            result = _summarize_working_memory_with_claude(candidate["messages"])
+            if not result:
+                done.append({"status": "summary_failed", "session_id": candidate["session_id"]})
+                continue
 
-        coordinated = checkpoint_open_session(
-            candidate["session_id"], scope_key, result["summary"], result["open_intents"],
-            cwd=cwd, external_daily_dir=external_daily_dir, source="automatic",
-        )
-        logger.info(
-            "auto checkpoint 완료 scope=%s turns=%d promoted=%s checkpoint=%s",
-            scope_key, candidate["user_turns"], coordinated.get("ltm_promoted"), coordinated.get("checkpoint_id"),
-        )
-        return {
-            **coordinated,
-        }
+            coordinated = checkpoint_open_session(
+                candidate["session_id"], scope_key, result["summary"], result["open_intents"],
+                cwd=cwd, external_daily_dir=external_daily_dir, source="automatic",
+            )
+            logger.info(
+                "auto checkpoint 완료 scope=%s session=%d turns=%d idle=%ds promoted=%s checkpoint=%s",
+                scope_key, candidate["session_id"], candidate["user_turns"],
+                int(candidate["idle_for"]), coordinated.get("ltm_promoted"),
+                coordinated.get("checkpoint_id"),
+            )
+            done.append(coordinated)
+
+        remaining = max(0, len(candidates) - len(done))
+        # 호출부(테스트 포함)가 단일 결과를 기대하므로 첫 건을 펼쳐 주고,
+        # 여러 건을 처리했을 때만 목록을 덧붙인다.
+        head = done[0] if done else {"status": "skipped"}
+        if len(done) > 1 or remaining:
+            return {**head, "checkpoints": done, "remaining": remaining}
+        return {**head}
     except Exception:
         logger.exception("auto checkpoint 실패 (scope=%s)", scope_key)
         return {"status": "failed"}
@@ -594,7 +701,7 @@ def maybe_auto_checkpoint(
         _AUTO_CHECKPOINT_LOCK.release()
 
 
-def maybe_promote_async(scope_key: str = "overlay") -> threading.Thread:
+def maybe_promote_async(scope_key: str = CONTINUUM_SCOPE) -> threading.Thread:
     """maybe_promote()를 백그라운드 스레드에서 실행하고 Thread 객체를 반환한다."""
     t = threading.Thread(target=maybe_promote, args=(scope_key,), daemon=True)
     t.start()
@@ -799,7 +906,7 @@ def _read_session_insight_with_claude(msgs: list[dict], pending: list[dict]) -> 
     return {"note": note, "themes": themes, "addressed": addressed}
 
 
-def flag_reflection_event_from_recent_session(scope_key: str = "overlay") -> bool:
+def flag_reflection_event_from_recent_session(scope_key: str = CONTINUUM_SCOPE) -> bool:
     """세션 종료 시 실행 — 반성 이벤트는 curiosity로, 관심사는 테마로 남긴다.
 
     narrative/persona는 여기서 절대 직접 수정하지 않는다 — 그건 실제 대화 중인

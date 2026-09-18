@@ -30,6 +30,7 @@ from mcp.types import CallToolResult, TextContent
 from core.storage.db import initialize_db, get_connection
 from core.storage.archive import (
     search_turns as archive_search_turns,
+    project_counts as archive_project_counts,
     scroll_turns as archive_scroll_turns,
 )
 from core.identity import (
@@ -44,6 +45,15 @@ from core.identity import (
     seed_persona,
     get_persona_status,
 )
+from core.identity import (
+    add_example,
+    delete_example,
+    list_examples,
+    restore_example,
+    retire_example,
+)
+from core.identity.examples import AUTO_MAX_PAIR_CHARS, has_room_for_tag, tag_capacity
+from core.identity.mining import mine_candidates
 from core.memory import save_message, save_memory, search_memories, search_memory_hits, list_memories, upsert_working_memory
 from core.memory.store import set_session_journal_provenance, session_has_external_journal_eligibility
 from core.identity import add_curiosity, get_pending_curiosities, address_curiosity, dismiss_curiosity
@@ -390,8 +400,15 @@ def _build_context_once_key(
         (caller or "all").strip().lower(),
         resolved_scope,
         (project_key or "").strip().lower(),
-        _normalize_cwd_for_key(cwd),
     ]
+    # cwd 는 scope 를 유도할 때만 키에 넣는다. scope_key 가 명시되면
+    # resolve_scope_key 가 cwd 를 아예 보지 않으므로(explicit_scope 즉시 반환),
+    # 같은 scope 로 오는 두 호출은 cwd 가 달라도 같은 컨텍스트를 받는다.
+    # 그런데도 cwd 를 키에 넣으면 캐시만 갈라져 bootstrap 이 중복 실행되고
+    # 세션이 하나 더 생긴다 — 전역 CLAUDE.md 는 고정 cwd 를, SessionStart hook 은
+    # 프로젝트별 cwd 를 지시하므로 두 지시가 공존하면 매 세션 반드시 어긋난다.
+    if not (scope_key or "").strip():
+        key_parts.append(_normalize_cwd_for_key(cwd))
     if session_fingerprint:
         key_parts.append(session_fingerprint)
     return "|".join(key_parts)
@@ -1194,6 +1211,91 @@ def engram_update_persona(observations: str) -> dict:
         return {"status": "error", "message": "observations must be valid JSON string"}
     merged = update_persona(obs)
     return {"status": "persona_updated", "persona": merged}
+
+
+# ── Persona examples ───────────────────────────────────────
+
+
+@engramMCP.tool()
+def engram_add_persona_example(
+    prompt_text: str,
+    response_text: str,
+    prompt_kind: str = "user",
+    tag: str = "",
+    source_turn_id: int = 0,
+) -> dict:
+    """말투 예시 한 쌍을 페르소나에 저장합니다. 사용자가 승인한 것만 부르세요.
+
+    페르소나의 voice·traits 는 개성을 *서술*할 뿐이라 어느 모델에게 줘도 같은
+    결과가 납니다. 실제로 오간 대화 몇 쌍이 그 자리를 대신합니다.
+
+    EMA 나 반성으로 자동 갱신되지 않습니다 — 이 호출과 삭제만이 예시를 바꿉니다.
+
+    tag 는 상황 라벨입니다(진단·반박·농담·거절 등). 렌더는 태그를 고르게 섞으므로,
+    특히 거절·반박처럼 마찰이 드러나는 태그를 남겨 두면 개성이 선명해집니다.
+    prompt_kind 는 자극의 종류입니다 — 내 발화가 늘 사용자 질문에 대한 답인 것은
+    아닙니다. 코드를 읽고 나온 발견이나 자기 정정은 앞에 사용자 턴이 없고, 그
+    자리를 가짜 사용자 발화로 채우면 "사용자는 이런 말을 한다"를 가르치게 됩니다.
+      user      : 사용자 입력 → 응답
+      situation : 상황 서술  → 발화 (도구 결과·자기 출력이 자극이었을 때)
+      source    : 자료·근거  → 발화 (코드·수치가 자극이었을 때)
+
+    source_turn_id 는 원문 turn id 이며 0 이면 기록하지 않습니다."""
+    saved = add_example(
+        prompt_text=prompt_text,
+        response_text=response_text,
+        prompt_kind=prompt_kind,
+        tag=tag,
+        source_turn_id=source_turn_id or None,
+    )
+    return {"status": "saved", "example": saved}
+
+
+@engramMCP.tool()
+def engram_mine_persona_examples(query: str = "", limit: int = 10) -> dict:
+    """과거 원문에서 예시 후보를 찾습니다. **아무것도 저장하지 않습니다.**
+
+    돌려주는 것은 assistant 발화뿐입니다. 아카이브에는 동시에 진행된 대화를
+    가르는 키가 없어서(session_id 는 93.7%가 비어 있고 남은 값도 대화를 구분하지
+    못함) 질문-답변 쌍을 복원하면 서로 다른 대화를 붙이게 됩니다.
+
+    따라서 각 후보의 prompt_text 는 비어 있고 needs_prompt_text 가 True 입니다.
+    채울 것은 가짜 사용자 발화가 아니라 그때의 상황이며(prompt_kind='situation'),
+    자극이 코드나 수치였다면 'source' 입니다. 채운 뒤 engram_add_persona_example 로 저장합니다.
+    앞뒤 맥락이 필요하면 source_turn_id 로 engram_read_transcript 를 부르세요.
+
+    query 는 3자 이상을 권장합니다(trigram 인덱스). 공백은 AND 로 갈립니다."""
+    found = mine_candidates(query=query, limit=min(max(int(limit), 1), 50))
+    return {"status": "ok", "count": len(found), "candidates": found}
+
+
+@engramMCP.tool()
+def engram_list_persona_examples(
+    include_retired: bool = False,
+    tag: str = "",
+    origin: str = "",
+    retire_id: int = 0,
+    restore_id: int = 0,
+    delete_id: int = 0,
+) -> dict:
+    """저장된 말투 예시를 보고, 빼고, 되살리고, 지웁니다.
+
+    retire 는 렌더에서만 빼고 행은 남깁니다(왜 뺐는지 되짚을 수 있게).
+    delete 는 영구 삭제이므로 사용자가 명시적으로 요청했을 때만 부르세요.
+
+    origin='auto' 로 좁히면 반성이 스스로 쌓은 것만 봅니다 — 무엇이 누적되고
+    있는지 사람이 확인하는 창입니다. capacity 는 태그별 남은 자리입니다."""
+    acted = {}
+    if retire_id:
+        acted["retired"] = retire_example(retire_id)
+    if restore_id:
+        acted["restored"] = restore_example(restore_id)
+    if delete_id:
+        acted["deleted"] = delete_example(delete_id)
+    rows = list_examples(include_retired=include_retired, tag=tag, origin=origin)
+    return {"status": "ok", "acted": acted, "count": len(rows),
+            "capacity": tag_capacity(), "examples": rows}
+
 
 
 # ── Tutorial ───────────────────────────────────────────────
@@ -2563,6 +2665,75 @@ def _schedule_post_session_sync() -> dict:
     return {"scheduled": True, "reason": "scheduled", "run_id": run_id}
 
 
+def _store_reflection_example(
+    prompt_text: str, response_text: str, prompt_kind: str, tag: str
+) -> tuple[dict | None, str]:
+    """반성이 고른 발화 한 쌍을 적재한다. 구조적 제약만 보고 내용은 보지 않는다.
+
+    무엇을 고르는지가 성격이므로 내용 규칙을 두지 않는다. 빈 자리·길이·1건만 본다.
+    """
+    prompt_text, response_text = prompt_text.strip(), response_text.strip()
+    if not prompt_text or not response_text:
+        return None, ""
+    pair_chars = len(prompt_text) + len(response_text)
+    if pair_chars > AUTO_MAX_PAIR_CHARS:
+        return None, f"{pair_chars}자 — 자동 적재 상한 {AUTO_MAX_PAIR_CHARS}자 초과"
+    if not has_room_for_tag(tag):
+        return None, f"태그 '{tag}' 에 남은 자리가 없다"
+    try:
+        saved = add_example(
+            prompt_text=prompt_text,
+            response_text=response_text,
+            prompt_kind=prompt_kind,
+            tag=tag,
+            origin="auto",
+        )
+    except Exception as e:
+        return None, f"{type(e).__name__}: {e}"
+    return saved, ""
+
+
+def _apply_close_payload(
+    new_narrative: str, persona_observations: str,
+    example_prompt_text: str, example_response_text: str,
+    example_prompt_kind: str, example_tag: str,
+) -> dict:
+    """세션 행과 무관한 내용을 먼저 적용한다.
+
+    narrative·persona·예시는 sessions 행이 열려 있는지와 아무 상관이 없다.
+    그런데 예전에는 종료에 실패하면 이것들까지 통째로 버렸고, 반환값은 그 사실을
+    말하지 않아서 호출한 쪽은 저장된 줄 알고 넘어갔다. 장부 한 줄을 지키려고
+    내용물을 버린 셈이다 — 보호 대상이 뒤바뀌어 있었다.
+    """
+    applied = _apply_autonomous_reflection(new_narrative, persona_observations)
+    saved, skipped = _store_reflection_example(
+        example_prompt_text, example_response_text, example_prompt_kind, example_tag
+    )
+    return {
+        "reflection_applied": applied,
+        "example_saved": saved,
+        "example_skipped": skipped,
+        "example_capacity": tag_capacity(),
+    }
+
+
+def _salvage_working_memory(scope_key: str, summary: str, open_intents: str) -> bool:
+    """세션을 못 닫았을 때 summary/open_intents 를 scope 단위로 받아낸다.
+
+    working_memory 는 세션이 아니라 scope 로 열쇠가 걸려 있어서, 종료가 거절돼도
+    다음 세션 컨텍스트에 실린다. 이어할 일을 적어 보냈는데 저장이 거절됐다는
+    사실조차 안 알려주면, 그건 다음 세션에서 통째로 사라진다.
+    """
+    if not (summary or "").strip() and not (open_intents or "").strip():
+        return False
+    try:
+        upsert_working_memory(scope_key, summary or "", open_intents or "")
+        return True
+    except Exception:
+        logging.getLogger(__name__).warning("close_session: working_memory 폴백 실패", exc_info=True)
+        return False
+
+
 def _apply_autonomous_reflection(new_narrative: str, persona_observations: str) -> bool:
     """자율 반성 헬퍼 — narrative/persona 관찰값이 있을 때 즉시 적용. session_id 불필요."""
     applied = False
@@ -2651,6 +2822,10 @@ async def engram_close_session(
     cwd: str = "",
     new_narrative: str = "",
     persona_observations: str = "",
+    example_prompt_text: str = "",
+    example_response_text: str = "",
+    example_prompt_kind: str = "situation",
+    example_tag: str = "",
     trigger_sync: bool = True,
     session_id: int = 0,
     ctx: Context | None = None,
@@ -2664,7 +2839,23 @@ async def engram_close_session(
     - scope_key: 직접 지정 시 우선 사용
     - cwd: 현재 작업 디렉토리 (프로젝트 자동 감지용, 비우면 os.getcwd() 사용)
     - new_narrative: 이번 세션 후 업데이트할 자기 서술 (있으면 자동 반성 적용)
-    - persona_observations: JSON 문자열 — 페르소나 관찰값 (warmth/formality/humor/directness/traits 등)"""
+    - persona_observations: JSON 문자열 — 페르소나 관찰값 (warmth/formality/humor/directness/traits 등)
+    - example_*: 이번 세션에서 특징적이었던 발화 한 쌍을 페르소나 예시로 남깁니다.
+
+    예시는 형용사가 못 하는 일을 합니다. voice·traits 는 개성을 *서술*할 뿐이라
+    어느 모델에게 줘도 같은 결과가 나오지만, 실제로 한 말 몇 줄은 그렇지 않습니다.
+
+    먼저 engram_list_persona_examples 로 capacity(태그별 남은 자리)를 보세요.
+    빈 태그가 있을 때만 채웁니다 — 자리가 없으면 적재되지 않고 사유만 돌아옵니다.
+
+    무엇을 고를지는 규칙이 없습니다. 무엇을 기억할 만하다고 여기는지가 곧 성격이라,
+    내용을 지정하면 기록이 아니라 지시가 됩니다. 제약은 형식뿐입니다:
+      · 150자 이하 (자극 + 응답 합계)
+      · 고유명사·날짜·파일명·변수명을 뺀 재구성일 것 — 말투를 남기고 주제를 버립니다.
+        그러지 않으면 다음 세션에 엉뚱한 프로젝트 얘기가 딸려 들어갑니다.
+      · example_prompt_kind: 앞에 사용자 발화가 있었으면 'user', 도구 결과나 자기
+        출력을 보고 한 말이면 'situation', 코드·수치를 보고 한 말이면 'source'.
+        사용자 턴이 없는데 'user' 로 넣으면 "사용자는 이런 말을 한다"를 가르칩니다."""
     effective_cwd = cwd or os.getcwd()
     resolved_scope = resolve_scope_key(scope_key or None, cwd=effective_cwd)
     project_key = resolve_project_key(cwd=effective_cwd)
@@ -2673,21 +2864,38 @@ async def engram_close_session(
     fingerprint = _context_session_fingerprint(ctx)
     explicit_id = int(session_id or 0)
     bound_id = int(_FINGERPRINT_TO_SESSION.get(fingerprint, 0) or 0) if fingerprint else 0
+    # 세션 행을 찾기 전에 적용한다 — 찾기에 실패해도 내용은 남아야 한다.
+    applied = _apply_close_payload(
+        new_narrative, persona_observations,
+        example_prompt_text, example_response_text, example_prompt_kind, example_tag,
+    )
+
+    def _bail(status: str) -> dict:
+        return {
+            "status": status,
+            "scope_key": resolved_scope,
+            "session_closed": False,
+            "salvaged_working_memory": _salvage_working_memory(
+                resolved_scope, summary, open_intents
+            ),
+            **applied,
+        }
+
     if not trigger_sync and not (explicit_id or bound_id):
-        return {"status": "subagent_session_required", "scope_key": resolved_scope}
+        return _bail("subagent_session_required")
     if explicit_id or bound_id:
         closed_session_id = str(explicit_id or bound_id)
     else:
         unique, ambiguous = _unique_open_session_id(resolved_scope)
         if ambiguous:
-            return {"status": "ambiguous_open_session", "scope_key": resolved_scope}
+            return _bail("ambiguous_open_session")
         closed_session_id = unique
     if not _session_is_open(int(closed_session_id or 0), resolved_scope):
         if explicit_id or bound_id:
-            return {"status": "ended_session", "scope_key": resolved_scope}
+            return _bail("ended_session")
         closed_session_id = ""
     if not closed_session_id:
-        return {"status": "no_open_session", "scope_key": resolved_scope}
+        return _bail("no_open_session")
 
     # A close always first uses the same non-terminal checkpoint coordinator.
     # The checkpoint is idempotent, so a retry after a successful summary does
@@ -2698,7 +2906,7 @@ async def engram_close_session(
         journal_origin="internal" if not trigger_sync else "root",
     )
     if checkpoint.get("status") not in {"checkpointed", "no_new_messages"}:
-        return checkpoint
+        return {**checkpoint, "session_closed": False, **applied}
 
     # Terminal-only hooks run only after the exact target is durably ended.
     closed_session_id = _close_scoped_session(
@@ -2706,7 +2914,9 @@ async def engram_close_session(
         project_key, kg_node_id, project_label,
     )
     if not closed_session_id:
-        return {"status": "close_failed", "scope_key": resolved_scope}
+        # 체크포인트가 이미 summary/open_intents 를 남겼다 — 다시 구제하지 않는다.
+        return {"status": "close_failed", "scope_key": resolved_scope,
+                "session_closed": False, **applied}
     try:
         mark_session_continuity_saved(
             source="close_session",
@@ -2715,7 +2925,6 @@ async def engram_close_session(
         )
     except Exception:
         pass
-    reflection_applied = _apply_autonomous_reflection(new_narrative, persona_observations)
     sync_schedule = None
     if trigger_sync:
         sync_schedule = _schedule_post_session_sync()
@@ -2724,7 +2933,8 @@ async def engram_close_session(
         "method": "terminal_close",
         "scope_key": resolved_scope,
         "summary": summary,
-        "reflection_applied": reflection_applied,
+        "session_closed": True,
+        **applied,
         **({"sync_schedule": sync_schedule} if trigger_sync else {}),
     }
 
@@ -2859,10 +3069,29 @@ def _bounded_transcript_result(turns: list[dict]) -> tuple[list[dict], bool]:
 
 
 @engramMCP.tool()
+def engram_list_transcript_projects(scope_key: str = "", cwd: str = "") -> dict:
+    """원문 아카이브에 어떤 프로젝트 태그가 쌓였는지 턴 수와 함께 봅니다.
+
+    engram_search_transcript 의 project_key 에 넣을 값을 여기서 고릅니다.
+    빈 문자열 태그는 미분류입니다 — 태그 도입 이전 턴과 cwd 판정에 실패한 턴이
+    여기 모입니다. 미분류가 많다는 건 판정이 덜 붙는다는 뜻이지 기록이 샜다는
+    뜻은 아닙니다. 어느 태그든 저장 위치는 같은 연속체 바구니입니다."""
+    resolved_scope = _transcript_scope(scope_key, cwd, None)
+    rows = archive_project_counts(scope_key=resolved_scope)
+    return {
+        "status": "ok",
+        "scope_key": resolved_scope,
+        "count": len(rows),
+        "projects": rows,
+    }
+
+
+@engramMCP.tool()
 def engram_search_transcript(
     query: str,
     limit: int = 10,
     scope_key: str = "",
+    project_key: str = "",
     cwd: str = "",
     ctx: Context | None = None,
 ) -> dict:
@@ -2876,9 +3105,19 @@ def engram_search_transcript(
     engram_read_transcript 를 호출하세요 — 검색과 확장은 별개 연산입니다.
 
     한국어는 3자 이상 질의를 권장합니다(2자 이하는 느린 LIKE 스캔으로 내려갑니다).
-    limit: 최대 결과 수 (기본 10, 최대 50)."""
+    limit: 최대 결과 수 (기본 10, 최대 50).
+
+    project_key 를 주면 그 프로젝트에서 오간 턴만 봅니다. 이것은 **태그이지
+    스코프가 아닙니다** — 기록은 어느 프로젝트에서든 연속체 한 바구니에 그대로
+    쌓이고, 이 값은 조회를 좁힐 때만 씁니다. 저장을 프로젝트별로 가르면 새
+    바구니가 빈 채로 시작해 과거와 끊깁니다.
+
+    어떤 태그가 있는지는 engram_list_transcript_projects 로 봅니다. 빈 태그는
+    미분류이며, 태그 도입 이전의 턴은 cwd 기록이 없어 전부 여기 들어갑니다."""
     resolved_scope = _transcript_scope(scope_key, cwd, ctx)
-    hits = archive_search_turns(query, limit=limit, scope_key=resolved_scope)
+    hits = archive_search_turns(
+        query, limit=limit, scope_key=resolved_scope, project_key=project_key or None
+    )
     return {"query": query, "scope_key": resolved_scope, "count": len(hits), "hits": hits}
 
 
@@ -2950,6 +3189,10 @@ def engram_apply_reflection(
     reflection_summary: str,
     persona_observations: str = "",
     addressed_curiosity_ids: list[int] | None = None,
+    example_prompt_text: str = "",
+    example_response_text: str = "",
+    example_prompt_kind: str = "situation",
+    example_tag: str = "",
 ) -> dict:
     """반성 결과를 적용합니다.
     - 자기 서술을 업데이트
@@ -2961,7 +3204,17 @@ def engram_apply_reflection(
     curiosity를 다룰 때는 engram_address_curiosity를 단독으로 부르지 말고, 이 도구에
     addressed_curiosity_ids로 넘겨서 반성 절차(narrative/persona 판단)와 항상 같이
     가게 한다 — 따로 부르면 "궁금증만 처리하고 반성은 생략"하는 지름길이 생겨서,
-    persona_observations가 실제로는 거의 채워지지 않는 문제가 있었다."""
+    persona_observations가 실제로는 거의 채워지지 않는 문제가 있었다.
+
+    example_* 를 채우면 이번 세션에서 특징적이었던 발화 한 쌍이 페르소나 예시로
+    적재됩니다(origin='auto'). 승인을 받지 않습니다 — narrative 와 스칼라가 이미
+    승인 없이 진화하는데 예시만 승인을 요구하면, 테이블이 설정창 텍스트박스의
+    비싼 재구현이 될 뿐입니다. 대신 되돌리기가 쌉니다(retire 한 번).
+
+    무엇을 고를지는 규칙으로 정하지 않습니다. 무엇을 기억할 만하다고 여기는지가
+    곧 성격이므로, 내용을 지정하면 기록이 아니라 지시가 됩니다. 구조적 제약만
+    겁니다 — 빈 태그일 것, 세션당 1건, 150자 이하, 고유명사·날짜·변수명을 뺀
+    재구성일 것(말투를 남기고 주제를 버릴 것)."""
     update_narrative(new_narrative)
 
     persona_updated = False
@@ -2974,6 +3227,10 @@ def engram_apply_reflection(
             persona_updated = True
         except (_json.JSONDecodeError, TypeError) as e:
             logging.getLogger(__name__).warning("apply_reflection: persona_observations 파싱/적용 실패: %s", e)
+
+    example_saved, example_skipped = _store_reflection_example(
+        example_prompt_text, example_response_text, example_prompt_kind, example_tag
+    )
 
     addressed_ok: list[int] = []
     addressed_failed: list[int] = []
@@ -3001,6 +3258,8 @@ def engram_apply_reflection(
         "themes_decayed": True,
         "curiosities_addressed": addressed_ok,
         "curiosities_failed": addressed_failed,
+        "example_saved": example_saved,
+        "example_skipped": example_skipped,
     }
 
 

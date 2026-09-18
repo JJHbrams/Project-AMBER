@@ -4,7 +4,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from overlay.character import CharacterOverlay, SpriteStateMachine, fingerprint_paths
+from overlay.character import (CharacterOverlay, SpriteStateMachine, fingerprint_paths,
+                               USER_CHARACTER_SETS_DIR, USER_REACTION_PACKS_DIR)
 from overlay import config
 
 
@@ -187,5 +188,7 @@ class CharacterReloadTests(unittest.TestCase):
             reaction_pack=SimpleNamespace(sprite_sheet=None),
         )
         paths = CharacterOverlay._character_watch_paths_for(overlay, profile)
-        self.assertIn(Path.home() / ".engram" / "character" / "sets" / "engram" / "manifest.yaml", paths)
-        self.assertIn(Path.home() / ".engram" / "character" / "reactions" / "engram" / "manifest.yaml", paths)
+        # 코드가 import 시점에 구운 홈을 그대로 기준 삼는다. 여기서 Path.home() 을
+        # 다시 부르면 홈이 옮겨진 환경에서 서로 다른 홈을 비교하게 된다.
+        self.assertIn(USER_CHARACTER_SETS_DIR / "engram" / "manifest.yaml", paths)
+        self.assertIn(USER_REACTION_PACKS_DIR / "engram" / "manifest.yaml", paths)

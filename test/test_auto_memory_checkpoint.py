@@ -52,7 +52,6 @@ class AutoMemoryCheckpointTest(unittest.TestCase):
         session = {"id": 7}
         conn = unittest.mock.MagicMock()
         conn.execute.side_effect = [
-            unittest.mock.MagicMock(fetchone=lambda: session),
             unittest.mock.MagicMock(fetchone=lambda: None),
             unittest.mock.MagicMock(fetchall=lambda: list(reversed(rows))),
         ]
@@ -63,8 +62,8 @@ class AutoMemoryCheckpointTest(unittest.TestCase):
         ), patch("core.graph.semantic.stm_promoter.datetime") as dt:
             dt.now.return_value = datetime(2026, 8, 14, 9, 0, 0)
             dt.fromisoformat.side_effect = datetime.fromisoformat
-            candidate = stm_promoter._get_auto_checkpoint_candidate(
-                "overlay",
+            candidate = stm_promoter._evaluate_checkpoint_candidate(
+                int(session["id"]),
                 idle_seconds=1800,
                 min_user_turns=5,
             )

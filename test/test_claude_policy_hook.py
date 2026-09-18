@@ -122,7 +122,11 @@ class ClaudePolicyHookTests(unittest.TestCase):
             self._seed_protected_branch_guard(db_dir)
 
             env = os.environ.copy()
+            # ENGRAM_DB_DIR 은 user.config.yaml 에 밀려 무시된다. 이 값만 없으면
+            # 서브프로세스가 사용자의 실 DB 를 읽고, 거기 있는 실제 directive 때문에
+            # 테스트가 우연히 통과한다 — 실제로 그렇게 통과하고 있었다.
             env["ENGRAM_DB_DIR"] = str(db_dir)
+            env["ENGRAM_SMOKE_DB_DIR"] = str(db_dir)
             env["USERPROFILE"] = str(home)
             env["HOME"] = str(home)
 

@@ -11,5 +11,6 @@ from .knowledge_graph import (
     initialize_kg_tables,
     iter_wiki_md_files,
     parse_markdown,
+    touch_frontmatter_updated,
 )
 

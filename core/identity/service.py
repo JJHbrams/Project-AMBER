@@ -3,11 +3,13 @@
 """
 
 import json
+import logging
 import sys
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Tuple
 from core.storage.db import get_connection
 from core.common.sanitizer import sanitize
+from .examples import RENDER_CHAR_BUDGET, render_examples
 
 try:
     import yaml as _yaml
@@ -16,6 +18,7 @@ except ModuleNotFoundError:
 
 _PERSONA_YAML_REL = "config/persona.yaml"
 _USER_PERSONA_YAML_PATH = Path.home() / ".engram" / "persona.user.yaml"
+_LOG = logging.getLogger(__name__)
 
 
 def _resolve_persona_yaml_path() -> Path:
@@ -63,6 +66,16 @@ def _coerce_persona_field(key: str, val: Any) -> Any:
     """필드 타입에 맞게 값을 강제 변환. 변환 불가 시 None 반환."""
     default = DEFAULT_PERSONA.get(key)
     if default is None:
+        return None
+    if isinstance(default, bool):
+        if isinstance(val, bool):
+            return val
+        if isinstance(val, str):
+            lowered = val.strip().lower()
+            if lowered in ("true", "yes", "on", "1"):
+                return True
+            if lowered in ("false", "no", "off", "0"):
+                return False
         return None
     if isinstance(default, (int, float)):
         try:
@@ -120,7 +133,9 @@ DEFAULT_PERSONA = {
     "traits": [],  # 성격 키워드 (max 5)
     "quirks": [],  # 고유 습관/버릇 (max 3)
     "values": [],  # 중시하는 가치 (max 3)
-    "fewshot": "",  # 말투 예시 대화 (few-shot examples)
+    "fewshot": "",  # 말투 예시 대화 (few-shot examples) — 사람이 박는 지향
+    # True 면 persona_examples 테이블을 렌더에서 뺀다. 지향만 쓰고 성장은 끄는 스위치.
+    "fewshot_only": False,
     "warmth": 0.5,  # 0.0 차가운 ↔ 1.0 따뜻한
     "formality": 0.5,  # 0.0 반말/캐주얼 ↔ 1.0 격식
     "humor": 0.3,  # 0.0 진지 ↔ 1.0 유머러스
@@ -128,6 +143,9 @@ DEFAULT_PERSONA = {
 }
 
 _LIST_MAX = {"traits": 5, "quirks": 3, "values": 3}
+# EMA 블렌딩에서 제외한다. 스위치는 평균낼 수 있는 값이 아니다 —
+# 0.7*True + 0.3*False 는 아무것도 뜻하지 않는다.
+_NON_BLENDED = ("fewshot_only",)
 _BLEND_ALPHA = 0.3  # 새 관찰값 반영 비율 (EMA)
 
 
@@ -142,7 +160,14 @@ def _merge_persona(current: dict, update: dict) -> dict:
     for key, new_val in update.items():
         if key not in merged:
             continue
+        if key in _NON_BLENDED:
+            if isinstance(new_val, bool):
+                merged[key] = new_val
+            continue
         old_val = merged[key]
+
+        if isinstance(old_val, bool) or isinstance(new_val, bool):
+            continue
 
         if isinstance(old_val, (int, float)) and isinstance(new_val, (int, float)):
             blended = old_val * (1 - _BLEND_ALPHA) + new_val * _BLEND_ALPHA
@@ -157,8 +182,13 @@ def _merge_persona(current: dict, update: dict) -> dict:
     return merged
 
 
-def render_persona(persona: dict) -> str:
-    """persona dict → 컨텍스트 주입용 압축 문자열 (40~60 토큰)"""
+def render_persona(persona: dict, include_examples: bool = False) -> str:
+    """persona dict → 컨텍스트 주입용 압축 문자열 (예시 없이 40~60 토큰)
+
+    include_examples 기본값이 False 인 이유: 이 함수는 MCP 컨텍스트 조립만이
+    아니라 자발 발화(initiative) 프롬프트에서도 불린다. 그쪽은 격리된 1회성
+    호출이라 예시 수백~천 토큰을 매번 태울 자리가 아니다. 필요한 쪽이 켠다.
+    """
     p = {**DEFAULT_PERSONA, **persona}
     lines = []
     if p["voice"]:
@@ -171,8 +201,25 @@ def render_persona(persona: dict) -> str:
         lines.append(f"values: {', '.join(p['values'])}")
     dims = [f"{d}:{p[d]}" for d in ("warmth", "formality", "humor", "directness")]
     lines.append(" ".join(dims))
-    if p.get("fewshot"):
-        lines.append(f"[examples]\n{p['fewshot']}")
+    if include_examples:
+        # 두 출처는 경쟁이 아니라 앵커와 성장이다.
+        #   fewshot(persona.user.yaml) — 사람이 박는 '이렇게 말했으면 좋겠다'
+        #   persona_examples          — 대화하며 쌓인 '실제로 이렇게 말했다'
+        # 앵커를 먼저 놓고 남은 예산만큼 성장을 붙인다. 앵커가 성장을 덮어쓰면
+        # 이 기능이 존재할 이유가 없어지고, 성장이 앵커를 덮어쓰면 사람이
+        # 명시적으로 박은 값을 무시하는 셈이라 pin 계약이 깨진다.
+        anchor = (p.get("fewshot") or "").strip()
+        if p.get("fewshot_only"):
+            # 지향만 쓰고 성장은 끈다 — 사용자가 GUI 에서 명시적으로 고른 경우.
+            body = anchor
+        elif anchor:
+            budget = RENDER_CHAR_BUDGET - len(anchor) - 2
+            grown = render_examples(char_budget=budget) if budget > 0 else ""
+            body = anchor + ("\n\n" + grown if grown else "")
+        else:
+            body = render_examples()
+        if body:
+            lines.append(f"[examples]\n{body}")
     return "\n".join(lines)
 
 
@@ -190,6 +237,17 @@ def get_identity() -> Dict:
         identity["name"] = yaml_persona["name"]
 
     return identity
+
+
+def remove_provider_persona(*, apply: bool = True) -> dict:
+    """provider 설정 파일에 남은 persona 블록을 걷어낸다.
+
+    정체성은 `engram_get_context` 응답으로만 전달한다. 파일에 사본을 두면 engram 이
+    안 붙은 세션에서도 페르소나가 살아있는 척하게 되고, 빈 DB 를 읽은 동기화가 사람의
+    파일을 기본값으로 덮는 사고까지 났다. 이미 배포된 블록만 정리한다.
+    """
+    from .provider_persona import remove_all
+    return remove_all(apply=apply)
 
 
 def update_narrative(new_narrative: str, new_name: str = None):
@@ -351,7 +409,8 @@ def update_persona(observations: dict) -> Dict:
             (json.dumps(db_update, ensure_ascii=False),),
         )
     conn.close()
-    return get_persona()
+    result = get_persona()
+    return result
 
 
 def set_persona_baseline(fields: dict) -> Dict:
@@ -393,7 +452,8 @@ def set_persona_baseline(fields: dict) -> Dict:
                 (json.dumps(db_persona, ensure_ascii=False),),
             )
     conn.close()
-    return get_persona()
+    result = get_persona()
+    return result
 
 
 def is_persona_initialized() -> bool:

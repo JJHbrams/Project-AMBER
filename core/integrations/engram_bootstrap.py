@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import Any
 
 from core.config.runtime_config import get_cfg_value, normalize_policy_guidance_level
+from core.memory.scope import CONTINUUM_SCOPE
 
 logger = logging.getLogger(__name__)
 
@@ -97,7 +98,7 @@ def session_title_directive() -> str:
 
 def build_bootstrap_directive(
     caller: str = "claude-code",
-    scope_key: str = "overlay",
+    scope_key: str = CONTINUUM_SCOPE,
     cwd: str = "",
     *,
     include_session_title: bool = True,
@@ -126,7 +127,7 @@ def bubble_bootstrap_prompt(cwd: str, *, caller: str = "claude-code") -> str:
     return (
         build_bootstrap_directive(
             caller=caller,
-            scope_key="overlay",
+            scope_key=CONTINUUM_SCOPE,
             cwd=cwd,
             include_session_title=False,
         )

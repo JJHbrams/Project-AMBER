@@ -13,6 +13,12 @@ def _path(value):
     return os.path.normcase(os.path.abspath(str(value)))
 
 
+def _expected_dual_representation_warning(root):
+    root = Path(root)
+    return ('loading hooks from both ' + str(root / 'hooks.json') + ' and '
+            + str(root / 'config.toml') + '; prefer a single representation for this layer')
+
+
 def native_list(root, cwd):
     executable = shutil.which('codex')
     if not executable:
@@ -88,8 +94,14 @@ def summarize(result, root, cwd, *, server='engram'):
         return base
     entry = entries[0]
     if (not isinstance(entry.get('errors'), list) or entry['errors']
-            or not isinstance(entry.get('warnings'), list) or entry['warnings']
+            or not isinstance(entry.get('warnings'), list)
             or not isinstance(entry.get('hooks'), list)):
+        return base
+    # During the deliberate migration, unrelated JSON hooks (the title command)
+    # remain while native MCP hooks live in TOML. Codex emits this one warning;
+    # it does not imply duplicate owned handlers. Every other warning fails closed.
+    warnings = entry['warnings']
+    if warnings and warnings != [_expected_dual_representation_warning(root)]:
         return base
     expected = {name[0].lower() + name[1:] for name in (*EVENTS, 'SessionStart')}
     sources = {_path(Path(root) / name) for name in ('hooks.json', 'config.toml')}

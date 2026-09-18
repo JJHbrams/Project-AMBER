@@ -697,6 +697,7 @@ class _SettingsWindow:
         self._persona_quirks_txt: tk.Text | None = None
         self._persona_values_txt: tk.Text | None = None
         self._persona_fewshot_txt: tk.Text | None = None
+        self._persona_fewshot_only_var: tk.BooleanVar | None = None
         self._persona_numeric_vars: dict[str, tk.DoubleVar] = {}
         self._persona_numeric_pin_vars: dict[str, tk.BooleanVar] = {}
         self._persona_numeric_label_vars: dict[str, tk.StringVar] = {}
@@ -1250,11 +1251,19 @@ class _SettingsWindow:
         ttk.Label(f, text="말투 예시\n(few-shot):").grid(row=6, column=0, sticky="nw", **PAD)
         fewshot_fr, self._persona_fewshot_txt = self._make_resizable_text(f, height=4)
         fewshot_fr.grid(row=6, column=1, columnspan=3, sticky="ew", **PAD)
+        self._persona_fewshot_only_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            f,
+            text="이 예시만 사용 (대화에서 쌓인 예시를 쓰지 않음)",
+            variable=self._persona_fewshot_only_var,
+        ).grid(row=7, column=1, columnspan=3, sticky="w", padx=8, pady=(0, 2))
         ttk.Label(
             f,
-            text="응답 예시를 자유롭게 입력하세요.\n예) user: 오늘 배포 어때?  →  assistant: 됐음. 근데 테스트가 좀 걸려.",
+            text=("응답 예시를 자유롭게 입력하세요.\n"
+                  "예) user: 오늘 배포 어때?  →  assistant: 됐음. 근데 테스트가 좀 걸려.\n"
+                  "기본값은 여기 쓴 예시를 먼저 놓고, 대화에서 쌓인 예시를 남은 자리에 덧붙입니다."),
             foreground="gray",
-        ).grid(row=7, column=0, columnspan=4, sticky="w", padx=16, pady=(0, 6))
+        ).grid(row=8, column=0, columnspan=4, sticky="w", padx=16, pady=(0, 6))
 
         ttk.Separator(f, orient="horizontal").grid(row=8, column=0, columnspan=4, sticky="ew", padx=8, pady=(6, 2))
         ttk.Label(f, text="Adaptive Slider", foreground="gray").grid(row=9, column=0, sticky="w", padx=8, pady=(2, 0))
@@ -2381,6 +2390,7 @@ class _SettingsWindow:
         _txt_set(self._persona_values_txt, ", ".join(_coerce_persona_list(user_persona.get("values"))))
         fewshot = user_persona.get("fewshot")
         _txt_set(self._persona_fewshot_txt, fewshot.strip() if isinstance(fewshot, str) else "")
+        self._persona_fewshot_only_var.set(bool(user_persona.get("fewshot_only")))
 
         for field in _PERSONA_NUMERIC_FIELDS:
             value, pinned = numeric_values[field]
@@ -2732,6 +2742,9 @@ class _SettingsWindow:
         fewshot = self._persona_fewshot_txt.get("1.0", "end-1c").strip()
         if fewshot:
             persona_values["fewshot"] = fewshot
+        # 켜졌을 때만 기록한다 — 꺼짐은 기본값이고, 굳이 박으면 파일만 지저분해진다.
+        if bool(self._persona_fewshot_only_var.get()):
+            persona_values["fewshot_only"] = True
 
         pin_map: dict[str, bool] = {}
         numeric_values: dict[str, float] = {}

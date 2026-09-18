@@ -340,7 +340,11 @@ class NativeBubbleHost:
         if origin=='user_drag':
             ax,ay,aw,ah=self.get_anchor()
             if aw<=0 or ah<=0:return
-            self.manual_position.add(label);preferred.update(dx=(values['x']-ax)/aw,dy=(values['y']-ay)/ah)
+            # The offset is only meaningful together with the screen half the
+            # character was on, so a later move to the other half can mirror it.
+            self.manual_position.add(label)
+            preferred.update(dx=(values['x']-ax)/aw,dy=(values['y']-ay)/ah,
+                             side='right' if self._opens_right(ax,ay,aw,ah) else 'left')
             self._persist_manual_geometry()
         elif origin=='user_resize':
             self.manual_size.add(label)
@@ -374,6 +378,8 @@ class NativeBubbleHost:
             position=record.get('position')
             if isinstance(position, dict) and self._finite(position.get('dx'), minimum=-10, maximum=10) and self._finite(position.get('dy'), minimum=-10, maximum=10):
                 preferred.update(dx=float(position['dx']), dy=float(position['dy']))
+                if position.get('side') in ('left', 'right'):
+                    preferred['side']=position['side']
                 self.manual_position.add(label)
             size=record.get('size')
             if isinstance(size, dict) and self._finite(size.get('width'), minimum=80, maximum=4096) and self._finite(size.get('height'), minimum=60, maximum=4096):
@@ -389,6 +395,8 @@ class NativeBubbleHost:
             record={}
             if label in self.manual_position and self._finite(preferred.get('dx'), minimum=-10, maximum=10) and self._finite(preferred.get('dy'), minimum=-10, maximum=10):
                 record['position']={'dx':preferred['dx'], 'dy':preferred['dy']}
+                if preferred.get('side') in ('left', 'right'):
+                    record['position']['side']=preferred['side']
             if label in self.manual_size and self._finite(preferred.get('width'), minimum=80, maximum=4096) and self._finite(preferred.get('height'), minimum=60, maximum=4096):
                 record['size']={'width':preferred['width'], 'height':preferred['height']}
             if record:
@@ -406,6 +414,46 @@ class NativeBubbleHost:
                 saved[label]=merged
         self._geometry_state_updater(update)
 
+    @staticmethod
+    def _opens_right(x, y, w, h):
+        """풍선을 캐릭터의 어느 쪽에 펼칠지 — 화면 중심의 반대쪽으로 편다.
+
+        캐릭터가 모니터 왼쪽 절반이면 오른쪽으로, 오른쪽 절반이면 왼쪽으로 펼쳐
+        풍선이 화면 밖으로 밀려나지 않게 한다. tkinter 경로(geometry.place_speech_bubble)가
+        쓰던 규칙과 같다 — native shell로 옮기면서 왼쪽 고정으로 굳어 있었다.
+        꼬리 방향은 native 쪽이 tail_target(캐릭터 중심)에서 매번 다시 계산하므로
+        여기서 자리만 뒤집으면 좌우 대칭이 완성된다."""
+        left, _, right, _ = geometry.get_monitor_work_rect(int(x + w / 2), int(y + h / 2))
+        return x + w / 2 <= (left + right) / 2
+
+    @staticmethod
+    def _manual_x(x, w, width, preferred, opens_right):
+        """드래그로 고정된 x — 캐릭터가 반대쪽 화면 절반으로 가면 좌우 반사한다.
+
+        드래그 오프셋은 "그때 캐릭터가 어느 쪽 절반에 있었나"와 짝일 때만 의미가 있다.
+        절반이 바뀌면 캐릭터 중심선 기준으로 뒤집어, 사용자가 잡아둔 거리감은 그대로 두고
+        방향만 자동 배치와 같이 따라가게 한다. 반사는 저장된 dx에서 매번 새로 계산하므로
+        왔다갔다 해도 누적되지 않는다.
+
+        side가 없는 예전 기록은 풍선이 캐릭터의 어느 쪽에 놓였는지로 추정한다 — 그 시점
+        화면 절반을 알 길이 없으니 이게 최선이고, 다음 드래그부터는 실제 값이 저장된다."""
+        dx = preferred.get('dx', 0)
+        side = preferred.get('side')
+        dragged_right = side == 'right' if side in ('left', 'right') else dx * w + width / 2 > w / 2
+        if dragged_right == opens_right:
+            return int(x + dx * w)
+        return int(x + w - dx * w - width)
+
+    @staticmethod
+    def _side_x(label, x, w, width, opens_right):
+        """캐릭터 기준 풍선의 좌측 x — opens_right면 오른쪽 배치로 좌우 반전한다.
+
+        생각풍선은 머리 위라 옆으로 밀지 않고, 캐릭터를 사이에 둔 같은 간격(20px)만
+        반대편으로 옮긴다."""
+        if label == 'thought':
+            return x + w + 20 - width if opens_right else x - 20
+        return x + w + 5 if opens_right else x - width - 5
+
     def refresh_positions(self, focus=False):
         if not self.shell.is_ready: return
         x,y,w,h=self.get_anchor()
@@ -413,10 +461,11 @@ class NativeBubbleHost:
         if getattr(self,'_last_style',None)!=style:
             self._last_style=style
             self.publish()
-        defaults={'input':(x-465,y,460,self._input_height),
-                  'speech':(x-465,y-230,460,220),
-                  'thought':(x-20,y-190,250,170)}
-        for label,(px,py,pw,ph) in defaults.items():
+        defaults={'input':(y,460,self._input_height),
+                  'speech':(y-230,460,220),
+                  'thought':(y-190,250,170)}
+        opens_right=self._opens_right(x,y,w,h)
+        for label,(py,pw,ph) in defaults.items():
             rect=self.rects.get(label,{})
             show=self.visible and label not in self._dismissed and ((label=='input' and self.composer_visible) or bool(getattr(self,label,{}).get('text')) or (label=='speech' and self.approval is not None))
             scale=rect.get('scale',1)
@@ -427,13 +476,15 @@ class NativeBubbleHost:
                 limits=style[label]
                 pw=max(limits['min_width'],min(limits['max_width'],pw))
                 ph=max(limits['min_height'],min(limits['max_height'],ph))
-                px=x-int(pw*scale)-5 if label=='speech' else x-20
                 py=y-int(ph*scale)-(10 if label=='speech' else 20)
+            width=int(preferred.get('width',pw)*scale) if label in self.manual_size else int(pw*scale)
+            height=int(preferred.get('height',ph)*scale) if label in self.manual_size else int(ph*scale)
+            px=(self._manual_x(x,w,width,preferred,opens_right) if label in self.manual_position
+                else self._side_x(label,x,w,width,opens_right))
             geometry={'window':label,
-                'x':int(x+preferred.get('dx',0)*w) if label in self.manual_position else px,
+                'x':px,
                 'y':int(y+preferred.get('dy',0)*h) if label in self.manual_position else py,
-                'width':int(preferred.get('width',pw)*scale) if label in self.manual_size else int(pw*scale),
-                'height':int(preferred.get('height',ph)*scale) if label in self.manual_size else int(ph*scale),
+                'width':width,'height':height,
                 'visible':show,'focus':focus and label=='input' and self.composer_visible}
             if label!='input':geometry['tail_target']=[x+w/2,y+h/2]
             if label in style:geometry['presentation_style']=style[label]

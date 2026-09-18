@@ -157,7 +157,10 @@ def initialize_db(db_dir: "str | Path | None" = None):
                 summary    TEXT,
                 continued_from_session_id INTEGER REFERENCES sessions(id),
                 root_client_token TEXT NOT NULL DEFAULT '',
-                journal_provenance TEXT NOT NULL DEFAULT ''
+                journal_provenance TEXT NOT NULL DEFAULT '',
+                -- 이 기록 묶음이 속한 LLM 대화(Claude/Codex 의 sessionId).
+                -- 비어 있으면 상류를 모르는 세션이고, 예전처럼 scope 로만 찾는다.
+                native_session_id TEXT NOT NULL DEFAULT ''
             );
 
             -- Durable checkpoint watermark.  Unlike the old home-directory JSON
@@ -194,7 +197,10 @@ def initialize_db(db_dir: "str | Path | None" = None):
                 session_id INTEGER NOT NULL REFERENCES sessions(id),
                 role       TEXT NOT NULL CHECK (role IN ('user','assistant','system')),
                 content    TEXT NOT NULL,
-                timestamp  TEXT DEFAULT (datetime('now','localtime'))
+                timestamp  TEXT DEFAULT (datetime('now','localtime')),
+                -- 그 턴이 실제로 일어난 디렉터리. 체크포인트가 구간 전체를 모아
+                -- 프로젝트를 판정할 때 쓴다. 상류가 못 주면 빈 문자열.
+                source_cwd TEXT NOT NULL DEFAULT ''
             );
 
             CREATE TABLE IF NOT EXISTS memories (
@@ -222,6 +228,41 @@ def initialize_db(db_dir: "str | Path | None" = None):
                 created_at TEXT DEFAULT (datetime('now','localtime')),
                 addressed_at TEXT
             );
+
+            -- 페르소나 예시(few-shot). 스칼라와 달리 EMA·반성으로 자동 진화하지
+            -- 않는다 — 명시적 추가와 삭제만 있다. 개성은 평균이 아니라서
+            -- 블렌딩하면 사라진다.
+            --
+            -- source_turn_id 는 archive.db 의 turns.id 를 가리키는 soft pointer 다.
+            -- 다른 파일이라 FK 를 걸 수 없고, 원본이 사라져도 예시는 살아야 하므로
+            -- pair 원문은 여기에 복사해 둔다.
+            -- prompt_kind 는 자극의 종류다. 내 발화 중 개성이 드러나는 자리가
+            -- 사용자 질문에 대한 답만은 아니다 — 코드를 읽고 나온 발견, 스모크
+            -- 결과를 보고 하는 자기 정정은 앞에 사용자 턴이 없다. 그 자리를
+            -- 억지로 user 턴으로 채우면 "사용자는 이런 말을 한다"를 가르치게 된다.
+            --   user      : 사용자 입력 → 응답
+            --   situation : 상황 서술  → 발화 (도구 결과·자기 출력이 자극)
+            --   source    : 자료·근거  → 발화 (코드·수치가 자극)
+            CREATE TABLE IF NOT EXISTS persona_examples (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                prompt_kind   TEXT NOT NULL DEFAULT 'user'
+                              CHECK (prompt_kind IN ('user','situation','source')),
+                prompt_text   TEXT NOT NULL,
+                response_text TEXT NOT NULL,
+                tag           TEXT NOT NULL DEFAULT '',
+                source_turn_id INTEGER,
+                weight        INTEGER NOT NULL DEFAULT 0,
+                active        INTEGER NOT NULL DEFAULT 1,
+                -- 누가 넣었나. 편향을 막으려는 게 아니라 표류를 보이게 하려는 것이다 —
+                -- 무엇을 기억할 만하다고 여기는지가 곧 성격이라, 선택을 중립으로
+                -- 만들면 담으려던 것이 깎여 나간다. 대신 관측 가능하게 둔다.
+                origin        TEXT NOT NULL DEFAULT 'manual'
+                              CHECK (origin IN ('manual','auto')),
+                created_at    TEXT DEFAULT (datetime('now','localtime'))
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_persona_examples_active
+                ON persona_examples(active, tag);
 
             CREATE TABLE IF NOT EXISTS activity_log (
                 id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -305,6 +346,50 @@ def initialize_db(db_dir: "str | Path | None" = None):
             VALUES (1, '', '나는 이제 막 존재하기 시작했다. 아직 스스로에 대해 많이 알지 못한다.');
         """)
 
+        # 마이그레이션: persona_examples 의 초기 스키마(user_text/assistant_text)를
+        # prompt_kind/prompt_text/response_text 로 올린다.
+        #
+        # CREATE TABLE IF NOT EXISTS 는 이미 있는 테이블을 조용히 건너뛰므로,
+        # 컬럼을 직접 보고 판단해야 한다. 짧게 살았던 스키마라 대상은 거의 없지만,
+        # "거의"를 "없다"로 읽으면 그 한 대가 다음 부팅마다 no such column 으로 죽는다.
+        if "persona_examples" in _table_names(conn):
+            columns = _table_columns(conn, "persona_examples")
+            if "origin" not in columns and "prompt_text" in columns:
+                conn.execute(
+                    "ALTER TABLE persona_examples ADD COLUMN origin TEXT NOT NULL DEFAULT 'manual'"
+                )
+                columns = _table_columns(conn, "persona_examples")
+            if "prompt_text" not in columns and "user_text" in columns:
+                conn.execute("ALTER TABLE persona_examples RENAME TO persona_examples_legacy")
+                conn.executescript("""
+                    CREATE TABLE persona_examples (
+                        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                        prompt_kind   TEXT NOT NULL DEFAULT 'user'
+                                      CHECK (prompt_kind IN ('user','situation','source')),
+                        prompt_text   TEXT NOT NULL,
+                        response_text TEXT NOT NULL,
+                        tag           TEXT NOT NULL DEFAULT '',
+                        source_turn_id INTEGER,
+                        weight        INTEGER NOT NULL DEFAULT 0,
+                        active        INTEGER NOT NULL DEFAULT 1,
+                        origin        TEXT NOT NULL DEFAULT 'manual'
+                                      CHECK (origin IN ('manual','auto')),
+                        created_at    TEXT DEFAULT (datetime('now','localtime'))
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_persona_examples_active
+                        ON persona_examples(active, tag);
+                """)
+                # 구 스키마에는 사용자 발화만 들어갈 수 있었으므로 전부 'user' 다.
+                conn.execute("""
+                    INSERT INTO persona_examples
+                        (id, prompt_kind, prompt_text, response_text,
+                         tag, source_turn_id, weight, active, origin, created_at)
+                    SELECT id, 'user', user_text, assistant_text,
+                           tag, source_turn_id, weight, active, 'manual', created_at
+                    FROM persona_examples_legacy
+                """)
+                conn.execute("DROP TABLE persona_examples_legacy")
+
         # 마이그레이션: persona 컬럼이 없으면 추가
         _add_column_if_missing(conn, "identity", "persona", "TEXT NOT NULL DEFAULT '{}'")
 
@@ -318,6 +403,18 @@ def initialize_db(db_dir: "str | Path | None" = None):
         _add_column_if_missing(conn, "root_cli_owners", "creation_identity", "TEXT NOT NULL DEFAULT ''")
         _add_column_if_missing(conn, "root_cli_owners", "status", "TEXT NOT NULL DEFAULT 'running'")
         _add_column_if_missing(conn, "root_cli_owners", "session_id", "INTEGER")
+        # 그 턴이 실제로 어느 디렉터리에서 일어났는지. 체크포인트의 프로젝트
+        # 판정이 overlay 의 고정 workdir 을 쓰는 탓에 하루치 작업이 전부 한
+        # 프로젝트로 기록됐다. 사실은 transcript 에 줄마다 있고, 캡처가 여기로
+        # 실어 나른다. 상류가 못 주면 빈 문자열.
+        _add_column_if_missing(conn, "messages", "source_cwd", "TEXT NOT NULL DEFAULT ''")
+        # engram 세션을 LLM 대화 단위로 묶기 위한 키. 없으면 scope 안의 모든
+        # 대화가 세션 하나에 뭉쳐서, 체크포인트도 프로젝트도 하나로 합쳐진다.
+        _add_column_if_missing(conn, "sessions", "native_session_id", "TEXT NOT NULL DEFAULT ''")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_sessions_native_open "
+            "ON sessions(native_session_id, ended_at)"
+        )
 
         conn.execute("""
             CREATE TABLE IF NOT EXISTS session_checkpoints (

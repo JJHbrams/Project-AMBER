@@ -12,6 +12,7 @@ from typing import Any, List, Optional, Dict
 from core.storage.db import get_connection
 from core.storage.archive import append_turn as archive_append_turn
 from core.common.sanitizer import sanitize
+from core.context.project_scope import resolve_project_tag
 from core.memory.transcript_capture import redact_secrets
 from core.config.runtime_config import get_cfg_value, get_default_fallback_scope_key
 from core.context.project_scope import resolve_kg_node_id, resolve_project_key
@@ -201,7 +202,39 @@ def get_session_projects(session_id: int) -> List[str]:
     return [r["project_key"] for r in rows]
 
 
-def save_message(session_id: int, role: str, content: str):
+def _normalize_source_ts(source_ts: Optional[str]) -> Optional[str]:
+    """transcript 의 ISO UTC timestamp 를 아카이브의 localtime 포맷으로 맞춘다.
+
+    기존 행들이 datetime('now','localtime') 로 들어가 있어서, UTC 를 그대로 쓰면
+    같은 테이블 안에서 9시간 어긋난 두 시간대가 섞인다. 정렬이 깨지면 앵커+스크롤
+    조회가 엉뚱한 구간을 집는다.
+    """
+    if not source_ts:
+        return None
+    try:
+        raw = source_ts.strip().replace("Z", "+00:00")
+        dt = datetime.fromisoformat(raw)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone().strftime("%Y-%m-%d %H:%M:%S")
+    except (ValueError, TypeError):
+        return None
+
+
+def save_message(session_id: int, role: str, content: str,
+                 source_uuid: Optional[str] = None, source_ts: Optional[str] = None,
+                 source_cwd: Optional[str] = None):
+    """STM 사본과 무손실 아카이브에 함께 기록한다.
+
+    source_uuid/source_ts 는 상류(Claude Code transcript)가 주는 줄 고유 id 와
+    실제 발화 시각이다. 아카이브는 이 둘이 있어야 재적재에도 중복이 안 생기고
+    시간축이 맞는다. 상류가 못 주면(직접 호출 등) None 이고, 그때는 예전처럼
+    적재 시각이 들어간다.
+
+    source_cwd 는 그 턴이 실제로 일어난 디렉터리다. 체크포인트가 구간 전체를
+    모아 프로젝트를 판정할 때 쓴다 — overlay 의 고정 workdir 을 쓰면 하루에
+    여러 프로젝트를 오가도 전부 한 곳으로 기록된다.
+    """
     safe_content = sanitize(content, max_length=4000)
     conn = get_connection()
     with conn:
@@ -210,17 +243,25 @@ def save_message(session_id: int, role: str, content: str):
         ).fetchone()
         if not open_row:
             raise ValueError("session is not open")
-        conn.execute("INSERT INTO messages (session_id, role, content) VALUES (?,?,?)", (session_id, role, safe_content))
+        conn.execute(
+            "INSERT INTO messages (session_id, role, content, source_cwd) VALUES (?,?,?,?)",
+            (session_id, role, safe_content, str(source_cwd or "")),
+        )
     conn.close()
 
     # 주입용 사본(messages)은 위에서 4000자로 잘렸다. 되짚기용 원문은 따로 남긴다.
     # 비밀값만 마스킹하고 길이는 건드리지 않는다 — 요약이 버린 디테일을 복구할
     # 유일한 경로라서, 여기서 또 자르면 계층을 나눈 의미가 없다.
+    # 태그는 저장 위치를 바꾸지 않는다 — scope_key 는 위에서 읽은 세션 값 그대로다.
+    # 나중에 "이 프로젝트 것만" 좁혀 보려고 붙이는 라벨일 뿐이다.
     archive_append_turn(
         session_id,
         role,
         redact_secrets(content or ""),
         scope_key=str(open_row["scope_key"] or ""),
+        source_uuid=source_uuid,
+        ts=_normalize_source_ts(source_ts),
+        project_key=resolve_project_tag(source_cwd),
     )
 
 
@@ -234,6 +275,55 @@ def resolve_session_id_by_scope(scope_key: Optional[str]) -> Optional[int]:
     ).fetchone()
     conn.close()
     return int(row["id"]) if row else None
+
+
+_NATIVE_SESSION_LOCK = threading.Lock()
+
+
+def resolve_session_id_by_native(
+    native_session_id: str,
+    scope_key: Optional[str] = None,
+    project_keys: Optional[List[str]] = None,
+) -> Optional[int]:
+    """LLM 대화(Claude/Codex sessionId) 하나에 engram 세션 하나를 물린다.
+
+    이게 없으면 scope 안의 모든 대화가 세션 하나로 뭉친다 — 2026-09-18 실측에서
+    LLM 세션 13개(session-agent-orchestration 13,007줄, ProjectIntelContunuum
+    6,341줄, TruviewCADMOM 4,365줄 …)의 메시지가 engram 세션 654 하나에 들어갔고,
+    그래서 체크포인트도 하나, 요약도 하나, 프로젝트도 뒤섞였다.
+
+    열린 세션이 있으면 그걸 쓰고 없으면 만든다. 같은 대화가 동시에 두 번 들어와도
+    세션이 갈리지 않도록 잠금 아래에서 확인한다.
+    """
+    native = str(native_session_id or "").strip()
+    if not native:
+        return None
+
+    normalized = _normalize_scope_key(scope_key)
+    with _NATIVE_SESSION_LOCK:
+        conn = get_connection()
+        try:
+            row = conn.execute(
+                "SELECT id FROM sessions WHERE native_session_id = ? AND ended_at IS NULL "
+                "ORDER BY started_at DESC, id DESC LIMIT 1",
+                (native,),
+            ).fetchone()
+        finally:
+            conn.close()
+        if row:
+            return int(row["id"])
+
+        session_id = create_session(scope_key=normalized, project_keys=project_keys)
+        conn = get_connection()
+        try:
+            with conn:
+                conn.execute(
+                    "UPDATE sessions SET native_session_id=? WHERE id=?",
+                    (native, session_id),
+                )
+        finally:
+            conn.close()
+        return session_id
 
 
 def _format_memory(content: str, source: str, provider: str, project: str = "") -> str:

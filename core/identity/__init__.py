@@ -15,6 +15,14 @@ from .service import (
     update_persona,
     update_themes,
 )
+from .examples import (
+    add_example,
+    delete_example,
+    list_examples,
+    render_examples,
+    restore_example,
+    retire_example,
+)
 from .curiosity import (
     add_curiosity,
     address_curiosity,

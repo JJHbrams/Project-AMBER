@@ -5,6 +5,7 @@ import subprocess
 import threading
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Optional
+from core.memory.scope import CONTINUUM_SCOPE
 
 if TYPE_CHECKING:
     from core.memory.bus import MemorySession
@@ -28,7 +29,7 @@ class EngramBackend:
         self._session: Optional[MemorySession] = None
         if _STM_AVAILABLE:
             try:
-                self._session = _memory_bus.start_session(scope_key="overlay")
+                self._session = _memory_bus.start_session(scope_key=CONTINUUM_SCOPE)
                 logger.info("STM 세션 시작: id=%d scope=overlay", self._session.session_id)
             except Exception as e:
                 logger.warning("STM 세션 초기화 실패 (비활성화): %s", e)

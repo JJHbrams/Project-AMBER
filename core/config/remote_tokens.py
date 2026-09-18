@@ -52,6 +52,10 @@ _TEMPLATE = """# Engram 원격 MCP 리스너 접근 토큰.
 #    그대로 쓴다. 어디인지는 메시지 수로 확인한다:
 #      SELECT s.scope_key, COUNT(m.id) FROM sessions s
 #      LEFT JOIN messages m ON m.session_id = s.id GROUP BY 1 ORDER BY 2 DESC;
+#
+#    아래 "overlay" 는 core/memory/scope.py 의 CONTINUUM_SCOPE 와 같은 값이다.
+#    여기는 사용자에게 보여줄 설정 파일 템플릿이라 리터럴로 둔다 — 한쪽을
+#    고치면 다른 쪽도 같이 고칠 것.
 
 tokens:
   - name: remote-default

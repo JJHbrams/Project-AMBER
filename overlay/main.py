@@ -73,6 +73,7 @@ from core.integrations.engram_bootstrap import (
 )
 from core.integrations.policy_guidance_state import sync_policy_guidance_disabled_marker
 from core.integrations.remote_provision import refresh_host_on_tunnel_up
+from core.memory.scope import CONTINUUM_SCOPE
 
 # Claude 모델 alias — 이 외 이름은 Ollama 로컬 모델로 간주
 _CLAUDE_MODEL_ALIASES = {
@@ -484,7 +485,7 @@ class OverlayApp:
             on_input_activity=self._on_bubble_input_activity,
         )
         self._bubble_history = HistoryPanel(
-            self.root, get_stm_port=lambda: self._stm_server.port, scope_key="overlay",
+            self.root, get_stm_port=lambda: self._stm_server.port, scope_key=CONTINUUM_SCOPE,
             cfg_bubble=bubble_cfg, get_anchor_rect=self._get_bubble_anchor_rect,
             on_visibility=lambda visible: getattr(self, '_native_bubble_host', None)
             and self._native_bubble_host.set_history_open(visible),
@@ -522,7 +523,7 @@ class OverlayApp:
             seconds_since_activity=lambda: time.monotonic() - self._bubble_last_activity,
             show_nudge=self._initiative_show_nudge,
             phrase=make_persona_phraser(float(init_cfg.get("phrasing_timeout_sec", 25))),
-            sources=default_sources(lambda: str(get_workdir()), scope_key="overlay"),
+            sources=default_sources(lambda: str(get_workdir()), scope_key=CONTINUUM_SCOPE),
             on_outcome=self._on_initiative_outcome,
         )
         if self._chat_mode == "bubble":
@@ -812,7 +813,7 @@ class OverlayApp:
                 port = self._stm_server.port
                 payload = json.dumps({
                     "summary": f"[watchdog] Claude Code PID {dead_pid} 종료 감지 — 자동 close_session",
-                    "scope_key": "overlay",
+                    "scope_key": CONTINUUM_SCOPE,
                 }).encode()
                 req = urllib.request.Request(
                     f"http://127.0.0.1:{port}/stm/session/close",
@@ -832,7 +833,7 @@ class OverlayApp:
             try:
                 from core.graph.semantic import flag_reflection_event_from_recent_session
 
-                flag_reflection_event_from_recent_session(scope_key="overlay")
+                flag_reflection_event_from_recent_session(scope_key=CONTINUUM_SCOPE)
             except Exception as exc:
                 log.warning("[watchdog] reflection event 감지 실패 (PID=%d): %s", dead_pid, exc)
 
@@ -879,28 +880,37 @@ class OverlayApp:
         """
         import time
         from core.memory.transcript_capture import (
-            claude_project_dir,
-            find_active_transcript,
+            find_active_transcript_any,
             read_new_lines,
-            extract_turns,
+            extract_turn_records,
             redact_secrets,
         )
 
         time.sleep(5.0)
 
-        project_dir = claude_project_dir(str(Path.cwd()))
+        # overlay 가 뜬 cwd 의 프로젝트만 보던 것을 전체 프로젝트로 넓힌다 —
+        # 연속체의 기억은 프로젝트별로 나뉘지 않는데 캡처만 한 곳을 보고 있었다.
         current_path: "Path | None" = None
         offset = 0
         poll_interval = 5.0
+        # 파일별 읽기 위치. 세션을 오가도 각자 이어읽어야 놓치지 않는다.
+        offsets: "dict[str, int]" = {}
 
-        def _post_message(role: str, text: str, request_id: str) -> None:
+        def _post_message(role: str, text: str, request_id: str,
+                          source_uuid: str = "", ts: str = "", cwd: str = "",
+                          native_session_id: str = "") -> bool:
+            """전송 성공 여부를 돌려준다. 실패를 삼키면 offset 만 전진해 턴이 사라진다."""
             try:
                 port = self._stm_server.port
                 payload = json.dumps({
-                    "scope_key": "overlay",
+                    "scope_key": CONTINUUM_SCOPE,
                     "role": role,
                     "content": text,
                     "request_id": request_id,
+                    "source_uuid": source_uuid,
+                    "source_ts": ts,
+                    "source_cwd": cwd,
+                    "native_session_id": native_session_id,
                 }).encode("utf-8")
                 req = urllib.request.Request(
                     f"http://127.0.0.1:{port}/stm/message",
@@ -910,25 +920,43 @@ class OverlayApp:
                 )
                 with urllib.request.urlopen(req, timeout=5) as resp:
                     resp.read()
+                return True
             except Exception as exc:
                 log.warning("[stm-capture] /stm/message 전송 실패: %s", exc)
+                return False
 
         while not self._quitting:
             try:
-                active = find_active_transcript(project_dir)
+                active = find_active_transcript_any()
                 if active is not None and active != current_path:
-                    log.info("[stm-capture] 활성 transcript 전환: %s", active.name)
+                    log.info("[stm-capture] 활성 transcript 전환: %s/%s",
+                             active.parent.name, active.name)
+                    if current_path is not None:
+                        offsets[str(current_path)] = offset
                     current_path = active
-                    offset = 0
+                    # 전에 읽던 파일이면 그 위치에서 이어 읽는다. 매번 0 으로
+                    # 되돌리면 세션을 오갈 때마다 같은 구간을 다시 적재한다.
+                    offset = offsets.get(str(active), 0)
 
                 if current_path is not None and current_path.exists():
                     new_offset, lines = read_new_lines(current_path, offset)
-                    turns = extract_turns(lines)
-                    for i, (role, text) in enumerate(turns):
-                        safe_text = redact_secrets(text)
-                        request_id = f"{current_path.name}:{offset}:{i}"
-                        _post_message(role, safe_text, request_id)
-                    offset = new_offset
+                    records = extract_turn_records(lines)
+                    # 하나라도 전송에 실패하면 offset 을 전진시키지 않는다. 다음 poll 에서
+                    # 같은 구간을 다시 읽고, 이미 들어간 턴은 source_uuid 로 걸러진다.
+                    # 재읽기는 정상 동작이지만 유실은 복구 경로가 없다.
+                    delivered = True
+                    for i, rec in enumerate(records):
+                        safe_text = redact_secrets(rec["text"])
+                        request_id = rec["uuid"] or f"{current_path.name}:{offset}:{i}"
+                        if not _post_message(rec["role"], safe_text, request_id,
+                                             source_uuid=rec["uuid"] or "",
+                                             ts=rec["timestamp"] or "",
+                                             cwd=rec.get("cwd") or "",
+                                             native_session_id=rec.get("session_uuid") or ""):
+                            delivered = False
+                            break
+                    if delivered:
+                        offset = new_offset
             except Exception as exc:
                 log.warning("[stm-capture] capture loop 오류: %s", exc)
 
@@ -950,7 +978,7 @@ class OverlayApp:
                     from core.graph.semantic import maybe_auto_checkpoint
 
                     result = maybe_auto_checkpoint(
-                        scope_key="overlay",
+                        scope_key=CONTINUUM_SCOPE,
                         cwd=str(get_workdir()),
                         idle_seconds=int(
                             get_cfg_value("memory.auto_checkpoint.idle_seconds", 1800)
@@ -1078,6 +1106,19 @@ class OverlayApp:
             sync_sessionstart_hook(is_auto_inject_enabled())
         except Exception:
             log.exception("[overlay] SessionStart hook 동기화 실패")
+        # 폐기된 persona 파일 블록 정리. 정체성은 engram_get_context 응답으로만
+        # 전달한다 — engram 이 안 붙은 세션에는 페르소나가 없는 게 맞다.
+        try:
+            from core.identity.service import remove_provider_persona
+            for provider, status in remove_provider_persona().items():
+                if status.get("state") == "error":
+                    log.warning("[overlay] %s persona block removal deferred: %s",
+                                provider, status.get("error"))
+                elif status.get("changed"):
+                    log.info("[overlay] %s persona block removed: bytes=%d fingerprint=%s",
+                             provider, status["byte_count"], status["fingerprint"])
+        except Exception:
+            log.exception("[overlay] persona block removal failed")
         guidance_enabled = is_policy_guidance_enabled()
         for name, result in (
             ("Antigravity MCP", sync_antigravity_mcp_config()),
@@ -1671,7 +1712,7 @@ class OverlayApp:
             manager=CodexBubbleSession
         session = manager(
             cwd=workdir,
-            env_overrides={"ENGRAM_SCOPE_KEY": "overlay", "ENGRAM_CLI_PROVIDER": "codex" if provider=='codex' else "claude-code"},
+            env_overrides={"ENGRAM_SCOPE_KEY": CONTINUUM_SCOPE, "ENGRAM_CLI_PROVIDER": "codex" if provider=='codex' else "claude-code"},
             permission_level=get_permission_level(cfg),
             on_event=lambda ev: dispatch(self._on_bubble_event, ev),
             on_approval_request=request_approval,
@@ -1679,7 +1720,7 @@ class OverlayApp:
             on_session_id=persist_session_id,
             state_controller=state,
             on_title_checkpoint=lambda checkpoint: self._checkpoint_bubble_title(session, state, checkpoint),
-            stm_bridge=StmBridge(scope_key="overlay"),
+            stm_bridge=StmBridge(scope_key=CONTINUUM_SCOPE),
             # 확장 사고 예산 — 생각풍선에 실제 추론 텍스트를 보여주기 위함(0이면 끔).
             thinking_tokens=int(bubble_cfg.get("thinking_tokens", 2000)),
             # TUI 셔임과 동일하게 auto_inject와 무관하게 항상 부트스트랩 지시문을 덧댄다 —
@@ -2724,7 +2765,7 @@ class OverlayApp:
         try:
             from core.graph.semantic import maybe_promote_async
 
-            t = maybe_promote_async(scope_key="overlay")
+            t = maybe_promote_async(scope_key=CONTINUUM_SCOPE)
             t.join(timeout=15)
         except Exception as e:
             log.warning("STM promote failed at quit: %s", e)

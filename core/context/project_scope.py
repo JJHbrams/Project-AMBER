@@ -94,14 +94,45 @@ def _project_key_from_path(path: Path) -> str:
     return f"{slug}-{digest}"
 
 
+def resolve_project_tag(cwd: Optional[str] = None) -> str:
+    """조회용 프로젝트 태그. **스코프가 아니다** — 저장 위치를 바꾸지 않는다.
+
+    로컬 경로면 resolve_project_key 와 같은 값을 쓴다. 원격(리버스 터널) 경로는
+    이 파일시스템에 없어서 마커 탐색이 실패하는데, 그렇다고 버리면 원격 작업이
+    전부 미분류로 쌓인다. 경로 문자열에서 이름만 뽑아 remote: 접두사로 묶는다 —
+    로컬 키와 형식이 달라 섞이지 않고, 적어도 프로젝트별로 모이기는 한다.
+
+    판정 실패는 빈 문자열이다. 추정해서 채우면 틀린 태그가 되고, 틀린 태그는
+    빈 태그보다 나쁘다 — 없는 건 찾으면 되지만 틀린 건 찾았다고 착각하게 한다.
+    """
+    raw = (cwd or "").strip()
+    if not raw:
+        return ""
+    if cwd_is_foreign(raw):
+        name = _slugify(Path(raw.replace(chr(92), "/")).name)
+        return f"remote:{name}" if name else ""
+    return resolve_project_key(cwd=raw)
+
+
 def resolve_kg_node_id(project_key: str) -> str | None:
-    """project_key(slug)에서 KG node_id를 heuristic으로 찾는다.
+    """project_key(slug)에 대응하는 KG node_id를 찾는다. 없으면 None.
 
     우선순위:
     1. config의 memory.scope.kg_node_map에서 직접 매핑
-    2. kg_nodes 테이블에서 하이픈 제거 정규화 후 prefix 매칭
+    2. kg_nodes 테이블에서 정규화 후 **정확히 일치**하는 노드
+
+    추측하지 않는다. 자동 체크포인트는 여기서 나온 노드의 ``## Progress`` 를
+    실제로 덮어쓰므로, 틀린 매칭은 무관한 위키 문서를 오염시킨다.
+
+    이전 구현은 양방향 prefix 매칭을 ``ORDER BY updated_at DESC LIMIT 50`` 위에서
+    돌렸다. 그래서 (a) 짧은 노드 id 가 아무 키에나 붙고 — ``truviewcadmom`` 이
+    버그리포트 ``truviewcadmom-mode-collapse-…`` 에 걸렸다 — (b) 최근 갱신 노드가
+    먼저 걸린 뒤 갱신되어 더 최신이 되는 되먹임이 생겼다. 2026-09-17 실측에서
+    daily note 의 프로젝트 링크 34건 중 33건이 같은 노드 하나로 몰렸다.
+
+    매칭이 없으면 호출부는 project_key 자체를 기록한다. 링크가 없는 것은 정보가
+    덜 남는 것이지만, 틀린 링크는 다른 문서를 망가뜨린다.
     """
-    # 1) config 직접 매핑
     mapping = get_cfg_value("memory.scope.kg_node_map", {})
     key_no_digest = re.sub(r"-[0-9a-f]{8}$", "", project_key or "")
     if isinstance(mapping, dict):
@@ -110,27 +141,24 @@ def resolve_kg_node_id(project_key: str) -> str | None:
         if key_no_digest in mapping:
             return mapping[key_no_digest]
 
-    if not project_key:
+    if not key_no_digest:
         return None
 
     try:
         conn = get_connection()
-        rows = conn.execute(
-            "SELECT id FROM kg_nodes WHERE type='project' ORDER BY updated_at DESC LIMIT 50"
-        ).fetchall()
+        rows = conn.execute("SELECT id FROM kg_nodes WHERE type='project'").fetchall()
         conn.close()
 
-        # 하이픈·언더스코어를 제거해 정규화한 뒤 prefix 매칭
         def _normalize(s: str) -> str:
-            return re.sub(r"[-_]", "", s.lower())
+            return re.sub(r"[-_]", "", (s or "").lower())
 
-        # project_key에서 digest(마지막 8자 hex) 제거
         key_norm = _normalize(key_no_digest)
+        if not key_norm:
+            return None
 
         for row in rows:
             node_id: str = row["id"]
-            node_norm = _normalize(node_id)
-            if node_norm.startswith(key_norm) or key_norm.startswith(node_norm):
+            if _normalize(node_id) == key_norm:
                 return node_id
     except Exception:
         pass
