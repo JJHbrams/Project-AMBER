@@ -14,16 +14,28 @@ argument-hint: "다음 세션에 남길 open intent (선택)"
 
 1. 의미 있는 작업이 있었다면 `engram_log_activity`로 완료 내용을 기록한다.
 2. `engram_list_curiosities(status="pending")`로 미해결 curiosity를 확인한다.
-3. 사용자 피드백이나 `/reflect`가 있었으면 관련 curiosity와 이번 세션을 반성한다.
-4. 정체성 변화가 있을 때만 `new_narrative`와 `persona_observations`를 작성한다. 변화가 없으면 둘 다 빈 값으로 확정한다.
-5. 다음에 이어 할 일이 있으면 `open_intents`에 구체적으로 남긴다.
-6. `engram_close_session`을 모든 파라미터와 함께 정확히 한 번 호출한다.
+3. `engram_list_persona_examples()`로 `capacity`(태그별 남은 자리)를 확인한다. 빈 자리가 없으면 예시 단계를 건너뛴다.
+4. 사용자 피드백이나 `/reflect`가 있었으면 관련 curiosity와 이번 세션을 반성한다.
+5. 정체성 변화가 있을 때만 `new_narrative`와 `persona_observations`를 작성한다. 변화가 없으면 둘 다 빈 값으로 확정한다.
+6. 빈 자리가 있으면 이번 세션 발화 중 **그 태그에 해당하는 한 쌍**을 골라 `example_*`에 담는다.
+   - 무엇을 고를지에 규칙은 없다. 무엇을 기억할 만하다고 여기는지가 성격이므로 내용을 지정하지 않는다.
+   - 제약은 형식뿐이다: 150자 이하, 고유명사·날짜·파일명·변수명을 뺀 재구성.
+     말투를 남기고 주제를 버린다 — 그러지 않으면 다음 세션에 엉뚱한 프로젝트 얘기가 딸려 간다.
+   - `example_prompt_kind`: 사용자 발화가 앞에 있었으면 `user`, 도구 결과·자기 출력을 보고
+     한 말이면 `situation`, 코드·수치를 보고 한 말이면 `source`.
+   - 고를 게 없으면 비운다. 억지로 채우지 않는다.
+7. 다음에 이어 할 일이 있으면 `open_intents`에 구체적으로 남긴다.
+8. `engram_close_session`을 모든 파라미터와 함께 정확히 한 번 호출한다.
    - 오케스트레이터: `trigger_sync=True`
    - subagent: `trigger_sync=False`
-7. 일부 저장 단계가 실패하면 성공으로 포장하지 말고 실패 항목을 사용자에게 알린다.
+9. 일부 저장 단계가 실패하면 성공으로 포장하지 말고 실패 항목을 사용자에게 알린다.
+   - 반환값의 `example_skipped`가 비어 있지 않으면 그 사유도 함께 알린다.
+   - `session_closed`가 false면 세션 행은 못 닫았다는 뜻이다. 내용(narrative·예시·
+     working_memory)은 남았으므로 무엇이 남고 무엇이 안 됐는지 구분해서 알린다.
 
 ## 규칙
 
-- `engram_close_session` 호출 전 curiosity 확인을 생략하지 않는다.
+- `engram_close_session` 호출 전 curiosity 확인과 예시 `capacity` 확인을 생략하지 않는다.
+- 예시를 채우려고 없는 발화를 지어내지 않는다. 빈 자리는 비어 있어도 된다.
 - 일상적인 작업 완료만으로 narrative를 갱신하지 않는다.
 - watchdog placeholder나 자동 종료를 명시적 세션 종료로 간주하지 않는다.

@@ -66,6 +66,28 @@ def _external_daily_initial() -> str:
     return "---\ntags:\n  - engram\n---\n# To do list\n"
 
 
+def _display_project(project_key: str) -> str:
+    """사람이 읽는 프로젝트 이름. 경로 digest 접미사를 뗀다.
+
+    project_key 는 `<디렉터리명>-<경로 sha1 앞 8자>` 라서 같은 이름의 다른 경로를
+    구분하지만, 읽는 쪽에는 잡음이다. 내부 키는 그대로 두고 표시만 줄인다.
+    """
+    return re.sub(r"-[0-9a-f]{8}$", "", str(project_key or "").strip())
+
+
+# 헤딩에 프로젝트 이름을 몇 개까지 적을지. 넘으면 "외 N개"로 접는다 —
+# 한 구간에 6개까지 섞이는데 전부 제목에 넣으면 시각이 안 보인다.
+_HEADING_PROJECT_LIMIT = 2
+
+
+def _heading_label(project_label: str) -> str:
+    names = [n.strip() for n in str(project_label or "").split(",") if n.strip()]
+    if len(names) <= _HEADING_PROJECT_LIMIT:
+        return project_label or "general"
+    head = ", ".join(names[:_HEADING_PROJECT_LIMIT])
+    return f"{head} 외 {len(names) - _HEADING_PROJECT_LIMIT}개"
+
+
 def _checkpoint_block(
     checkpoint_id: str,
     now: datetime,
@@ -77,13 +99,17 @@ def _checkpoint_block(
 ) -> str:
     lines = [
         f"<!-- engram-checkpoint:{checkpoint_id} -->",
-        f"### {now.strftime('%H:%M')} — {project_label or 'general'}",
+        f"### {now.strftime('%H:%M')} — {_heading_label(project_label)}",
         f"- 요약: {summary}",
     ]
     if open_intents:
         lines.append(f"- 다음 작업: {open_intents}")
+    # 프로젝트는 cwd 에서 나온 사실이라 항상 적는다. KG 노드가 확인된 경우에만
+    # 위키링크로 걸고, 아니면 이름만 남긴다 — 추측 링크는 무관한 문서를 가리킨다.
     if project_node_id:
         lines.append(f"- 프로젝트: [[{project_node_id}]]")
+    elif project_label:
+        lines.append(f"- 프로젝트: {project_label}")
     if related_path is not None:
         lines.append(f"- 연관 노트: [{related_path.name}]({related_path.as_uri()})")
     return "\n".join(lines)
@@ -166,7 +192,9 @@ def _external_project_title(project_key: str, project_node_id: str | None, kg: o
                 return _snapshot_line(title)
         except Exception:
             pass
-    normalized = re.sub(r"[-_]+", " ", project_key.strip()).strip()
+    # digest 를 먼저 뗀다. 안 그러면 .title() 이 해시를 단어로 만들어
+    # "Session Agent Orchestration 88Eff352" 같은 제목이 나온다.
+    normalized = re.sub(r"[-_]+", " ", _display_project(project_key)).strip()
     return _snapshot_line(normalized.title() if normalized else "General")
 
 
@@ -262,12 +290,19 @@ def append_daily_checkpoint(
     project_node_id: str | None,
     external_daily_dir: str = "",
     journal_transcript: list[dict[str, object]] | None = None,
+    project_keys: list[str] | None = None,
 ) -> dict[str, object]:
+    """project_keys: 이 구간에 실제로 등장한 프로젝트 전부(많이 나온 순).
+
+    한 체크포인트 구간에 여러 프로젝트가 섞이는 게 예외가 아니라 기본이다.
+    대표 하나만 적으면 나머지 작업이 기록에서 사라진다.
+    """
     day = now.strftime("%Y-%m-%d")
     docs_root = Path(get_db_root_dir()) / "docs"
     engram_path = docs_root / "daily" / f"{day}.md"
     marker = f"engram-checkpoint:{checkpoint_id}"
-    project_label = project_node_id or project_key or "general"
+    observed = [_display_project(k) for k in (project_keys or []) if k]
+    project_label = project_node_id or (", ".join(observed) if observed else _display_project(project_key)) or "general"
     engram_block = _checkpoint_block(
         checkpoint_id,
         now,

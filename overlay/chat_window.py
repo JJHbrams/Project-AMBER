@@ -25,6 +25,7 @@ import win32process
 
 from overlay.config import get_cli_provider, get_workdir, load_cfg, normalize_cli_provider
 from overlay.cli_capabilities import supported_efforts
+from core.memory.scope import CONTINUUM_SCOPE
 
 ENGRAM_CMD = Path.home() / ".engram" / "engram-copilot.cmd"
 ENGRAM_ANTIGRAVITY_CMD = Path.home() / ".engram" / "engram-antigravity.cmd"
@@ -615,7 +616,7 @@ class ChatTerminal:
         # 모든 REPL 세션을 overlay scope로 통일 (STM 프로모터가 관찰 가능하도록)
         spawn_env = {
             **os.environ,
-            "ENGRAM_SCOPE_KEY": "overlay",
+            "ENGRAM_SCOPE_KEY": CONTINUUM_SCOPE,
             "ENGRAM_CLI_PROVIDER": provider,
         }
         spawn_env.update(launch_env)

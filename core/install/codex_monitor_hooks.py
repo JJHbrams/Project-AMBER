@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -160,7 +161,131 @@ def existing_roots(*, home=None, environ=None):
     return roots
 
 
-def configure_root(root, *, server='engram', apply=False, inspect=True, upgrade_native_identity=False, upgrade_subagent_activity=False):
+def _orca_runtime_root(root):
+    """Orca mirrors the system Codex root; it must never be a migration writer."""
+    return tuple(part.lower() for part in Path(root).parts[-3:]) == ('orca', 'codex-runtime-home', 'home')
+
+
+def _canonical_mcp_groups(server):
+    generated = generated_hooks(server, subagent_activity=True)
+    return {event: generated[event][0] for event in EVENTS}
+
+
+def _owned_group(group, event, server):
+    return (isinstance(group, dict) and isinstance(group.get('hooks'), list) and any(
+        isinstance(handler, dict) and handler.get('type') == 'mcp_tool'
+        and handler.get('server') == server and handler.get('tool') == TOOL
+        for handler in group['hooks']))
+
+
+def _migration_plan(document, config, server):
+    """Return JSON after removing exactly the eight current standalone groups.
+
+    A matching inline set means an earlier successful migration and is idempotent.
+    Any partial, duplicate, or edited owned definition is deliberately ambiguous.
+    """
+    if not isinstance(document, dict) or not isinstance(document.get('hooks', {}), dict):
+        raise ValueError('hooks document must be an object')
+    canonical = _canonical_mcp_groups(server)
+    inline = config.get('hooks', {})
+    if not isinstance(inline, dict):
+        raise HookConflict('invalid-inline-hooks')
+    inline_owned = {event: [group for group in inline.get(event, []) if _owned_group(group, event, server)]
+                    for event in EVENTS}
+    inline_count = sum(map(len, inline_owned.values()))
+    if inline_count:
+        if any(len(inline_owned[event]) != 1 or inline_owned[event][0] != canonical[event] for event in EVENTS):
+            raise HookConflict('modified-or-partial-inline-monitor-definition-preserved')
+        # JSON must already have no owned definition. Otherwise two active sources exist.
+        if any(_owned_group(group, event, server) for event in EVENTS
+               for group in document['hooks'].get(event, [])):
+            raise HookConflict('duplicate-inline-and-json-monitor-definition-preserved')
+        return copy.deepcopy(document), False
+    result = copy.deepcopy(document)
+    for event in EVENTS:
+        groups = result['hooks'].get(event)
+        if not isinstance(groups, list):
+            raise HookConflict('missing-monitor-definition-preserved')
+        matches = [group for group in groups if _owned_group(group, event, server)]
+        if len(matches) != 1 or matches[0] != canonical[event]:
+            raise HookConflict('modified-or-duplicate-monitor-definition-preserved')
+        # Keep the array slot as an inert group. Orca keys unrelated command
+        # approvals by source group index; deleting index 0 would re-key every
+        # following user handler and discard its existing trust decision.
+        result['hooks'][event] = [({'hooks': []} if group is matches[0] else group) for group in groups]
+    return result, True
+
+
+def _toml_mcp_groups(server):
+    lines = ['# Engram-owned native Codex MCP monitor hooks. Do not edit these groups.']
+    for event, group in _canonical_mcp_groups(server).items():
+        handler = group['hooks'][0]
+        lines += [f'[[hooks.{event}]]', f'[[hooks.{event}.hooks]]',
+                  'type = "mcp_tool"', f'server = {json.dumps(handler["server"])}',
+                  f'tool = {json.dumps(handler["tool"])}', 'timeout = 2', '[hooks.' + event + '.hooks.input]']
+        for key, value in handler['input'].items():
+            lines.append(f'{key} = {json.dumps(value)}')
+        lines.append('')
+    return '\n'.join(lines)
+
+
+def _atomic_bytes(path, body):
+    fd, temporary = tempfile.mkstemp(prefix='.engram-codex-migration-', dir=path.parent)
+    try:
+        with os.fdopen(fd, 'wb') as stream:
+            stream.write(body); stream.flush(); os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary): os.unlink(temporary)
+
+
+def _immutable_backup(path, body):
+    with path.open('xb') as stream:
+        stream.write(body); stream.flush(); os.fsync(stream.fileno())
+    if path.read_bytes() != body:
+        raise ValueError('backup verification failed')
+
+
+def _recover_interrupted_migration(root, config_path, hooks_path, *, apply):
+    """Rollback only the known config-first partial state recorded by our journal."""
+    journal = root / '.engram-codex-hook-migration.json'
+    if not journal.exists():
+        return
+    record = json.loads(_read(journal).strip())
+    token = str(record.get('token', ''))
+    names = (str(record.get('config_backup', '')), str(record.get('hooks_backup', '')))
+    expected = (f'config.toml.engram-monitor-backup-{token}', f'hooks.json.engram-monitor-backup-{token}')
+    if not re.fullmatch(r'[0-9a-f]{32}', token) or names != expected:
+        raise ValueError('invalid migration journal')
+    config_backup, hooks_backup = (root / name for name in names)
+    if not config_backup.is_file() or not hooks_backup.is_file():
+        raise ValueError('incomplete migration journal')
+    before_config, before_hooks = config_backup.read_bytes(), hooks_backup.read_bytes()
+    if (hashlib.sha256(before_config).hexdigest() != record.get('config_sha256') or
+            hashlib.sha256(before_hooks).hexdigest() != record.get('hooks_sha256')):
+        raise ValueError('migration backup hash mismatch')
+    current_config, current_hooks = _read(config_path, binary=True), _read(hooks_path, binary=True)
+    if current_config == before_config and current_hooks == before_hooks:
+        if apply: journal.unlink()
+        return
+    if (hashlib.sha256(current_config).hexdigest() == record.get('new_config_sha256') and
+            hashlib.sha256(current_hooks or b'').hexdigest() == record.get('new_hooks_sha256')):
+        if apply: journal.unlink()
+        return
+    # The only automatic recovery is the safe, observed config-first partial:
+    # JSON remains exactly original and TOML now contains our complete groups.
+    parsed = tomllib.loads(current_config.decode('utf-8-sig'))
+    inline = parsed.get('hooks', {})
+    if current_hooks == before_hooks and all(
+        inline.get(event, []).count(group) == 1 for event, group in _canonical_mcp_groups('engram').items()):
+        if not apply:
+            raise ValueError('incomplete migration requires apply recovery')
+        _atomic_bytes(config_path, before_config); journal.unlink()
+        return
+    raise ValueError('incomplete migration requires manual recovery')
+
+
+def configure_root(root, *, server='engram', apply=False, inspect=True, upgrade_native_identity=False, upgrade_subagent_activity=False, migration=False):
     root = Path(root).absolute()
     if root.is_symlink() or getattr(root, 'is_junction', lambda: False)():
         raise ValueError('linked configuration root unsupported')
@@ -173,60 +298,93 @@ def configure_root(root, *, server='engram', apply=False, inspect=True, upgrade_
               'reason': 'configuration-root-missing'}
     if config_before is None:
         return result  # Never create unrelated provider roots.
+    if _orca_runtime_root(root):
+        return {**result, 'reason': 'orca-runtime-root-deferred-to-system-root',
+                'status': 'deferred', 'review_instruction':
+                'Orca mirrors the system Codex configuration. Migrate the system ~/.codex root, then refresh Orca.'}
+    if migration:
+        _recover_interrupted_migration(root, config_path, root / 'hooks.json', apply=apply)
+    config_before = _read(config_path, binary=True)
     config = tomllib.loads(config_before.decode('utf-8-sig'))
     features = config.get('features', {})
     if features.get('hooks', features.get('codex_hooks', True)) is False:
         return {**result, 'reason': 'user-disabled-hooks', 'status': 'disabled'}
-    for groups in config.get('hooks', {}).values():
-        if isinstance(groups, list) and any(
-            isinstance(group, dict) and any(isinstance(h, dict) and
-                h.get('tool') == TOOL and h.get('server') == server
-                for h in group.get('hooks', [])) for group in groups
-        ):
-            return {**result, 'reason': 'inline-monitor-hooks-preserved', 'conflict': True,
+    path = root / 'hooks.json'; original = _read(path, binary=True)
+    document = json.loads(original.decode('utf-8-sig')) if original is not None else {'hooks': {}}
+    if not migration:
+        inline_owned = any(_owned_group(group, event, server) for event in EVENTS
+                           for group in config.get('hooks', {}).get(event, []))
+        if inline_owned:
+            try:
+                _migration_plan(document, config, server)
+            except HookConflict:
+                return {**result, 'reason': 'inline-monitor-hooks-preserved', 'conflict': True,
+                        'status': 'conflict'}
+            status = inspect_root(root, server=server) if inspect else {'status':'unknown','trust_required':False,'reason':'native-status-not-inspected'}
+            return {**result, **status, 'changed': False, 'applied': False, 'hook_count': len(EVENTS) + 1}
+        try:
+            merged = merge_settings(document, server, upgrade_native_identity=upgrade_native_identity,
+                                    upgrade_subagent_activity=upgrade_subagent_activity or original is None)
+        except HookConflict:
+            return {**result, 'reason': 'modified-monitor-definition-preserved', 'conflict': True,
                     'status': 'conflict', 'review_instruction':
-                    'Existing inline monitor hooks were preserved. Inspect the definitions in '
-                    + str(config_path) + ' before changing them. ' + result['review_instruction']}
-    path = root / 'hooks.json'
-    original = _read(path, binary=True)
-    document = json.loads(original.decode('utf-8-sig')) if original is not None else {}
-    # A genuinely new Codex root receives the complete current contract.  An
-    # existing hooks.json keeps its supported legacy shape unless the user
-    # explicitly requests the trust-changing subagent upgrade.
-    install_subagent_activity = upgrade_subagent_activity or original is None
+                    'User-modified monitor hooks were preserved. Inspect the definitions before changing them. '
+                    + result['review_instruction']}
+        changed = merged != document
+        if apply and changed:
+            if original is not None:
+                with path.with_name(path.name + '.engram-monitor-backup-' + uuid.uuid4().hex).open('xb') as stream: stream.write(original)
+            if _read(path, binary=True) != original or _read(config_path, binary=True) != config_before:
+                raise ValueError('configuration changed during apply')
+            _atomic_bytes(path, (json.dumps(merged, ensure_ascii=False, indent=2) + '\n').encode())
+        status = inspect_root(root, server=server) if inspect and (apply or not changed) else {'status':'unknown','trust_required':False,'reason':'planned-hooks-not-inspected'}
+        return {**result, **status, 'changed': changed, 'applied': bool(apply), 'hook_count': len(EVENTS) + 1}
     try:
-        merged = merge_settings(document, server, upgrade_native_identity=upgrade_native_identity,
-                                upgrade_subagent_activity=install_subagent_activity)
+        inline_owned = any(_owned_group(group, event, server) for event in EVENTS
+                           for group in config.get('hooks', {}).get(event, []))
+        if original is None and not inline_owned:
+            merged, migrate = {'hooks': {'SessionStart': generated_hooks(server)['SessionStart']}}, True
+        else:
+            merged, migrate = _migration_plan(document, config, server)
     except HookConflict:
         return {**result, 'reason': 'modified-monitor-definition-preserved', 'conflict': True,
                 'status': 'conflict', 'review_instruction':
                 'User-modified monitor hooks were preserved. Inspect the definitions in '
                 + str(path) + ' before changing them. ' + result['review_instruction']}
-    changed = merged != document
+    changed = migrate
     if apply and changed:
-        if original is not None:
-            backup = path.with_name(path.name + '.engram-monitor-backup-' + uuid.uuid4().hex)
-            with backup.open('xb') as stream:
-                stream.write(original)
-        fd, temporary = tempfile.mkstemp(prefix='.engram-codex-hooks-', dir=root)
-        try:
-            with os.fdopen(fd, 'w', encoding='utf-8') as stream:
-                json.dump(merged, stream, ensure_ascii=False, indent=2)
-                stream.write('\n')
-                stream.flush()
-                os.fsync(stream.fileno())
-            if _read(path, binary=True) != original or _read(config_path, binary=True) != config_before:
-                raise ValueError('configuration changed during apply')
-            os.replace(temporary, path)
-        finally:
-            if os.path.exists(temporary):
-                os.unlink(temporary)
+        token = uuid.uuid4().hex
+        config_backup = config_path.with_name(config_path.name + '.engram-monitor-backup-' + token)
+        hooks_backup = path.with_name(path.name + '.engram-monitor-backup-' + token)
+        # Exclusive creation makes a UUID collision or pre-existing recovery
+        # artifact a hard stop instead of overwriting a user's only snapshot.
+        _immutable_backup(config_backup, config_before)
+        _immutable_backup(hooks_backup, original or b'{}\n')
+        # Keep every original config byte, including whitespace following
+        # [hooks.state], and add only a syntactic separator plus owned tables.
+        separator = b'\n' if config_before.endswith(b'\n') else b'\n\n'
+        new_config = config_before + separator + _toml_mcp_groups(server).encode('utf-8') + b'\n'
+        new_json = (json.dumps(merged, ensure_ascii=False, indent=2) + '\n').encode('utf-8')
+        journal = root / '.engram-codex-hook-migration.json'
+        record = {'phase': 'prepared', 'token': token, 'config_sha256': hashlib.sha256(config_before).hexdigest(),
+                  'hooks_sha256': hashlib.sha256(original or b'{}\n').hexdigest(),
+                  'new_config_sha256': hashlib.sha256(new_config).hexdigest(),
+                  'new_hooks_sha256': hashlib.sha256(new_json).hexdigest(),
+                  'config_backup': config_backup.name, 'hooks_backup': hooks_backup.name}
+        _atomic_bytes(journal, (json.dumps(record, sort_keys=True) + '\n').encode())
+        if _read(path, binary=True) != original or _read(config_path, binary=True) != config_before:
+            raise ValueError('configuration changed during apply')
+        _atomic_bytes(config_path, new_config)
+        record['phase'] = 'config-written'; _atomic_bytes(journal, (json.dumps(record, sort_keys=True) + '\n').encode())
+        _atomic_bytes(path, new_json)
+        record['phase'] = 'complete'; _atomic_bytes(journal, (json.dumps(record, sort_keys=True) + '\n').encode())
+        # A completed migration needs only its immutable snapshots.  Leaving a
+        # journal would make later legitimate Codex edits look interrupted.
+        journal.unlink()
     status = inspect_root(root, server=server) if inspect and (apply or not changed) else {
         'status': 'unknown', 'trust_required': False, 'reason': 'planned-hooks-not-inspected'}
     return {**result, **status, 'changed': changed, 'applied': bool(apply),
-            'hook_count': len(EVENTS) - len(SUBAGENT_EVENTS) + 1 + sum(
-                generated_hooks(server, subagent_activity=True)[event][0] in merged.get('hooks', {}).get(event, [])
-                for event in SUBAGENT_EVENTS)}
+            'hook_count': len(EVENTS) + 1}
 
 
 def compatibility():
@@ -269,20 +427,81 @@ def provision(roots=None, *, server='engram', apply=False, upgrade_native_identi
             'root_count': len(results)}
 
 
+def migrate_system_root(*, home=None, server='engram', apply=False, inspect=True):
+    """Migrate only ~/.codex; Orca projects this root into its runtime home."""
+    root = (Path.home() if home is None else Path(home)) / '.codex'
+    result = configure_root(root, server=server, apply=apply, inspect=inspect, migration=True)
+    return {'authority': 'system-codex-root', 'root': str(root), 'result': result,
+            'trust_autoapproved': False}
+
+
+def repair_migrated_system_root(*, home=None, server='engram', apply=False):
+    """Restore inert JSON slots after an older migration deleted them.
+
+    This is intentionally narrow: an original immutable backup, the exact
+    inline target, and the exact old deletion-form JSON must all agree.
+    """
+    root = (Path.home() if home is None else Path(home)) / '.codex'
+    config_path, hooks_path = root / 'config.toml', root / 'hooks.json'
+    config_bytes, current = _read(config_path, binary=True), _read(hooks_path, binary=True)
+    result = {'root': str(root), 'changed': False, 'applied': False, 'trust_autoapproved': False}
+    if config_bytes is None or current is None: return {**result, 'reason': 'repair-source-missing'}
+    config, current_doc = tomllib.loads(config_bytes.decode('utf-8-sig')), json.loads(current.decode('utf-8-sig'))
+    candidates = []
+    for backup in root.glob('hooks.json.engram-monitor-backup-*'):
+        token = backup.name.removeprefix('hooks.json.engram-monitor-backup-')
+        paired = root / ('config.toml.engram-monitor-backup-' + token)
+        if re.fullmatch(r'[0-9a-f]{32}', token) and paired.is_file(): candidates.append(backup)
+    if len(candidates) != 1: return {**result, 'reason': 'repair-backup-ambiguous'}
+    original = json.loads(candidates[0].read_text(encoding='utf-8-sig'))
+    canonical = _canonical_mcp_groups(server)
+    inline = config.get('hooks', {})
+    if any(inline.get(event, []).count(group) != 1 for event, group in canonical.items()):
+        return {**result, 'reason': 'repair-semantic-mismatch'}
+    desired, migrated = copy.deepcopy(original), True
+    for event, group in canonical.items():
+        matches = [item for item in desired.get('hooks', {}).get(event, []) if _owned_group(item, event, server)]
+        if len(matches) != 1 or matches[0] != group:
+            return {**result, 'reason': 'repair-semantic-mismatch'}
+        desired['hooks'][event] = [({'hooks': []} if item is matches[0] else item)
+                                   for item in desired['hooks'][event]]
+    legacy = copy.deepcopy(original)
+    for event in EVENTS:
+        legacy['hooks'][event] = [group for group in legacy['hooks'][event]
+                                  if not _owned_group(group, event, server)]
+    if not migrated or current_doc != legacy:
+        return {**result, 'reason': 'repair-current-json-mismatch'}
+    result['changed'] = True
+    if apply:
+        backup = hooks_path.with_name(hooks_path.name + '.engram-monitor-repair-backup-' + uuid.uuid4().hex)
+        _immutable_backup(backup, current)
+        if _read(config_path, binary=True) != config_bytes or _read(hooks_path, binary=True) != current:
+            raise ValueError('configuration changed during repair')
+        _atomic_bytes(hooks_path, (json.dumps(desired, ensure_ascii=False, indent=2) + '\n').encode())
+        result['applied'] = True
+    return {**result, 'reason': 'repair-ready'}
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--root', type=Path, action='append')
     parser.add_argument('--server', default='engram')
     parser.add_argument('--provision', action='store_true')
+    parser.add_argument('--migrate-system-root', action='store_true',
+                        help='Migrate only ~/.codex hooks.json into inline config.toml hooks.')
+    parser.add_argument('--repair-migrated-system-root', action='store_true')
     parser.add_argument('--apply', action='store_true')
     parser.add_argument('--upgrade-native-identity', action='store_true', help='Explicit one-time hook identity upgrade; changed hooks need native trust review.')
     parser.add_argument('--upgrade-subagent-activity', action='store_true', help='Explicit child lifecycle upgrade; implies native identity and requires hook review.')
     args = parser.parse_args(argv)
     try:
-        result = provision(args.root, server=args.server, apply=args.apply, upgrade_native_identity=args.upgrade_native_identity, upgrade_subagent_activity=args.upgrade_subagent_activity)
+        result = (repair_migrated_system_root(server=args.server, apply=args.apply)
+                  if args.repair_migrated_system_root else migrate_system_root(server=args.server, apply=args.apply)
+                  if args.migrate_system_root else provision(args.root, server=args.server, apply=args.apply, upgrade_native_identity=args.upgrade_native_identity, upgrade_subagent_activity=args.upgrade_subagent_activity))
         print(json.dumps(result))
-        for root in result['roots']:
-            if root['status'] != 'ready':
+        review_roots = result.get('roots', [result['result']] if 'result' in result else [])
+        for root in review_roots:
+            if root.get('status') != 'ready':
                 print('Codex hooks: ' + root['status'] + ' (' + root['reason'] + '). '
                       + root['review_instruction'], file=sys.stderr)
     except (OSError, ValueError, TypeError) as exc:

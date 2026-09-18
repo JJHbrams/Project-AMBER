@@ -39,6 +39,7 @@ from core.integrations.engram_bootstrap import (
     render_session_start_powershell_script,
 )
 from core.integrations.remote_agent_policy import policy_payload
+from core.memory.scope import CONTINUUM_SCOPE
 
 # MCP 도구만 사용하는 skill — 원격에서 그대로 동작한다.
 #
@@ -80,7 +81,7 @@ def render_session_start_script(
     *,
     remote_os: str = "posix",
     caller: str = "claude-code",
-    scope_key: str = "overlay",
+    scope_key: str = CONTINUUM_SCOPE,
 ) -> str:
     """원격 SessionStart hook 이 실행하는 스크립트.
 
@@ -148,7 +149,7 @@ def build_remote_payload(
     *,
     remote_os: str = "posix",
     caller: str = "claude-code",
-    scope_key: str = "overlay",
+    scope_key: str = CONTINUUM_SCOPE,
 ) -> dict[str, object]:
     if remote_os not in _HOOK_TARGETS:
         raise ValueError(f"unsupported remote_os '{remote_os}'")
@@ -565,7 +566,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--host", default="", help="--emit record 용 ssh 호스트")
     parser.add_argument("--remote-python", default="", help="--emit record 용 원격 파이썬 경로")
     parser.add_argument("--repo-root", default=str(Path(__file__).resolve().parents[2]))
-    parser.add_argument("--scope-key", default="overlay")
+    parser.add_argument("--scope-key", default=CONTINUUM_SCOPE)
     parser.add_argument("--remote-os", default="posix", choices=sorted(_HOOK_TARGETS))
     args = parser.parse_args(argv)
 

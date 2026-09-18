@@ -1,4 +1,6 @@
 import os
+
+import pytest
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -20,6 +22,7 @@ class RuntimeConfigTests(unittest.TestCase):
 
     @patch("core.config.runtime_config.resolve_runtime_path", return_value="config/config.yaml")
     @patch("core.config.runtime_config._read_yaml")
+    @pytest.mark.no_engram_isolation
     def test_get_db_root_dir_prefers_user_config_over_env(self, mock_read_yaml, mock_resolve_runtime_path):
         mock_read_yaml.side_effect = [
             {"db": {"root_dir": "E:/engram-root"}},

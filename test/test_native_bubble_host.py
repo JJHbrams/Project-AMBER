@@ -101,10 +101,31 @@ class HostTests(unittest.TestCase):
         self.assertEqual((h.rects['input']['width'],h.rects['input']['height']),(1200,800))
 
     def test_negative_monitor_anchor_is_not_clamped_to_primary(self):
+        from unittest.mock import patch
         self.host.get_anchor=lambda:(-1000,-300,100,100)
-        self.host.refresh_positions()
+        # A monitor left of the primary one: the anchor sits on its right half,
+        # so the bubbles open left and must keep their negative coordinates.
+        with patch('overlay.bubble.native_host.geometry.get_monitor_work_rect',return_value=(-1920,-400,0,680)):
+            self.host.refresh_positions()
         self.assertEqual(self.host.rects['input']['x'],-1465)
         self.assertEqual(self.host.rects['input']['y'],-300)
+
+    def test_bubbles_mirror_to_the_side_away_from_the_screen_centre(self):
+        from unittest.mock import patch
+        h=self.host;h.get_anchor=lambda:(800,600,100,100)
+        with patch('overlay.bubble.native_host.geometry.get_monitor_work_rect',return_value=(0,0,1600,1000)):
+            h.refresh_positions()
+        # Right half of the monitor -> bubbles open to the left of the character.
+        self.assertEqual(h.rects['input']['x'],800-460-5)
+        self.assertEqual(h.rects['thought']['x'],800-20)
+        self.assertLess(h.rects['speech']['x']+h.rects['speech']['width'],900)
+        h.get_anchor=lambda:(200,600,100,100)
+        with patch('overlay.bubble.native_host.geometry.get_monitor_work_rect',return_value=(0,0,1600,1000)):
+            h.refresh_positions()
+        # Left half -> mirrored to the right, with the same gaps.
+        self.assertEqual(h.rects['input']['x'],200+100+5)
+        self.assertEqual(h.rects['thought']['x'],200+100+20-h.rects['thought']['width'])
+        self.assertGreater(h.rects['speech']['x'],300)
 
     def test_passive_and_dpi_do_not_persist_manual_geometry(self):
         h=self.host
@@ -118,7 +139,10 @@ class HostTests(unittest.TestCase):
         h._geometry(dict(window='input',x=100,y=200,width=700,height=500,scale=1,origin='user_drag'))
         h.refresh_positions();self.assertEqual(h.rects['input']['x'],100);self.assertEqual(h.rects['input']['width'],460)
         h._geometry(dict(window='speech',x=10,y=20,width=700,height=500,scale=1,origin='user_resize'))
-        h.refresh_positions();self.assertEqual(h.rects['speech']['x'],335);self.assertEqual(h.rects['speech']['width'],700)
+        from unittest.mock import patch
+        with patch('overlay.bubble.native_host.geometry.get_monitor_work_rect',return_value=(0,0,1600,1000)):
+            h.refresh_positions()
+        self.assertEqual(h.rects['speech']['x'],95);self.assertEqual(h.rects['speech']['width'],700)
 
     def test_invalid_geometry_and_auto_height_cannot_replace_manual_size(self):
         h=self.host;h._geometry(None);h._geometry(dict(window='input',x=float('nan')))
@@ -202,23 +226,64 @@ class HostTests(unittest.TestCase):
         self.assertFalse(h._nudge['replied']);self.assertTrue(h.speech['nudge']);self.assertEqual(events.count('closed'),3)
 
     def test_manual_geometry_round_trips_anchor_position_and_logical_size(self):
+        from unittest.mock import patch
         store={}
         def update(mutator): mutator(store)
         h=NativeBubbleHost(schedule=lambda *_:None,get_session=lambda:self.provider,
             get_anchor=lambda:(100,200,200,100),shell_factory=Shell,
             geometry_state_getter=lambda:store,geometry_state_updater=update)
-        h._geometry({'window':'thought','x':0,'y':150,'width':600,'height':300,'scale':2,'origin':'user_drag'})
-        h._geometry({'window':'thought','x':0,'y':150,'width':600,'height':300,'scale':2,'origin':'user_resize'})
-        self.assertEqual(store['native_bubble_geometry']['thought']['position'],{'dx':-0.5,'dy':-0.5})
-        self.assertEqual(store['native_bubble_geometry']['thought']['size'],{'width':300.0,'height':150.0})
-        restored=NativeBubbleHost(schedule=lambda *_:None,get_session=lambda:self.provider,
-            get_anchor=lambda:(-500,400,400,200),shell_factory=Shell,
-            geometry_state_getter=lambda:store,geometry_state_updater=update)
-        restored.refresh_positions()
+        # Left half of the monitor, so the drag is recorded against side 'right'.
+        with patch('overlay.bubble.native_host.geometry.get_monitor_work_rect',return_value=(0,0,1600,1000)):
+            h._geometry({'window':'thought','x':0,'y':150,'width':600,'height':300,'scale':2,'origin':'user_drag'})
+            h._geometry({'window':'thought','x':0,'y':150,'width':600,'height':300,'scale':2,'origin':'user_resize'})
+            self.assertEqual(store['native_bubble_geometry']['thought']['position'],{'dx':-0.5,'dy':-0.5,'side':'right'})
+            self.assertEqual(store['native_bubble_geometry']['thought']['size'],{'width':300.0,'height':150.0})
+            restored=NativeBubbleHost(schedule=lambda *_:None,get_session=lambda:self.provider,
+                get_anchor=lambda:(-500,400,400,200),shell_factory=Shell,
+                geometry_state_getter=lambda:store,geometry_state_updater=update)
+            # Same side ('right'): the stored offset applies unchanged.
+            restored.refresh_positions()
         self.assertEqual((restored.rects['thought']['x'],restored.rects['thought']['y']),(-700,300))
         self.assertEqual((restored.rects['thought']['width'],restored.rects['thought']['height']),(300,150))
         restored._geometry({'window':'thought','x':-700,'y':300,'width':600,'height':300,'scale':2,'origin':'dpi'})
         self.assertEqual((restored.rects['thought']['width'],restored.rects['thought']['height']),(600,300))
+
+    def test_dragged_offset_mirrors_when_the_character_changes_screen_half(self):
+        from unittest.mock import patch
+        store={};h=self.host
+        h._manual_rects.clear();h.manual_position.clear();h.manual_size.clear()
+        h._geometry_state_getter=lambda:store
+        h._geometry_state_updater=lambda mutator:mutator(store)
+        h.get_anchor=lambda:(200,600,100,100)
+        # Dragged 300px to the right of a character sitting on the left half.
+        with patch('overlay.bubble.native_host.geometry.get_monitor_work_rect',return_value=(0,0,1600,1000)):
+            h._geometry({'window':'speech','x':600,'y':500,'width':400,'height':200,'scale':1,'origin':'user_drag'})
+            h._geometry({'window':'speech','x':600,'y':500,'width':400,'height':200,'scale':1,'origin':'user_resize'})
+            self.assertEqual(store['native_bubble_geometry']['speech']['position']['side'],'right')
+            h.refresh_positions()
+            self.assertEqual(h.rects['speech']['x'],600)
+            # Same character, now on the right half: the offset reflects across
+            # the character's centre line, keeping the 300px gap.
+            h.get_anchor=lambda:(1300,600,100,100)
+            h.refresh_positions()
+            # 300px gap preserved, now on the other side: 1300-300-400.
+            self.assertEqual(h.rects['speech']['x'],600)
+            # Back again, from the stored value rather than the mirrored one.
+            h.get_anchor=lambda:(200,600,100,100)
+            h.refresh_positions()
+            self.assertEqual(h.rects['speech']['x'],600)
+
+    def test_legacy_drag_without_a_side_infers_it_from_the_offset(self):
+        from unittest.mock import patch
+        store={'native_bubble_geometry':{'speech':{'position':{'dx':-4.0,'dy':-1.0},'size':{'width':400,'height':200}}}}
+        h=NativeBubbleHost(schedule=lambda *_:None,get_session=lambda:self.provider,
+            get_anchor=lambda:(200,600,100,100),shell_factory=Shell,
+            geometry_state_getter=lambda:store,geometry_state_updater=lambda _:None)
+        # Sat left of the character, so it was dragged while on the right half.
+        # The character is on the left half now, so it mirrors to the right.
+        with patch('overlay.bubble.native_host.geometry.get_monitor_work_rect',return_value=(0,0,1600,1000)):
+            h.refresh_positions()
+        self.assertEqual(h.rects['speech']['x'],300)
 
     def test_malformed_geometry_and_passive_dpi_are_not_persisted(self):
         store={'native_bubble_geometry':{'input':{'position':{'dx':'bad','dy':0},'size':{'width':float('nan'),'height':20}},'speech':[1]}}

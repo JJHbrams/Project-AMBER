@@ -17,8 +17,13 @@ memory:
     default_global: "global:main"
     project_prefix: "project:"
     discord_prefix: "discord:"
+    # project_key -> KG node id. 여기 적힌 노드는 자동 체크포인트가
+    # ## Progress 를 실제로 덮어쓰므로, 프로젝트의 대표 노트(index/overview)만
+    # 적는다. 하위 설계 문서를 적으면 무관한 기록이 그 문서에 쌓인다 —
+    # 2026-09-17 이전에는 graph-memory-roadmap(하위 설계 문서)을 가리켜
+    # daily note 33건과 그 문서의 Progress 가 오염됐다.
     kg_node_map:
-      projectintelcontunuum: graph-memory-roadmap
+      projectintelcontunuum: project-amber-project-engram
 
   short_term:
     limit_turns: 8

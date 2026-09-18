@@ -332,7 +332,13 @@ class _STMHandler(BaseHTTPRequestHandler):
             scope_key = body.get("scope_key")
             role = body.get("role", "user")
             content = body.get("content", "")
-            # scope_key로 session_id 자동 resolve
+            # LLM 대화 단위로 세션을 묶는다. native id 가 오면 그 대화 전용
+            # 세션을 찾거나 만들고, 없을 때만 예전처럼 scope 안 최신 세션으로
+            # 떨어진다 — scope fallback 은 모든 대화를 한 세션에 뭉친다.
+            native_session_id = str(body.get("native_session_id") or "").strip()
+            if session_id is None and native_session_id:
+                from core.memory.store import resolve_session_id_by_native
+                session_id = resolve_session_id_by_native(native_session_id, scope_key)
             if session_id is None and scope_key:
                 from core.memory import resolve_session_id_by_scope
                 session_id = resolve_session_id_by_scope(scope_key)
@@ -340,7 +346,12 @@ class _STMHandler(BaseHTTPRequestHandler):
                 self._send_json({"error": "session_id 또는 scope_key가 필요합니다."}, 400)
                 return
             try:
-                save_message(int(session_id), role, content)
+                save_message(
+                    int(session_id), role, content,
+                    source_uuid=str(body.get("source_uuid") or "") or None,
+                    source_ts=str(body.get("source_ts") or "") or None,
+                    source_cwd=str(body.get("source_cwd") or "") or None,
+                )
                 self._send_json({"status": "ok"})
             except ValueError as e:
                 if "not open" in str(e):

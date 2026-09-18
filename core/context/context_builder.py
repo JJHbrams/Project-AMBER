@@ -226,7 +226,7 @@ async def build_system_prompt(user_query: str = "", caller: str = "all", scope_k
     themes = get_themes(5)
     theme_str = ", ".join(f"{t[0]}({t[1]:.1f})" for t in themes) if themes else "없음"
 
-    persona_section = render_persona(persona)
+    persona_section = render_persona(persona, include_examples=True)
     narrative = identity.get("narrative", "")
 
     # 지침 — caller에 맞는 활성 지침 + user_query 트리거 기반 필터링

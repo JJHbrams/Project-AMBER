@@ -17,6 +17,7 @@ from core.memory import close_session
 from core.memory.store import session_has_external_journal_eligibility
 from core.storage.db import get_connection
 from core.config.runtime_config import get_cfg_value
+from core.memory.scope import CONTINUUM_SCOPE
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +32,7 @@ except Exception as _import_err:  # pragma: no cover - STM 모듈 자체가 없�
 
 
 class StmBridge:
-    def __init__(self, scope_key: str = "overlay"):
+    def __init__(self, scope_key: str = CONTINUUM_SCOPE):
         self._scope_key = scope_key
         self._session: "Optional[MemorySession]" = None
 

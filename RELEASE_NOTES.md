@@ -1,5 +1,50 @@
 # Release Notes
 
+## 2026-09-18 - v1.5.20: Persona by Example and Per-Conversation Sessions
+
+### Highlights
+
+- The persona is learned from example utterances instead of adjectives.
+  Examples accumulate from real conversation, the person can correct or delete
+  them, many short exemplars are preferred over a few long ones, and what
+  provoked an utterance is recorded with it.
+- Each LLM conversation gets its own Engram session, and conversation history
+  is separated by project tag rather than by splitting the store. Checkpoints
+  carry the directories the work happened in.
+- Identity is delivered only through the `engram_get_context` response. No copy
+  is kept in `~/.claude/CLAUDE.md` or `~/.codex/AGENTS.md`; a leftover block is
+  cleared once at startup with a backup and an atomic replace. A session
+  without an Engram connection should have no persona. This copy path was added
+  and removed within the same development cycle, so behavior is unchanged for
+  users of the 1.5.19 installer.
+- Codex hook migration is inline, idempotent, and safe under dry runs. The test
+  suite no longer writes to the user's real database or home directory.
+
+### Validation and caveats
+
+- Curated public source is synchronized from Engram `5d129c9` for release build
+  `1.5.20.825`.
+- The full source suite result was 1,338 passed, 34 failed, 4 skipped, and 173
+  subtests passed. The same 34 test IDs also fail on the pre-change baseline
+  under identical isolation, so this release introduces no new source-test
+  failures; this does not establish identical failure causes.
+  `test/test_semantic_ep_to_kg_metadata.py` was excluded because the `kuzu`
+  module is absent from the build environment, which also accounts for a
+  majority of the 34 failures.
+- The frozen release build passed its own role smoke checks for
+  embedding-check, mcp-server, kg-watcher, overlay, and the dashboard sidecar.
+- No disposable-profile, setup-installed runtime smoke was performed. Real
+  provider connection, image/approval flows, and multi-DPI Windows visual
+  behavior remain UNVERIFIED in the frozen release runtime.
+
+### Upgrade
+
+- Install `AMBER_1.5.20.825_x64-setup.exe` (214,837,625 bytes) over the
+  existing version. Its SHA-256 is
+  `A4138EFD209E06F9855AAFE3CB252657EE318A2D0300F77D81A96702EF78135C`.
+- The frozen EXE and Inno installer report ProductVersion `1.5.20.825`; the
+  frozen build manifest records source `5d129c9`.
+
 ## 2026-09-13 - v1.5.19: Bubble Bootstrap and Codex Recovery
 
 ### Highlights

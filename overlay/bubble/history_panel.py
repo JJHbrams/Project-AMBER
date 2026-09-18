@@ -10,6 +10,7 @@ import tkinter.ttk as ttk
 import urllib.parse
 import urllib.request
 from typing import Callable, Optional
+from core.memory.scope import CONTINUUM_SCOPE
 
 
 class HistoryPanel:
@@ -17,7 +18,7 @@ class HistoryPanel:
         self,
         root: tk.Tk,
         get_stm_port: Callable[[], Optional[int]],
-        scope_key: str = "overlay",
+        scope_key: str = CONTINUUM_SCOPE,
         cfg_bubble: Optional[dict] = None,
         get_anchor_rect: Optional[Callable[[], tuple[int, int, int, int]]] = None,
         on_visibility: Optional[Callable[[bool], None]] = None,

@@ -34,6 +34,7 @@ from datetime import datetime
 from typing import Callable, Optional, Protocol
 
 from overlay.reaction_badge import is_memory_tool_name, public_event
+from core.memory.scope import CONTINUUM_SCOPE
 
 logger = logging.getLogger(__name__)
 
@@ -277,7 +278,7 @@ class UnfinishedWorkSource:
 
     key = "unfinished"
 
-    def __init__(self, scope_key: str = "overlay"):
+    def __init__(self, scope_key: str = CONTINUUM_SCOPE):
         self._scope_key = scope_key
 
     def poll(self) -> Optional[Nudge]:
@@ -412,7 +413,7 @@ def make_persona_phraser(timeout_sec: float = 25.0) -> Callable[[str, str], Opti
     return phrase
 
 
-def default_sources(get_workdir: Callable[[], str], scope_key: str = "overlay") -> list[SourceProvider]:
+def default_sources(get_workdir: Callable[[], str], scope_key: str = CONTINUUM_SCOPE) -> list[SourceProvider]:
     """우선순위 순서(_SOURCE_ORDER)와 맞춰 기본 소스 묶음을 만든다."""
     return [
         MemoryEventSource(),

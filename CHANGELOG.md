@@ -4,6 +4,48 @@ All notable changes to this project are documented in this file.
 
 ## Unreleased
 
+## [1.5.20] — 2026-09-18
+
+### Added
+
+- The persona is learned from **example utterances** rather than adjectives.
+  Examples accumulate from real conversation, the person can correct or delete
+  them, and many short exemplars are preferred over a few long ones. What
+  provoked an utterance (a user turn, a situation, or source material) is
+  recorded alongside it.
+- Each LLM conversation gets its own Engram session, so separate conversations
+  no longer share one session.
+- Conversation history is separated by **project tag** instead of by splitting
+  the store. Checkpoints are tagged with the directories the work happened in.
+- Wiki note frontmatter records a modified date.
+
+### Changed
+
+- Identity is delivered only through the `engram_get_context` response. No copy
+  is kept in provider configuration files (`~/.claude/CLAUDE.md`,
+  `~/.codex/AGENTS.md`); a leftover block is cleared once at startup, with a
+  backup and an atomic replace. If no block is present, the file is neither
+  created nor modified.
+  - A session without an Engram connection should have no persona. A file copy
+    makes the identity look alive while the connection is down.
+  - This copy path was added and removed within the same development cycle. It
+    was never part of the 1.5.19 installer, so behavior is unchanged for
+    existing users.
+
+### Fixed
+
+- A session payload is no longer discarded when the session row will not close.
+- Sessions nobody returned to are not checkpointed. Checkpoint project lines,
+  external heading handling, and the cwd sample span were corrected as well.
+- Native bubbles are placed away from the screen centre, and a dragged offset
+  is mirrored across the character.
+- The bootstrap cache is no longer split on cwd alone.
+- The transcript archive stays faithful to what was actually said.
+- Codex hook migration is handled inline and is idempotent, with safe backups
+  and dry runs.
+- The test suite no longer writes to the user's real database or home
+  directory.
+
 ## [1.5.19] — 2026-09-13
 
 ### Fixed

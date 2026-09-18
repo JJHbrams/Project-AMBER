@@ -216,11 +216,13 @@ def parse_markdown(text: str, filepath: Path | None = None) -> dict:
 
 def build_frontmatter(title: str, note_type: str, tags: list, links: list, summary: str = "", extra: dict | None = None) -> str:
     """노트 생성 시 frontmatter YAML 빌드"""
+    today = datetime.now().strftime("%Y-%m-%d")
     fm: dict = {
         "id": _slugify(title),
         "title": title,
         "note_type": note_type,
-        "created": datetime.now().strftime("%Y-%m-%d"),
+        "created": today,
+        "updated": today,
     }
     if tags:
         fm["tags"] = tags
@@ -231,6 +233,29 @@ def build_frontmatter(title: str, note_type: str, tags: list, links: list, summa
     if extra:
         fm.update(extra)
     return "---\n" + yaml.dump(fm, allow_unicode=True, default_flow_style=False) + "---\n\n"
+
+
+_FM_BLOCK_RE = re.compile(r"\A(---[ \t]*\n)(.*?)(\n---[ \t]*\n)", re.DOTALL)
+_FM_UPDATED_RE = re.compile(r"^updated:.*$", re.MULTILINE)
+
+
+def touch_frontmatter_updated(text: str, today: str | None = None) -> str:
+    """frontmatter의 updated를 오늘 날짜로 갱신한다. 없으면 추가한다.
+
+    frontmatter 블록이 아예 없는 문서는 손대지 않는다 — 본문에 우연히 있는
+    'updated:' 라인을 건드리지 않기 위해 치환 범위를 블록 안으로 제한한다.
+    """
+    today = today or datetime.now().strftime("%Y-%m-%d")
+    m = _FM_BLOCK_RE.match(text)
+    if not m:
+        return text
+
+    head, body, tail = m.group(1), m.group(2), m.group(3)
+    if _FM_UPDATED_RE.search(body):
+        body = _FM_UPDATED_RE.sub(f"updated: {today}", body, count=1)
+    else:
+        body = body.rstrip("\n") + f"\nupdated: {today}"
+    return head + body + tail + text[m.end():]
 
 
 # ── KnowledgeGraph 클래스 ────────────────────────────────
@@ -681,6 +706,8 @@ class KnowledgeGraph:
         else:
             text = text.rstrip() + "\n" + new_progress_block
 
+        text = touch_frontmatter_updated(text)
+
         try:
             md_path.write_text(text, encoding="utf-8")
         except Exception:
@@ -732,6 +759,8 @@ class KnowledgeGraph:
             text = text[:match.start()] + replacement + text[match.end():]
         else:
             text = text.rstrip() + "\n\n## Progress\n\n" + entry
+
+        text = touch_frontmatter_updated(text)
 
         md_path.write_text(text, encoding="utf-8")
         docs_root = Path(vault_root)
@@ -802,6 +831,8 @@ class KnowledgeGraph:
         else:
             existing_headings = re.findall(r"^#{1,6}[ \t].+$", text, re.MULTILINE)
             return {"error": f"헤딩을 찾을 수 없음: {heading}", "existing_headings": existing_headings}
+
+        text = touch_frontmatter_updated(text)
 
         try:
             md_path.write_text(text, encoding="utf-8")
