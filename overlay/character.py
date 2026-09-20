@@ -640,6 +640,7 @@ class CharacterOverlay:
         on_get_ollama_model: Callable[[], str] | None = None,
         on_reload_ollama_models: Callable[[], None] | None = None,
         on_settings: Callable[[], None] | None = None,
+        on_check_update: Callable[[], None] | None = None,
         on_restart: Callable[[], None] | None = None,
         on_history: Callable[[], None] | None = None,
         on_pointer_event: Callable[[str, dict], None] | None = None,
@@ -658,6 +659,7 @@ class CharacterOverlay:
         self.on_get_ollama_model = on_get_ollama_model
         self.on_reload_ollama_models = on_reload_ollama_models
         self.on_settings = on_settings
+        self.on_check_update = on_check_update
         self.on_restart = on_restart
         self.on_history = on_history
         self.on_pointer_event = on_pointer_event
@@ -1606,6 +1608,7 @@ class CharacterOverlay:
         self._context_menu.add_checkbutton(label="좌우 반전", variable=self._flip_var, command=self._toggle_flip)
         self._context_menu.add_separator()
         self._context_menu.add_command(label="설정", command=self._invoke_settings)
+        self._context_menu.add_command(label="업데이트 확인", command=self._invoke_check_update)
         try:
             launcher_mode = bool(self.is_launcher_mode and self.is_launcher_mode())
         except Exception:
@@ -1858,6 +1861,15 @@ class CharacterOverlay:
             return
         try:
             self.on_settings()
+        except Exception:
+            self._log_overlay_exception()
+
+    def _invoke_check_update(self):
+        self._dismiss_context_menu()
+        if self.on_check_update is None:
+            return
+        try:
+            self.on_check_update()
         except Exception:
             self._log_overlay_exception()
 

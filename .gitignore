@@ -69,3 +69,6 @@ debug.log
 # 저장소에 담지 않는다 — 버전은 installer/external-overlay.pin 이 말한다.
 installer/external-overlay.whl
 installer/external-components/
+# build-addons.ps1 이 조달한 addon zip + addons.json — 빌드 산출물이므로 저장소에
+# 담지 않는다. ref/화이트리스트는 installer/addons.pin 이 단일 출처다.
+installer/addons/

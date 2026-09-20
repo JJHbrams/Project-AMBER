@@ -1,1 +1,2 @@
 resource/embedding-model/manifest.json text eol=lf
+resource/character/bolttagu/*.json text eol=lf

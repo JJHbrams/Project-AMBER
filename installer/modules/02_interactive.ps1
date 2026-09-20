@@ -50,11 +50,14 @@ if ($_hasCompleteExisting -and -not $Reconfigure) {
     $SelectedCliProvider = $ExistingCliProvider
     $SelectedOllamaModel = $ExistingOllamaModel
     $DefaultCliProvider = Resolve-AvailableCliProvider $SelectedCliProvider $ProviderAvailability
-    $_startupDir = [Environment]::GetFolderPath("Startup")
-    $_existingStartupLinks = @(
-        (Join-Path $_startupDir "AMBER (ENGRAM).lnk"),
-        (Join-Path $_startupDir "engram-overlay.lnk")
-    )
+    $_startupDir = Get-EngramKnownFolder -Name "Startup"
+    $_existingStartupLinks = @()
+    if ($_startupDir) {
+        $_existingStartupLinks = @(
+            (Join-Path $_startupDir "AMBER (ENGRAM).lnk"),
+            (Join-Path $_startupDir "engram-overlay.lnk")
+        )
+    }
     $EnableAutoStart = [bool]($_existingStartupLinks | Where-Object { Test-Path $_ } | Select-Object -First 1)
 
     Write-Host "  [설정] 기존 설정 재사용 (재설정하려면 .\install.ps1 -Reconfigure)" -ForegroundColor DarkCyan
@@ -248,11 +251,14 @@ if ($ExternalOverlayMode -eq 'none' -and -not $ExternalOverlayComponents) {
         }
     } else { Write-Warn '선택 구성요소 번들이 없습니다. 내장 볼따구는 그대로 설치할 수 있습니다.' }
 }
-$_startupDir = [Environment]::GetFolderPath("Startup")
-$_existingStartupLinks = @(
-    (Join-Path $_startupDir "AMBER (ENGRAM).lnk"),
-    (Join-Path $_startupDir "engram-overlay.lnk")
-)
+$_startupDir = Get-EngramKnownFolder -Name "Startup"
+$_existingStartupLinks = @()
+if ($_startupDir) {
+    $_existingStartupLinks = @(
+        (Join-Path $_startupDir "AMBER (ENGRAM).lnk"),
+        (Join-Path $_startupDir "engram-overlay.lnk")
+    )
+}
 $_autoStartDefault = if ($_existingStartupLinks | Where-Object { Test-Path $_ } | Select-Object -First 1) { 0 } else { 1 }
 Write-Host ""
 Write-Host "  [설정] Windows 시작 시 Engram + 설치된 외부 오버레이 함께 자동실행" -ForegroundColor White

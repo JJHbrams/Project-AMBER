@@ -24,6 +24,11 @@ function Get-EngramInstallerInputFiles([string]$Root, [string]$DistDir) {
         "installer\external-bundle.ps1",
         "installer\external-overlay.pin",
         "installer\external-overlay.whl",
+        "installer\addons.pin",
+        "installer\addons.ps1",
+        "installer\addons-schema.ps1",
+        "installer\build-addons.ps1",
+        "installer\build-addons-includes.ps1",
         "config\overlay.yaml",
         "config\config.yaml",
         "config\clients\copilot.md",
@@ -50,6 +55,14 @@ function Get-EngramInstallerInputFiles([string]$Root, [string]$DistDir) {
     $componentDir = Join-Path $Root 'installer\external-components'
     if (Test-Path -LiteralPath $componentDir) {
         Get-ChildItem -LiteralPath $componentDir -File -Recurse | ForEach-Object { $files.Add($_.FullName) }
+    }
+    $addonsDir = Join-Path $Root 'installer\addons'
+    if (Test-Path -LiteralPath $addonsDir) {
+        # addons.json 은 매번 조달 시각(generated_at)이 바뀌어 항상 캐시를 깨므로
+        # 서명에서 뺀다. 실제 패키징 입력은 zip(추출된 addon 내용)과
+        # tree.iss/files.iss/code.iss(선택된 addon 구성) 이며 둘 다 여기 잡힌다.
+        Get-ChildItem -LiteralPath $addonsDir -File -Recurse -Exclude 'addons.json' |
+            ForEach-Object { $files.Add($_.FullName) }
     }
     $buildManifest = Join-Path $DistDir "build-manifest.json"
     if (Test-Path -LiteralPath $buildManifest -PathType Leaf) {

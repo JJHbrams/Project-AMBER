@@ -431,6 +431,7 @@ class OverlayApp:
             on_get_ollama_model=lambda: self._ollama_model,
             on_reload_ollama_models=_reload_ollama_models,
             on_settings=self.open_settings,
+            on_check_update=self.check_update,
             on_restart=self.restart,
             on_history=self.show_bubble_history,
             on_pointer_event=self._on_bundled_pointer_event,
@@ -1326,6 +1327,12 @@ class OverlayApp:
         except Exception:
             self._settings_active = False
             raise
+
+    def check_update(self):
+        """'업데이트 확인' 메뉴 항목: 최신 릴리스를 조회하고 필요하면 설치를 진행한다."""
+        from .update_check import check_for_update
+
+        check_for_update(self.root, parent=self.root)
 
     def _reload_config(self):
         """설정 저장 후 overlay config를 다시 읽어 반영한다."""

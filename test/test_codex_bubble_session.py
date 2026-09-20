@@ -31,12 +31,31 @@ class Tests(unittest.TestCase):
     def test_delta_has_text_and_boolean_delta(self):
         self.event('item/agentMessage/delta',delta='hello',itemId='item')
         self.assertEqual(self.out[0]['text'],'hello');self.assertIs(self.out[0]['delta'],True)
-    def test_unknown_is_not_terminal_and_cannot_be_resent(self):
+    def test_unknown_is_terminal_and_releases_active_for_resend(self):
+        # provider_unknown must close the turn like any other terminal outcome
+        # (session.py._close_turn mirrors this): self._active is cleared so a
+        # later send_rich() for a new turn is not wedged forever.
         self.s._unknown(self.k)
         self.assertEqual(self.out[0]['kind'],'provider_unknown')
-        self.assertNotIn('terminal',self.out[0]);self.assertTrue(self.s._active.unknown)
+        self.assertTrue(self.out[0]['terminal'])
+        self.assertIsNone(self.s._active)
     def test_no_active_unknown_is_safe(self):
         self.s._active=None;self.s._unknown(self.k);self.assertEqual(self.out,[])
+    def test_unknown_then_resend_is_not_wedged(self):
+        # Before the fix, _unknown() only flagged _Active.unknown and never
+        # cleared self._active, so send_rich()'s `if self._active is not
+        # None: return False` guard wedged the session forever after the
+        # first ambiguous result.
+        self.s._unknown(self.k)
+        self.s.is_alive=lambda:True
+        self.s._rpc=Mock(return_value={'turn':{'id':'t2'}})
+        k2=TurnKey('s','r2',1)
+        self.assertTrue(self.s.send_rich('hello',(),k2))
+    def test_stale_result_after_unknown_does_not_reclose(self):
+        self.s._unknown(self.k)
+        before=len(self.out)
+        self.event('turn/completed',turn={'id':'turn','status':'completed'})
+        self.assertEqual(len(self.out),before)
     def test_rpc_futures_are_independently_correlated(self):
         captured=[]
         def write(m):

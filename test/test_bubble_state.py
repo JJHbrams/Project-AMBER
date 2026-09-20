@@ -9,6 +9,7 @@ from claude_code_sdk.types import ResultMessage, SystemMessage, ToolPermissionCo
 from overlay.bubble.approval import ApprovalRequest, ToolApprovalBroker
 from overlay.bubble.session import BubbleSessionManager
 from overlay.bubble.state import BubbleStateController
+from overlay.bubble.turn_queue import TurnKey
 from overlay.session_registry import SessionStateRegistry
 
 
@@ -111,8 +112,15 @@ class BubbleStateTests(unittest.TestCase):
         manager._handle_message(SystemMessage(subtype='init', data={'session_id': 'actual', 'secret': 'PRIVATE'}))
         self.registry.upsert({'provider': 'claude', 'session_id': 'actual', 'state': 'working'})
         manager._emit({'kind': 'thought', 'text': 'PRIVATE'})
+        # _close_turn only closes the turn a ResultMessage's request_key
+        # actually names (that's the fix for the never-closes bug) — a direct
+        # unit call needs one in flight to close, mirroring what
+        # _prompt_generator sets up for a real send.
+        key = TurnKey('actual', 'req-1', manager._attempt_generation)
+        manager._current_request_key = key
         manager._handle_message(ResultMessage(subtype='error', duration_ms=1, duration_api_ms=1,
-                                             is_error=True, num_turns=1, session_id='actual', result='PRIVATE'))
+                                             is_error=True, num_turns=1, session_id='actual', result='PRIVATE'),
+                                 request_key=key)
         self.assertEqual(self.row()['state'], 'blocked')
         self.assertNotIn('PRIVATE', str(self.registry.snapshot()))
         manager.stop()

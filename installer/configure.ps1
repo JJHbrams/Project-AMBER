@@ -32,7 +32,11 @@ param(
     [ValidateSet('start','skip')][string]$ExternalOverlay = 'start',
     [switch]$NoStart,
     [switch]$LaunchNow,
-    [switch]$Uninstall
+    [switch]$Uninstall,
+    # setup.exe(Inno) 의 addons 페이지에서 넘어온다. -Addons 는 콤마로 이어붙인
+    # 단일 문자열("a,b,c")로 오거나 배열 원소 여러 개로 올 수 있어 둘 다 받는다.
+    [string[]]$Addons = @(),
+    [string]$AddonPayloadRoot = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -262,12 +266,22 @@ if ($Uninstall) {
     Set-EngramJointStartup -Mode off -HostExecutable $DistExe
     Remove-EngramManagedClaudeHooks
     Remove-EngramManagedCodexHooks
-    foreach ($lnk in @(
-        (Join-Path ([Environment]::GetFolderPath("Programs")) "AMBER (ENGRAM).lnk"),
-        (Join-Path ([Environment]::GetFolderPath("Startup")) "AMBER (ENGRAM).lnk"),
-        (Join-Path ([Environment]::GetFolderPath("Programs")) "Engram Overlay.lnk"),
-        (Join-Path ([Environment]::GetFolderPath("Startup")) "engram-overlay.lnk")
-    )) { if (Test-Path $lnk) { Remove-Item $lnk -Force; Write-Ok "Removed: $lnk" } }
+    $uninstallProgramsFolder = Get-EngramKnownFolder -Name "Programs"
+    $uninstallStartupFolder = Get-EngramKnownFolder -Name "Startup"
+    $legacyShortcutPaths = [Collections.Generic.List[string]]::new()
+    if ($uninstallProgramsFolder) {
+        $legacyShortcutPaths.Add((Join-Path $uninstallProgramsFolder "AMBER (ENGRAM).lnk"))
+        $legacyShortcutPaths.Add((Join-Path $uninstallProgramsFolder "Engram Overlay.lnk"))
+    } else {
+        Write-Warn "시작 메뉴(Programs) 폴더 경로를 확인할 수 없어 해당 바로가기 정리를 건너뜁니다."
+    }
+    if ($uninstallStartupFolder) {
+        $legacyShortcutPaths.Add((Join-Path $uninstallStartupFolder "AMBER (ENGRAM).lnk"))
+        $legacyShortcutPaths.Add((Join-Path $uninstallStartupFolder "engram-overlay.lnk"))
+    } else {
+        Write-Warn "시작프로그램(Startup) 폴더 경로를 확인할 수 없어 자동 시작 바로가기 정리를 건너뜁니다."
+    }
+    foreach ($lnk in $legacyShortcutPaths) { if (Test-Path $lnk) { Remove-Item $lnk -Force; Write-Ok "Removed: $lnk" } }
     foreach ($v in @("ENGRAM_DB_DIR", "ENGRAM_WORKDIR", "ENGRAM_PROJECT_ROOT")) {
         [Environment]::SetEnvironmentVariable($v, $null, "User")
     }
@@ -509,6 +523,31 @@ if (Test-Path $copilotEngramSkill) {
 }
 Write-Warn "이미 열려 있던 CLI는 새 환경변수와 skill 목록을 다시 읽지 않습니다. 터미널과 CLI 세션을 새로 시작하세요."
 
+# ── 7f. Addon skills (설치 위저드에서 선택한 것만) ───────────────
+$AddonList = @($Addons | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+if ($AddonList.Count -eq 0) {
+    Write-Host "  Addon 선택 없음 (건너뜀)" -ForegroundColor DarkGray
+} else {
+    $AddonsHelper = Join-Path $PSScriptRoot "addons.ps1"
+    if (-not $AddonPayloadRoot) {
+        Write-Warn "Addon 이 선택됐지만 -AddonPayloadRoot 가 없어 설치를 건너뜁니다: $($AddonList -join ', ')"
+    } elseif (-not (Test-Path -LiteralPath $AddonsHelper)) {
+        Write-Warn "addons.ps1 을 찾을 수 없어 addon 설치를 건너뜁니다: $AddonsHelper"
+    } else {
+        Write-Step "Addon skills: $($AddonList -join ', ')"
+        . $AddonsHelper
+        try {
+            Install-EngramAddons -PayloadRoot $AddonPayloadRoot -Addons $AddonList -UserProfile $env:USERPROFILE |
+                ForEach-Object { Write-Ok $_ }
+            Register-EngramAddonMcp -PayloadRoot $AddonPayloadRoot -Addons $AddonList -UserProfile $env:USERPROFILE |
+                ForEach-Object { Write-Ok $_ }
+        } catch {
+            Write-Warn "Addon 설치 실패: $($_.Exception.Message)"
+            Exit-Configure 1
+        }
+    }
+}
+
 # ── 8. Identity 이름 (선택) — 첫 실행 시 반영되도록 env 로 전달 ──
 if ($IdentityName) {
     [Environment]::SetEnvironmentVariable("ENGRAM_INSTALL_NAME", $IdentityName, "User")
@@ -527,13 +566,24 @@ function New-Lnk($path, $desc) {
     $s.IconLocation = "$DistExe,0"
     $s.Save()
 }
-$startMenu = Join-Path ([Environment]::GetFolderPath("Programs")) "AMBER (ENGRAM).lnk"
-$legacyStartMenu = Join-Path ([Environment]::GetFolderPath("Programs")) "Engram Overlay.lnk"
-New-Lnk $startMenu "AMBER (ENGRAM)"
-if (Test-Path $legacyStartMenu) { Remove-Item $legacyStartMenu -Force }
-Write-Ok $startMenu
-$startupLnk = Join-Path ([Environment]::GetFolderPath("Startup")) "AMBER (ENGRAM).lnk"
-$legacyStartupLnk = Join-Path ([Environment]::GetFolderPath("Startup")) "engram-overlay.lnk"
+$programsFolder = Get-EngramKnownFolder -Name "Programs"
+if ($programsFolder) {
+    $startMenu = Join-Path $programsFolder "AMBER (ENGRAM).lnk"
+    $legacyStartMenu = Join-Path $programsFolder "Engram Overlay.lnk"
+    New-Lnk $startMenu "AMBER (ENGRAM)"
+    if (Test-Path $legacyStartMenu) { Remove-Item $legacyStartMenu -Force }
+    Write-Ok $startMenu
+} else {
+    Write-Warn "시작 메뉴(Programs) 폴더 경로를 확인할 수 없어 바로가기 생성을 건너뜁니다."
+}
+$installStartupFolder = Get-EngramKnownFolder -Name "Startup"
+if ($installStartupFolder) {
+    $startupLnk = Join-Path $installStartupFolder "AMBER (ENGRAM).lnk"
+    $legacyStartupLnk = Join-Path $installStartupFolder "engram-overlay.lnk"
+} else {
+    $startupLnk = $null
+    $legacyStartupLnk = $null
+}
 # Runtime setup and login registration happen after external installation.
 
 # ── 공급자별 subagent 정의 ────────────────────────────────────────

@@ -161,6 +161,26 @@ Resolve-EngramComponentBundle -All | Out-Null
 # an empty wheel that the installer silently claims to have installed.
 Write-EngramComponentIncludes -BundleRoot (Join-Path $PSScriptRoot 'external-components')
 
+# Addon bundle (build-time acquisition of the 4 addons + Inno include generation).
+# A failed/private addon acquisition does not fail the installer build; it is
+# recorded as unavailable in installer\addons\addons.json and simply omitted
+# from tree.iss/files.iss so ISCC never references a missing zip.
+& (Join-Path $PSScriptRoot 'build-addons.ps1')
+if ($LASTEXITCODE -and $LASTEXITCODE -ne 0) {
+    Write-Err "Addon acquisition script failed (exit $LASTEXITCODE)"
+}
+. (Join-Path $PSScriptRoot 'build-addons-includes.ps1')
+Write-EngramAddonIncludes | Out-Null
+$addonBundleBytes = 0
+$addonManifestPath = Join-Path $PSScriptRoot 'addons\addons.json'
+if (Test-Path -LiteralPath $addonManifestPath) {
+    $addonManifest = Get-Content -LiteralPath $addonManifestPath -Raw | ConvertFrom-Json
+    $addonBundleBytes = (@($addonManifest.addons | Where-Object { $_.status -eq 'available' }) |
+        Measure-Object -Property bytes -Sum).Sum
+    if (-not $addonBundleBytes) { $addonBundleBytes = 0 }
+}
+Write-Ok "Addon 번들 총 크기: $([Math]::Round($addonBundleBytes / 1MB, 3)) MB ($addonBundleBytes bytes)"
+
 if (-not (Test-Path $DistExe)) {
     Write-Err "번들 없음: $DistExe"
 }

@@ -1,0 +1,73 @@
+﻿{
+  "schema": 2,
+  "addons": [
+    {
+      "id": "claude-image-forge",
+      "source": "git",
+      "primary": "https://github.com/JJHbrams/claude-image-forge.git",
+      "fallback": "",
+      "ref": "master",
+      "skill_name": "image-forge",
+      "needs_mcp": true,
+      "mcp": {
+        "server_name": "image-forge",
+        "prerequisite": "node",
+        "prerequisite_label": "node >= 18",
+        "command": "node",
+        "args": ["mcp/server.mjs"]
+      },
+      "map": [
+        { "src": "skills/image-forge/SKILL.md", "dest": "SKILL.md" },
+        { "src": "mcp/", "dest": "mcp/" },
+        { "src": "scripts/", "dest": "scripts/" },
+        { "src": "package.json", "dest": "package.json" }
+      ]
+    },
+    {
+      "id": "structured-reporting",
+      "source": "git",
+      "primary": "https://github.com/JJHbrams/structured-reporting.git",
+      "fallback": "",
+      "ref": "main",
+      "skill_name": "structured-reporting",
+      "needs_mcp": false,
+      "map": [
+        { "src": "adapters/claude/SKILL.md", "dest": "SKILL.md" },
+        { "src": "core/", "dest": "core/" },
+        { "src": "cli/", "dest": "cli/" }
+      ]
+    },
+    {
+      "id": "session-agent-orchestration",
+      "source": "git",
+      "primary": "http://192.168.6.46:3000/IPTeam/session-agent-orchestration.git",
+      "fallback": "https://github.com/JJHbrams/session-agent-orchestration.git",
+      "ref": "master",
+      "skill_name": "session-orchestrate",
+      "needs_mcp": true,
+      "mcp": {
+        "server_name": "session-orchestrator",
+        "prerequisite": "session-orchestrator-mcp",
+        "prerequisite_label": "session-orchestrator-mcp",
+        "command": "session-orchestrator-mcp",
+        "args": []
+      },
+      "map": [
+        { "src": ".agents/skills/session-orchestrate/SKILL.md", "dest": "SKILL.md" }
+      ]
+    },
+    {
+      "id": "feature-spec",
+      "source": "local",
+      "primary": "",
+      "fallback": "",
+      "ref": "",
+      "local_path": "addons/feature-spec",
+      "skill_name": "feature-spec",
+      "needs_mcp": false,
+      "map": [
+        { "src": "*", "dest": "" }
+      ]
+    }
+  ]
+}

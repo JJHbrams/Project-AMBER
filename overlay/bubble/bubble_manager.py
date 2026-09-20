@@ -366,6 +366,13 @@ class BubbleManager:
             self._dismiss_thought()  # 생각풍선은 "생성 중 무슨 생각/작업 중인지"가 목적 — 응답이 끝나면 치운다
             self._schedule_speech_fade()  # 응답도 일정 시간 뒤 자동 페이드(설정에 따라)
         elif kind == "error":
+            self._dismiss_thought()  # ResultMessage 실패도 턴 종료다 — 생각풍선을 turn_end와 동일하게 정리
+            self._handle_error(ev)
+        elif kind == "provider_unknown":
+            # ResultMessage가 끝내 안 온 채 스트림/연결이 끊긴 경우의 종료 신호 —
+            # 공급자 메시지 한 종류(ResultMessage)에 턴의 생명주기를 묶지 않기 위해
+            # turn_end/error와 동등하게 취급한다: 생각풍선을 치우고 원인을 알려준다.
+            self._dismiss_thought()
             self._handle_error(ev)
 
     def _schedule_speech_fade(self) -> None:

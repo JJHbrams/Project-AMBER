@@ -1,5 +1,90 @@
 # Release Notes
 
+## 2026-09-20 - v1.5.21: Update Check, Optional Add-ons, and a Bubble Turn-Close Fix
+
+### Highlights
+
+- The overlay right-click menu gained **check for update**. It compares the
+  latest GitHub release tag against the installed version, downloads and
+  launches the installer on consent, and lets the user decline after download
+  while keeping the downloaded file.
+- `setup.exe` now offers four optional add-ons (image-forge,
+  structured-reporting, session-orchestrate, feature-spec), bundled at build
+  time from each repo's remote ref. Existing installs are updated; skills the
+  user wrote themselves are never overwritten; MCP servers are registered only
+  when their prerequisite actually resolves.
+- Fixed a bubble turn that could stay open forever — thinking bubble stuck, no
+  reply — because every turn-closing side effect lived in a single
+  provider-message branch. Turn closing now has one path. The Codex provider
+  had the same defect with a worse effect: an ambiguous result wedged the
+  session so no further turn could be sent.
+- Fixed install failing at the very end on profiles where Windows special
+  folders do not resolve (`GetFolderPath` returns an empty string, which then
+  crashed `Join-Path`).
+
+### What Changed
+
+- `overlay/character.py`, `overlay/main.py`, `overlay/update_check.py`, and
+  `core/update/` compare the latest GitHub release tag against the installed
+  version (3-part tag vs. 4-part local, compared on the shared components)
+  and drive the download/consent/launch flow.
+- `installer/addons.pin`, `installer/addons.ps1`,
+  `installer/addons-schema.ps1`, `installer/build-addons.ps1`, and
+  `installer/build-addons-includes.ps1` add the add-on procurement and
+  selective-install pipeline; `addons/feature-spec/` is bundled as one of the
+  four offered add-ons.
+- `overlay/bubble/session.py`, `overlay/bubble/codex_session.py`, and
+  `overlay/bubble/bubble_manager.py` unify turn-closing side effects into one
+  path instead of a single provider-message branch.
+- `installer/install.ps1`, `installer/joint-startup.ps1`, and
+  `installer/modules/{02_interactive,07_shims,10_shortcuts}.ps1` guard
+  Windows special-folder resolution before `Join-Path`.
+
+### Impact
+
+- Users can update from inside the overlay without hunting down the release
+  page, and a declined download is not re-fetched.
+- Optional add-ons install without requiring network access or credentials at
+  install time, and never clobber a user's own same-named skill.
+- A bubble session no longer gets permanently stuck after an ambiguous
+  provider result, particularly on the Codex path.
+- Installs on profiles with non-resolving special folders no longer fail at
+  the last step.
+
+### Validation
+
+- Unit/integration suite: 1,432 passed (35 pre-existing failures unrelated to
+  this change).
+- Real overlay smoke: a normal turn's four stages passed.
+- `setup.exe` add-on install exercised for 4 add-ons and 2 add-ons, with
+  Claude Code skill recognition confirmed afterward.
+
+### Files
+
+- overlay/character.py
+- overlay/main.py
+- overlay/update_check.py
+- core/update/__init__.py
+- core/update/github_release.py
+- installer/addons.pin
+- installer/addons.ps1
+- installer/addons-schema.ps1
+- installer/build-addons.ps1
+- installer/build-addons-includes.ps1
+- installer/build-cache.ps1
+- installer/build-installer.ps1
+- installer/configure.ps1
+- installer/engram-overlay.iss
+- installer/install.ps1
+- installer/joint-startup.ps1
+- installer/modules/02_interactive.ps1
+- installer/modules/07_shims.ps1
+- installer/modules/10_shortcuts.ps1
+- addons/feature-spec/
+- overlay/bubble/session.py
+- overlay/bubble/codex_session.py
+- overlay/bubble/bubble_manager.py
+
 ## 2026-09-18 - v1.5.20: Persona by Example and Per-Conversation Sessions
 
 ### Highlights

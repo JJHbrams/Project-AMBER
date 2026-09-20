@@ -1,6 +1,34 @@
 # Source installer/development workflow only. Never loaded by the overlay host.
 # Startup ownership is separate from runtime ownership: no runtime/config adoption.
 . (Join-Path $PSScriptRoot 'external-components.ps1')
+
+# Windows 특수 폴더(Startup/Programs 등) 해석 실패 시 [Environment]::GetFolderPath
+# 는 예외 없이 빈 문자열을 돌려준다. 그 빈 문자열이 그대로 Join-Path 로 흘러들어가면
+# 거기서 예외가 터져 설치 전체가 죽는다. 모든 호출자는 이 resolver 를 거쳐야 한다:
+# 실패하면 빈 문자열이 아니라 $null 을 돌려주어 호출자가 해당 기능만 건너뛰게 하고,
+# 사용자에게 보이는 경고를 폴더당 한 번만 낸다.
+$script:EngramKnownFolderWarned = @{}
+function Get-EngramKnownFolder {
+    param(
+        [Parameter(Mandatory)][ValidateSet('Startup', 'Programs')][string]$Name
+    )
+    $path = $null
+    # 테스트 전용 주입 지점 — 실제 설치에서는 절대 설정되지 않는 값이다.
+    # GetFolderPath 가 빈 문자열을 반환하는 실패 조건은 정상 Windows 환경에서
+    # 결정적으로 재현할 방법이 없어(리다이렉트된 프로필/정책 관리 환경에서만
+    # 발생), 회귀 테스트가 그 조건을 강제하기 위해서만 쓴다.
+    $forcedEmpty = @($env:ENGRAM_TEST_FORCE_EMPTY_KNOWNFOLDER -split ',') -contains $Name
+    if (-not $forcedEmpty) {
+        try { $path = [Environment]::GetFolderPath($Name) } catch { $path = $null }
+    }
+    if ($path) { return $path }
+    if (-not $script:EngramKnownFolderWarned.ContainsKey($Name)) {
+        $script:EngramKnownFolderWarned[$Name] = $true
+        Write-Host "  [!] Windows 특수 폴더($Name)를 확인할 수 없어 관련 기능(바로가기/자동시작)을 건너뜁니다. (리다이렉트된 프로필이거나 정책 관리 환경일 수 있습니다.)" -ForegroundColor Yellow
+    }
+    return $null
+}
+
 function Get-EngramCatalogRuntime {
     param([string]$Root = (Join-Path $env:LOCALAPPDATA 'engram-overlay'))
     $generation = Get-EngramComponentGeneration -Root $Root
@@ -29,7 +57,9 @@ function Get-EngramCatalogRuntime {
 
 function Get-EngramExistingStartupHost {
     # dev-rebuild must not silently bind login to a disposable development tree.
-    $path = Join-Path ([Environment]::GetFolderPath('Startup')) 'AMBER (ENGRAM).lnk'
+    $startupDir = Get-EngramKnownFolder -Name 'Startup'
+    if (-not $startupDir) { throw 'No existing installed host startup. Run INSTALL -AutoStart on from the permanent checkout first.' }
+    $path = Join-Path $startupDir 'AMBER (ENGRAM).lnk'
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw 'No existing installed host startup. Run INSTALL -AutoStart on from the permanent checkout first.' }
     $link = (New-Object -ComObject WScript.Shell).CreateShortcut($path)
     if ((Split-Path $link.TargetPath -Leaf) -ne 'engram-overlay.exe' -or $link.Arguments -or
@@ -88,7 +118,7 @@ function Set-EngramJointStartup {
         [string]$HostExecutable,
         [string]$HostArguments = '',
         [switch]$HostOnly,
-        [string]$StartupDirectory = [Environment]::GetFolderPath('Startup'),
+        [string]$StartupDirectory = '',
         [string]$StateDirectory = (Join-Path $env:USERPROFILE '.engram'),
         [string]$ExternalRoot = (Join-Path $env:LOCALAPPDATA 'engram-overlay'),
         [string]$RunKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
@@ -100,6 +130,11 @@ function Set-EngramJointStartup {
         catch { Write-Warning ('Deferred external login update remains pending; original entry preserved: ' + $_.Exception.Message) }
     }
     if ($Mode -eq 'preserve') { return }
+    if (-not $StartupDirectory) { $StartupDirectory = Get-EngramKnownFolder -Name 'Startup' }
+    if (-not $StartupDirectory) {
+        Write-Host "  [!] 자동시작(Startup) 등록을 건너뜁니다 — 기능은 정상 동작하며 이 부분만 생략됩니다." -ForegroundColor Yellow
+        return
+    }
     $recordPath = Join-Path $StateDirectory 'joint-startup.json'
     $linkPath = Join-Path $StartupDirectory 'AMBER (ENGRAM).lnk'
     $record = $null

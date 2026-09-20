@@ -340,3 +340,41 @@ $AgentDefinitionsInstaller = Join-Path $ProjectRoot "installer\deploy_agent_defi
 & $AgentDefinitionsInstaller -ProjectRoot $ProjectRoot -UserProfile $env:USERPROFILE | ForEach-Object {
     Write-Ok $_
 }
+
+# 7f. Addon skills — 소스 설치는 전체 설치이므로 체크박스 없이 4종 전부를 대상으로 한다.
+Write-Step "Addon skills (claude-image-forge / structured-reporting / session-agent-orchestration / feature-spec)..."
+$AddonsHelper = Join-Path $ProjectRoot "installer\addons.ps1"
+$AddonPayloadRoot = Join-Path $ProjectRoot "installer\addons"
+$AllAddonIds = @("claude-image-forge", "structured-reporting", "session-agent-orchestration", "feature-spec")
+if (-not (Test-Path -LiteralPath $AddonsHelper)) {
+    Write-Warn "addons.ps1 을 찾을 수 없어 addon 설치를 건너뜁니다: $AddonsHelper"
+} else {
+    $missingZip = @($AllAddonIds | Where-Object {
+        $zip = Join-Path $AddonPayloadRoot ($_ + ".zip")
+        -not (Test-Path -LiteralPath $zip) -or ((Get-Item -LiteralPath $zip).Length -eq 0)
+    })
+    if ($missingZip.Count -gt 0) {
+        $BuildAddonsScript = Join-Path $ProjectRoot "installer\build-addons.ps1"
+        if (Test-Path -LiteralPath $BuildAddonsScript) {
+            Write-Step "Addon payload 없음 ($($missingZip -join ', ')) — build-addons.ps1 로 즉석 조달 시도..."
+            try {
+                & $BuildAddonsScript
+            } catch {
+                Write-Warn "Addon 조달 실패: $($_.Exception.Message) — 이유가 위와 같아 나머지 설치는 계속 진행합니다."
+            }
+        } else {
+            Write-Warn "build-addons.ps1 을 찾을 수 없어 addon payload 를 조달할 수 없습니다 ($BuildAddonsScript) — 나머지 설치는 계속 진행합니다."
+        }
+    }
+    . $AddonsHelper
+    try {
+        Install-EngramAddons -PayloadRoot $AddonPayloadRoot -Addons $AllAddonIds -UserProfile $env:USERPROFILE | ForEach-Object {
+            Write-Ok $_
+        }
+        Register-EngramAddonMcp -PayloadRoot $AddonPayloadRoot -Addons $AllAddonIds -UserProfile $env:USERPROFILE | ForEach-Object {
+            Write-Ok $_
+        }
+    } catch {
+        Write-Warn "Addon 설치 중 오류로 건너뜁니다: $($_.Exception.Message) — 나머지 설치는 계속 진행합니다."
+    }
+}

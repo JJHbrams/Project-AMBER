@@ -47,6 +47,11 @@ _MAX_ATTEMPTS = 3  # 최초 시도 + 동일 세션 재시도 1회 + 새 세션 �
 _RETRY_BACKOFF_SECS = 2.0
 _STATE_HEARTBEAT_SECS = 30.0
 
+# ResultMessage가 끝내 오지 않은 채 스트림/연결이 죽었을 때 쓰는 공통 종료 이벤트.
+# bubble_manager._on_event는 이 kind를 turn_end와 동등하게 소비한다(생각풍선 정리 +
+# 상태 해제) — 공급자 메시지 한 종류에 턴 종료를 종속시키지 않기 위함.
+_PROVIDER_UNKNOWN_EVENT = {'kind': 'provider_unknown', 'text': '연결이 종료되어 요청 상태를 확인할 수 없습니다.'}
+
 # 말풍선 모드 전용 출력 스타일 가이드 — append_system_prompt로만 붙이므로 전역
 # CLAUDE.md/기본 시스템 프롬프트는 그대로 두고 "이 세션에서의 표현 방식"만 덧댄다.
 # 렌더러(markdown_parser + tk.Text)가 아래 문법을 실제로 스타일링하므로, 모델이
@@ -224,7 +229,7 @@ class BubbleSessionManager:
             try:
                 self._on_title_checkpoint(checkpoint)
             except Exception:
-                logger.warning("[bubble] title checkpoint unavailable")
+                logger.warning("[bubble] title checkpoint unavailable", exc_info=True)
 
     async def _heartbeat_state(self):
         while not self._stopping.is_set():
@@ -267,9 +272,8 @@ class BubbleSessionManager:
             except asyncio.CancelledError:
                 break
             except Exception:
-                logger.warning("[bubble] provider attempt %d/%d failed", attempt_idx + 1, len(attempts))
-                if self._current_request_key is not None:
-                    self._emit({'kind':'provider_unknown','text':'연결이 종료되어 요청 상태를 확인할 수 없습니다.'},self._current_request_key)
+                logger.warning("[bubble] provider attempt %d/%d failed", attempt_idx + 1, len(attempts), exc_info=True)
+                if self._close_turn(_PROVIDER_UNKNOWN_EVENT, self._current_request_key, is_error=True):
                     break  # Never replay an ambiguously sent request on retry.
                 await asyncio.sleep(_RETRY_BACKOFF_SECS)
         else:
@@ -286,8 +290,10 @@ class BubbleSessionManager:
             await self._control.connect()
             async for msg, key in self._control.messages():
                 if key is None or key.attempt_generation == generation: self._handle_message(msg, generation=generation, request_key=key)
-            if self._current_request_key is not None:
-                self._emit({'kind':'provider_unknown','text':'연결이 종료되어 요청 상태를 확인할 수 없습니다.'},self._current_request_key)
+            # The stream ended without a ResultMessage ever closing the turn it
+            # was carrying — a no-op if _handle_message (or the attempt-level
+            # except branch) already closed it.
+            self._close_turn(_PROVIDER_UNKNOWN_EVENT, self._current_request_key, is_error=True)
         finally:
             await self._control.close(); self._control = None
 
@@ -362,8 +368,31 @@ class BubbleSessionManager:
             mcp_servers=mcp_servers,
         )
 
+    def _close_turn(self, event: dict, request_key, *, is_error: bool = False) -> bool:
+        """턴을 정확히 한 번만 닫는 유일한 지점.
+
+        ResultMessage든, 스트림이 이유 없이 끊긴 경우든, generation이 회전해
+        버려지는 늦은 ResultMessage든 — 턴을 끝내는 모든 경로가 여기로 모인다.
+        멱등성은 ``request_key``가 ``_current_request_key``와 일치하는지로
+        판단한다: 성공한 첫 호출이 ``_current_request_key``를 None으로 비우므로,
+        같은 턴을 닫으려는 이후 시도는(이미 None이라) 조용히 아무 일도 하지
+        않는다 — 이벤트루프가 단일 스레드라 그 사이 경쟁 상태가 없다.
+        """
+        if request_key is None or request_key != self._current_request_key:
+            return False
+        self._current_request_key = None
+        if self._state_controller is not None:
+            self._state_controller.event('turn_end', is_error=is_error)
+        self._emit({**event, 'terminal': True, 'is_error': is_error}, request_key)
+        if self._terminal_gate is not None:
+            self._terminal_gate.set()
+        return True
+
     def _handle_message(self, msg: Any, *, generation=None, request_key=None) -> None:
-        if self._stopping.is_set() or (generation is not None and generation != self._attempt_generation):
+        if self._stopping.is_set():
+            return
+        stale_generation = generation is not None and generation != self._attempt_generation
+        if stale_generation and not isinstance(msg, ResultMessage):
             return
         turn_seq = self._current_turn_seq
         if isinstance(msg, SystemMessage):
@@ -382,8 +411,14 @@ class BubbleSessionManager:
             for ev in user_message_to_bubble_events(msg, turn_seq):
                 self._emit(ev, request_key)
         elif isinstance(msg, ResultMessage):
-            if self._state_controller is not None:
-                self._state_controller.event('turn_end', is_error=bool(msg.is_error))
+            if stale_generation:
+                # 재시도로 generation이 회전한 뒤 이전 시도에서 비행 중이던
+                # ResultMessage가 뒤늦게 도착한 경우 — 내용은 더 이상 신뢰할 수
+                # 없지만(이미 새 attempt가 시작됨), 이 메시지가 물고 있던 턴은
+                # 여전히 닫아야 생각풍선/게이트가 안 남는다. request_key가 지금의
+                # _current_request_key와 다르면 _close_turn이 알아서 무시한다.
+                self._close_turn(_PROVIDER_UNKNOWN_EVENT, request_key, is_error=True)
+                return
             if msg.session_id:
                 self._persist_session_id(msg.session_id)
             final_text = "".join(self._assistant_text_buf)
@@ -393,10 +428,8 @@ class BubbleSessionManager:
                 except Exception:
                     logger.exception("[bubble] STM 어시스턴트 메시지 기록 실패")
             event=result_message_to_bubble_event(msg, turn_seq)
-            event.update(terminal=True, is_error=bool(msg.is_error), provider_status=msg.subtype)
-            self._emit(event, request_key)
-            if self._terminal_gate is not None: self._terminal_gate.set()
-            self._current_request_key = None
+            event['provider_status'] = msg.subtype
+            self._close_turn(event, request_key, is_error=bool(msg.is_error))
         # SystemMessage 등은 무시
 
     def _persist_session_id(self, session_id: str) -> None:
@@ -427,4 +460,4 @@ class BubbleSessionManager:
             if request_key is not None: event = {**event, "request_key": {"session_id":request_key.session_id,"request_id":request_key.request_id,"attempt_generation":request_key.attempt_generation}}
             self._on_event(event)
         except Exception:
-            logger.warning("[bubble] on_event callback failed")
+            logger.warning("[bubble] on_event callback failed", exc_info=True)

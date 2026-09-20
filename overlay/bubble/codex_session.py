@@ -21,7 +21,6 @@ from .turn_queue import TurnKey
 class _Active:
     key: TurnKey
     turn_id: str | None = None
-    unknown: bool = False
 
 
 class CodexBubbleSession:
@@ -150,7 +149,7 @@ class CodexBubbleSession:
     def interrupt(self,key):
         with self._lock:
             active=self._active
-            if active is None or active.key!=key or active.unknown:return False
+            if active is None or active.key!=key:return False
         def request():
             try:
                 # turn/started can precede the start RPC response. Until either
@@ -217,7 +216,7 @@ class CodexBubbleSession:
                 try:
                     self._approval_cb(request)
                     result=request.future.result(60)
-                    with self._lock:still_active=self._active is active and not active.unknown
+                    with self._lock:still_active=self._active is active
                     if still_active and getattr(result,'behavior',None)=='allow':decision='accept'
                 except Exception:pass
             try:
@@ -246,12 +245,11 @@ class CodexBubbleSession:
                 status=(params.get('turn') or {}).get('status')
                 if status not in ('completed','interrupted','failed'):
                     self._unknown(key);return
-                self._active=None
                 if self._stm and self._assistant:
                     try:self._stm.record_assistant(''.join(self._assistant))
                     except Exception:pass
                 if self._state:self._state.event('turn_end',is_error=status=='failed')
-                self._safe({'kind':'turn_end','terminal':True,'is_error':status=='failed','provider_status':status},key)
+                self._close_active({'kind':'turn_end','provider_status':status},key,is_error=status=='failed')
             elif method=='item/agentMessage/delta':
                 text=params.get('delta','')
                 if isinstance(text,str):
@@ -264,11 +262,22 @@ class CodexBubbleSession:
                 if item.get('type') in ('commandExecution','fileChange','mcpToolCall'):
                     self._safe({'kind':'tool_use','tool_name':item['type']},key)
 
-    def _unknown(self,key):
+    def _close_active(self,event,key,*,is_error=False):
+        """Idempotently end whichever turn ``key`` names — mirrors
+        BubbleSessionManager._close_turn (session.py). send_rich() refuses a
+        new turn while self._active is set, so every path that can end a turn
+        (a normal turn/completed, a dead reader, or an overflowed early-event
+        buffer) must clear it exactly once here — otherwise the session
+        wedges forever after the first ambiguous outcome, since nothing else
+        ever resets self._active back to None."""
         with self._lock:
-            if not self._active or self._active.key!=key:return
-            self._active.unknown=True
-        self._safe({'kind':'provider_unknown','text':'Codex 요청의 종료 상태를 확인할 수 없습니다.'},key)
+            if not self._active or self._active.key!=key:return False
+            self._active=None
+        self._safe({**event,'terminal':True,'is_error':is_error},key)
+        return True
+
+    def _unknown(self,key):
+        self._close_active({'kind':'provider_unknown','text':'Codex 요청의 종료 상태를 확인할 수 없습니다.'},key,is_error=True)
 
     def _safe(self,event,key):
         if self._stopping.is_set():return

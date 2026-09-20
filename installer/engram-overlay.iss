@@ -59,11 +59,14 @@ Name: "custom"; Description: "내장 볼따구 + 선택 구성요소"; Flags: is
 
 [Components]
 Name: "native"; Description: "Engram 및 내장 볼따구 (기본)"; Types: custom; Flags: fixed
+Name: "addons"; Description: "애드온 — 선택 설치되는 부가 기능"
+#include "addons\tree.iss"
 Name: "external"; Description: "외부 오버레이 v{#ExternalOverlayVersion} — 설치만 하며 현재 캐릭터를 변경하지 않음"
 #include "external-components\tree.iss"
 Name: "sdk"; Description: "개발자 SDK — 안내와 예제 (오버레이 선택과 독립)"
 
 [Files]
+#include "addons\files.iss"
 #include "external-components\files.iss"
 Source: "component-status.ps1"; Flags: dontcopy
 Source: "external-components.ps1"; Flags: dontcopy
@@ -89,6 +92,7 @@ Source: "external-bundle.ps1"; DestDir: "{app}\installer"; Flags: ignoreversion
 Source: "external-components.pin"; DestDir: "{app}\installer"; Flags: ignoreversion
 Source: "external-wheel.ps1"; DestDir: "{app}\installer"; Flags: ignoreversion
 Source: "stop-engram-processes.ps1"; DestDir: "{app}\installer"; Flags: ignoreversion
+Source: "addons.ps1"; DestDir: "{app}\installer"; Flags: ignoreversion
 ; configure.ps1 이 검증된 외부 renderer 버전을 읽는다. 같이 배포되지 않으면 unpinned 로 떨어진다.
 Source: "external-overlay.pin"; DestDir: "{app}\installer"; Flags: ignoreversion
 Source: "external-overlay.ps1"; DestDir: "{app}\installer"; Flags: ignoreversion
@@ -129,12 +133,31 @@ begin
 end;
 
 #include "external-components\code.iss"
+#include "addons\code.iss"
+
+{ 외부 전체 선택/해제 버튼은 external 컴포넌트 전용이다. WizardSelectComponents 는
+  전체 선택 상태를 갈아치우므로, 언급하지 않은 addon 선택까지 지워버리지 않도록
+  현재 선택된 addon 항목을 보존해 다시 넣어준다. }
+function CurrentlySelectedAddonNames(): String;
+var
+  Names: TArrayOfString;
+  I: Integer;
+begin
+  Result := '';
+  Names := StringSplit(AllAddonComponentNames(), [','], stAll);
+  for I := 0 to GetArrayLength(Names) - 1 do
+    if WizardIsComponentSelected(Names[I]) then begin
+      if Result <> '' then Result := Result + ',';
+      Result := Result + Names[I];
+    end;
+end;
 
 procedure SelectAllExternalClick(Sender: TObject);
 var Selection: String;
 begin
   Selection := 'native,' + AllExternalComponentNames();
   if WizardIsComponentSelected('sdk') then Selection := Selection + ',sdk';
+  if CurrentlySelectedAddonNames() <> '' then Selection := Selection + ',' + CurrentlySelectedAddonNames();
   WizardSelectComponents(Selection);
 end;
 
@@ -143,6 +166,7 @@ var Selection: String;
 begin
   Selection := 'native';
   if WizardIsComponentSelected('sdk') then Selection := Selection + ',sdk';
+  if CurrentlySelectedAddonNames() <> '' then Selection := Selection + ',' + CurrentlySelectedAddonNames();
   WizardSelectComponents(Selection);
 end;
 
@@ -336,6 +360,8 @@ begin
     R := R + ' -ExternalOverlayComponents ' + Q + ExternalOverlayComponentsCode() + Q;
   R := R + ' -ExternalOverlaySdk ' + ExternalOverlaySdkCode();
   R := R + ' -ExternalComponentManifestPath ' + Q + ExpandConstant('{tmp}\component-bundle\engram-overlay-components.json') + Q;
+  R := R + ' -Addons ' + Q + SelectedAddonComponentIds() + Q;
+  R := R + ' -AddonPayloadRoot ' + Q + ExpandConstant('{tmp}\addon-bundle') + Q;
   if Trim(QueryPage.Values[0]) <> '' then
     R := R + ' -OllamaModel ' + Q + Trim(QueryPage.Values[0]) + Q;
   if Trim(QueryPage.Values[1]) <> '' then
@@ -404,6 +430,7 @@ begin
   if (ExternalOverlayComponentsCode() <> '') and not ExternalInventoryAvailable then
     RaiseException('외부 설치 정보를 확인할 수 없습니다. 기존 파일은 보존되었습니다. 외부 항목 없이 다시 설치하거나 기존 설치를 복구하세요.');
   PrepareExternalComponentBundle();
+  PrepareAddonBundle();
   WizardForm.StatusLabel.Caption := 'AMBER (ENGRAM) 구성 중 (config · MCP · 바로가기)...';
   Params := '-NoProfile -ExecutionPolicy Bypass -File "' +
     ExpandConstant('{app}\installer\configure.ps1') + '" ' + GetConfigureParams('');
