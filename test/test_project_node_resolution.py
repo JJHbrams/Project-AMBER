@@ -17,34 +17,67 @@ from unittest import mock
 from core.context import project_scope
 
 
-def _fake_conn(node_ids):
+def _fake_conn(nodes):
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
-    conn.execute("CREATE TABLE kg_nodes (id TEXT, type TEXT, updated_at TEXT)")
-    for i, nid in enumerate(node_ids):
+    conn.execute("CREATE TABLE kg_nodes (id TEXT, type TEXT, path TEXT, updated_at TEXT)")
+    for i, (nid, path) in enumerate(nodes):
         conn.execute(
-            "INSERT INTO kg_nodes (id, type, updated_at) VALUES (?, 'project', ?)",
-            (nid, f"2026-09-{10 + i:02d}"),
+            "INSERT INTO kg_nodes (id, type, path, updated_at) VALUES (?, 'project', ?, ?)",
+            (nid, path, f"2026-09-{10 + i:02d}"),
         )
     conn.commit()
     return conn
 
 
-class ExactMatchOnlyTests(unittest.TestCase):
+class OverviewOnlyTests(unittest.TestCase):
+    """대표 노트만 후보다. ``projects/**`` 는 전부 type='project' 라 깊이가 판별한다."""
+
     NODES = [
-        "graph-memory-roadmap",
-        "truviewcadmom-mode-collapse-디버깅-기록",
-        "truviewcadmom",
-        "project-amber-project-engram",
+        # 하위 디렉터리의 문서들 — 대표 노트가 아니다.
+        ("graph-memory-roadmap", r"projects\000_Project_Engram\design\graph-memory-roadmap.md"),
+        ("truviewcadmom-mode-collapse-디버깅-기록",
+         r"projects\001_TruviewCADMOM\bug_report\mode-collapse.md"),
+        ("session-agent-orchestration",
+         r"projects\000_Project_Engram\report\session-agent-orchestration.md"),
+        # 대표 노트 — 파일명 관습이 넷 다 다르다.
+        ("truviewcadmom", r"projects\001_TruviewCADMOM\index.md"),
+        ("project-amber-project-engram", r"projects\000_Project_Engram\overview.md"),
+        ("claude-image-forge-overview",
+         r"projects\claude-image-forge\claude-image-forge-overview.md"),
+        ("session-agent-orchestration-overview",
+         r"projects\session-agent-orchestration\session-agent-orchestration-overview.md"),
+        ("dgx-server", r"projects\dgx-server\dgx-server.md"),
     ]
 
-    def _resolve(self, key, mapping=None):
+    def _resolve(self, key, mapping=None, nodes=None):
         with mock.patch.object(project_scope, "get_cfg_value", return_value=mapping or {}), \
-             mock.patch.object(project_scope, "get_connection", return_value=_fake_conn(self.NODES)):
+             mock.patch.object(project_scope, "get_connection",
+                               return_value=_fake_conn(nodes or self.NODES)):
             return project_scope.resolve_kg_node_id(key)
 
-    def test_exact_id_resolves(self):
+    def test_directory_named_overview_resolves(self):
         self.assertEqual(self._resolve("truviewcadmom"), "truviewcadmom")
+
+    def test_numeric_directory_prefix_is_ignored(self):
+        """``001_TruviewCADMOM`` 의 정렬용 접두사는 프로젝트 이름이 아니다."""
+        self.assertEqual(self._resolve("truviewcadmom-2586e5d8"), "truviewcadmom")
+
+    def test_project_named_overview_file_resolves(self):
+        """``<프로젝트>-overview.md`` 관습을 쓰는 신규 프로젝트도 걸린다."""
+        self.assertEqual(
+            self._resolve("claude-image-forge-bd18a961"), "claude-image-forge-overview"
+        )
+
+    def test_a_child_report_does_not_win_over_the_real_overview(self):
+        """같은 이름의 하위 보고서가 다른 프로젝트 밑에 있어도 대표 노트가 이긴다."""
+        self.assertEqual(
+            self._resolve("session-agent-orchestration-88eff352"),
+            "session-agent-orchestration-overview",
+        )
+
+    def test_file_named_after_its_directory_resolves(self):
+        self.assertEqual(self._resolve("dgx-server"), "dgx-server")
 
     def test_digest_suffix_is_stripped_before_matching(self):
         self.assertEqual(
@@ -52,10 +85,9 @@ class ExactMatchOnlyTests(unittest.TestCase):
             "project-amber-project-engram",
         )
 
-    def test_prefix_no_longer_matches_a_longer_node(self):
-        """'truviewcadmom' 이 버그리포트 노드로 새지 않는다."""
-        got = self._resolve("truviewcadmom")
-        self.assertNotEqual(got, "truviewcadmom-mode-collapse-디버깅-기록")
+    def test_a_child_document_is_never_a_candidate(self):
+        """하위 문서는 이름이 정확히 같아도 걸리지 않는다."""
+        self.assertIsNone(self._resolve("graph-memory-roadmap"))
 
     def test_unrelated_key_resolves_to_nothing(self):
         """맞는 노드가 없으면 추측하지 않고 None. 호출부가 project_key 를 쓴다."""
@@ -70,6 +102,14 @@ class ExactMatchOnlyTests(unittest.TestCase):
             with self.subTest(key=key):
                 self.assertIsNone(self._resolve(key))
 
+    def test_an_ambiguous_name_is_not_guessed(self):
+        """두 프로젝트가 같은 이름을 주장하면 고르지 않는다."""
+        nodes = [
+            ("alpha-overview", r"projects\alpha\alpha-overview.md"),
+            ("alpha", r"projects\001_alpha\index.md"),
+        ]
+        self.assertIsNone(self._resolve("alpha", nodes=nodes))
+
     def test_explicit_mapping_wins(self):
         got = self._resolve(
             "projectintelcontunuum-a323e1a1",
@@ -78,7 +118,7 @@ class ExactMatchOnlyTests(unittest.TestCase):
         self.assertEqual(got, "project-amber-project-engram")
 
     def test_separator_differences_are_normalized(self):
-        self.assertEqual(self._resolve("graph_memory_roadmap"), "graph-memory-roadmap")
+        self.assertEqual(self._resolve("dgx_server"), "dgx-server")
 
 
 class ShippedMappingTests(unittest.TestCase):

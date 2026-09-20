@@ -4,6 +4,112 @@ All notable changes to this project are documented in this file.
 
 ## Unreleased
 
+## [1.5.21] — 2026-09-20
+
+### Added
+
+- The overlay's right-click menu gained **check for update**. It compares the
+  latest GitHub release tag against the installed version and, if a newer one
+  exists, reports the download size, asks for consent, and then downloads and
+  runs `setup.exe`.
+  - Release tags are three-part (`v1.5.20`) while the installed version is
+    four-part (`1.5.20.831`); only the shared digits are compared. The build
+    number differs even within the same release, so comparing it too would
+    mark every install as "a newer version is available".
+  - A user can change their mind after the download finishes, so consent is
+    asked again at that point; declining keeps the downloaded file instead of
+    deleting it, so the same 205 MB is not fetched twice.
+  - Lookup and download run on a worker thread; UI updates are marshalled to
+    the Tk thread. Network failure, timeout, anonymous-lookup rate limit,
+    missing asset, and disk failure each end in a distinct message.
+- `setup.exe` now offers four optional add-ons (`claude-image-forge`,
+  `structured-reporting`, `session-agent-orchestration`, `feature-spec`) as a
+  selectable install step, updating them if already present.
+  - Procurement happens at build time. `installer/addons.pin` is the single
+    source of truth for the repo/ref/path mapping, and `build-addons.ps1`
+    bakes that commit into a zip. No network access or credentials are
+    required at install time.
+  - It is a **mapping**, not a whitelist. Each upstream repo keeps
+    `SKILL.md` in a different place (`skills/image-forge/`,
+    `adapters/claude/`, `.agents/skills/session-orchestrate/`), so copying
+    the repo layout verbatim would not be recognized as a skill.
+  - The skill name and MCP spec travel with the payload inside each zip's
+    `.addon-meta.json`. A separately delivered manifest would drift from the
+    install path, leaving the installer and the MCP registrar using
+    different names.
+  - A same-named skill the user wrote themselves is never overwritten; the
+    reason is printed instead. If we installed it, it is updated; if there
+    is no install record but the content matches the distributed original,
+    it is adopted. `-Force` leaves an `.engram-bak`.
+  - The MCP server is registered only when its prerequisites (`node` ≥ 18,
+    `session-orchestrator-mcp`) actually resolve. If not, only the skill is
+    installed, and that fact is reported — a dead entry is never written.
+
+### Changed
+
+- Daily notes now group by **project** rather than by time. Project is the
+  outer heading (`# <project>`) and time is the inner one (`## HH:MM`).
+  Previously time was the outer axis, so reading one project's day meant
+  skipping past everything else.
+  - When a span touches several projects, the section is filed under one
+    representative project and the rest are named in the body's
+    `- Project:` line — duplicating the summary per project would hide
+    which copy is the original. This case has become rare since sessions
+    began splitting per conversation.
+  - Existing notes are migrated with
+    `scripts/dev/migrate_daily_notes_to_project_sections.py`. It is
+    dry-run by default and keeps a `.bak` when run with `--apply`.
+
+### Fixed
+
+- A bubble turn could stay open forever — thinking bubble stuck, no reply —
+  because every turn-closing side effect (state transition, terminal emit,
+  gate release, request-key cleanup) lived only in the `ResultMessage`
+  branch. If the stream ended without a result, nothing closed the turn.
+  - The defensive fallback leaked in two places: it never fired when the
+    request key was already empty, and when it did fire, the bubble side
+    did not consume the signal, so the thinking bubble never closed. State
+    unwound while the screen stayed stuck — the two drifted apart.
+  - Turn closing is now a single path. Closing clears the request key, so
+    an attempt to close the same turn twice is simply ignored — duplicate
+    prevention is structural, not a special case.
+  - The Codex path had the same family of defect, worse: an ambiguously
+    finished request was never cleaned up, so **that session could no
+    longer send any further turn** — not a frozen screen, but a wedged
+    conversation.
+  - Failure logs carried no exception content, forcing root-causing back
+    through the provider SDK's own logs. The three warnings that had been
+    swallowing exceptions now log their content.
+- Install no longer fails at the very end on profiles where Windows special
+  folders do not resolve. `[Environment]::GetFolderPath()` fails silently
+  and returns an **empty string** rather than throwing, and 11 call sites
+  passed that value straight into `Join-Path`. On redirected or
+  policy-managed profiles, this surfaced only after the rest of setup had
+  finished, as a bare `Runtime error` with exit code 1.
+  - Instead of guarding every call site, all of them now go through one
+    `Get-EngramKnownFolder`, which returns `$null` instead of an empty
+    string, so a caller cannot pass the value through without branching.
+    The first fix covered only the site where the symptom appeared; a
+    second call site with the same root cause (a parameter default in
+    `joint-startup.ps1`) reproduced the same failure in the field.
+  - Shortcuts and autostart are optional features, so a resolution failure
+    skips just that step, prints the reason, and lets the rest of setup
+    complete.
+- Linking a project to its wiki node now resolves the project's
+  **overview** note, not merely an exact node-id match.
+  - Every note under `projects/**` is stored as `type='project'`, so a
+    child report whose name matched the project key previously won the
+    match over the real overview —
+    `session-agent-orchestration` pointed at a report buried inside
+    `000_Project_Engram`.
+  - A project whose overview file is named `<project>-overview.md` got no
+    link at all (`claude-image-forge`).
+  - Resolution now looks only at a note sitting directly inside a project
+    directory, accepts the four filename conventions in use (`overview.md`,
+    `index.md`, `<project>-overview.md`, `<project>.md`), and ignores the
+    sort prefix on directories like `001_TruviewCADMOM`. Two candidates for
+    one name resolve to nothing rather than a guess.
+
 ## [1.5.20] — 2026-09-18
 
 ### Added

@@ -11,6 +11,7 @@ import tempfile
 import threading
 
 from core.config.runtime_config import get_cfg_value, get_db_root_dir
+from core.context.project_scope import resolve_kg_node_id
 from core.graph.knowledge import get_kg
 
 
@@ -33,15 +34,6 @@ def _external_path_lock(path: Path) -> threading.Lock:
         return _EXTERNAL_PATH_LOCKS.setdefault(str(path.resolve()).lower(), threading.Lock())
 
 
-def _append_once(path: Path, marker: str, initial: str, block: str) -> bool:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    text = path.read_text(encoding="utf-8") if path.exists() else initial
-    if marker in text:
-        return False
-    path.write_text(text.rstrip() + "\n\n" + block.strip() + "\n", encoding="utf-8")
-    return True
-
-
 def _engram_daily_initial(day: str, project_node_id: str) -> str:
     links = f"\nlinks:\n  - {project_node_id}" if project_node_id else ""
     return (
@@ -56,9 +48,7 @@ def _engram_daily_initial(day: str, project_node_id: str) -> str:
         f"created: {day}\n"
         f"updated: {day}"
         f"{links}\n"
-        "---\n\n"
-        f"# {day}\n\n"
-        "## Engram 자동 체크포인트\n"
+        "---\n"
     )
 
 
@@ -75,17 +65,59 @@ def _display_project(project_key: str) -> str:
     return re.sub(r"-[0-9a-f]{8}$", "", str(project_key or "").strip())
 
 
-# 헤딩에 프로젝트 이름을 몇 개까지 적을지. 넘으면 "외 N개"로 접는다 —
-# 한 구간에 6개까지 섞이는데 전부 제목에 넣으면 시각이 안 보인다.
-_HEADING_PROJECT_LIMIT = 2
+# 하나의 체크포인트 항목은 주석 한 줄과 시각 제목 한 줄로 시작한다. 시각 줄만
+# 앵커로 쓰면 새 항목이 기존 항목의 주석과 제목 사이로 끼어들어 둘이 엉킨다.
+_ENTRY_RE = re.compile(
+    r"^<!-- engram-checkpoint:[^\r\n]*-->\r?\n## (?P<time>\d{1,2}:\d{2})[^\r\n]*$",
+    re.MULTILINE,
+)
+# 수평 공백만 먹는다. ``\s*$`` 는 줄바꿈까지 삼켜서 매치 끝이 다음 줄로 밀리고,
+# 그 자리에 블록을 끼울 때마다 빈 줄이 하나씩 늘어난다.
+_H1_RE = re.compile(r"^# (?P<name>[^\r\n]+?)[^\S\r\n]*$", re.MULTILINE)
 
 
-def _heading_label(project_label: str) -> str:
-    names = [n.strip() for n in str(project_label or "").split(",") if n.strip()]
-    if len(names) <= _HEADING_PROJECT_LIMIT:
-        return project_label or "general"
-    head = ", ".join(names[:_HEADING_PROJECT_LIMIT])
-    return f"{head} 외 {len(names) - _HEADING_PROJECT_LIMIT}개"
+def _section_heading(project_key: str, project_keys: list[str] | None) -> str:
+    """체크포인트가 들어갈 프로젝트 섹션 이름.
+
+    ``project_keys`` 는 등장 순서가 아니라 **많이 나온 순**이라 앞이 대표다.
+    한 구간에 여러 프로젝트가 걸리는 것은 대화별 세션 분리 이전의 잔재이고 지금은
+    거의 생기지 않는다. 그 드문 경우에도 섹션은 대표 하나만 쓴다 — 같은 요약을
+    프로젝트마다 복제하면 파일이 부풀고 어디가 원본인지 알 수 없게 된다. 나머지
+    프로젝트는 본문 ``- 프로젝트:`` 줄에 전부 남으므로 기록이 사라지지는 않는다.
+    """
+    for key in list(project_keys or []) + [project_key]:
+        name = _display_project(key)
+        if name:
+            return name
+    return "general"
+
+
+def _project_links(project_keys: list[str] | None, project_key: str, project_node_id: str) -> str:
+    """본문에 적을 프로젝트 목록. 노드가 확인된 것만 위키링크로 건다.
+
+    추측 링크는 무관한 문서를 가리키므로, 해소되지 않으면 이름만 남긴다.
+
+    프로젝트가 하나면 호출부가 이미 해석해 넘긴 ``project_node_id`` 가 정답이다.
+    여러 개인 구간에서만 호출부가 None 을 주므로(요약이 엉킨 채로 어느 한 노드의
+    Progress 를 덮지 않기 위해서다), 그때만 키별로 다시 해석한다.
+    """
+    keys = [key for key in (project_keys or []) if key] or [project_key]
+    names = list(dict.fromkeys(name for name in (_display_project(key) for key in keys) if name))
+    if not names:
+        return ""
+    if len(names) == 1:
+        return f"[[{project_node_id}]]" if project_node_id else names[0]
+
+    rendered: list[str] = []
+    seen: set[str] = set()
+    for key in keys:
+        name = _display_project(key)
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        node = resolve_kg_node_id(key)
+        rendered.append(f"[[{node}]]" if node else name)
+    return ", ".join(rendered)
 
 
 def _checkpoint_block(
@@ -96,23 +128,76 @@ def _checkpoint_block(
     project_label: str,
     project_node_id: str = "",
     related_path: Path | None = None,
+    project_keys: list[str] | None = None,
 ) -> str:
     lines = [
         f"<!-- engram-checkpoint:{checkpoint_id} -->",
-        f"### {now.strftime('%H:%M')} — {_heading_label(project_label)}",
+        f"## {now.strftime('%H:%M')}",
         f"- 요약: {summary}",
     ]
     if open_intents:
         lines.append(f"- 다음 작업: {open_intents}")
-    # 프로젝트는 cwd 에서 나온 사실이라 항상 적는다. KG 노드가 확인된 경우에만
-    # 위키링크로 걸고, 아니면 이름만 남긴다 — 추측 링크는 무관한 문서를 가리킨다.
-    if project_node_id:
-        lines.append(f"- 프로젝트: [[{project_node_id}]]")
-    elif project_label:
-        lines.append(f"- 프로젝트: {project_label}")
+    # 프로젝트는 cwd 에서 나온 사실이라 항상 적는다. 섹션 헤딩은 대표 하나만
+    # 보여주므로, 구간에 섞인 나머지는 이 줄에서만 확인할 수 있다.
+    links = _project_links(project_keys, project_label, project_node_id)
+    if links:
+        lines.append(f"- 프로젝트: {links}")
     if related_path is not None:
         lines.append(f"- 연관 노트: [{related_path.name}]({related_path.as_uri()})")
     return "\n".join(lines)
+
+
+def _minutes(value: str) -> int:
+    hour, _, minute = value.partition(":")
+    return int(hour) * 60 + int(minute)
+
+
+def _insert_by_time(section: str, block: str, minutes: int) -> str:
+    """섹션을 항목 단위로 풀었다가 시각 순서로 다시 짠다.
+
+    이어붙이지 않고 매번 다시 렌더링하는 이유는 빈 줄이 새지 않게 하기 위해서다.
+    끼워넣기를 반복하면 항목 사이 간격이 호출 순서에 따라 제각각이 된다.
+    """
+    starts = [match.start() for match in _ENTRY_RE.finditer(section)]
+    preamble = (section[:starts[0]] if starts else section).strip()
+    bounds = starts + [len(section)]
+    entries = [
+        (_minutes(_ENTRY_RE.match(section, begin).group("time")), section[begin:end].strip())
+        for begin, end in zip(bounds, bounds[1:])
+    ]
+    position = next((i for i, (at, _) in enumerate(entries) if at > minutes), len(entries))
+    entries.insert(position, (minutes, block.strip()))
+
+    parts = ([preamble] if preamble else []) + [body for _, body in entries]
+    return "\n\n" + "\n\n".join(parts) + "\n"
+
+
+def _upsert_project_section(
+    path: Path, marker: str, initial: str, heading: str, block: str, minutes: int
+) -> bool:
+    """``# <프로젝트>`` 섹션 밑에 ``## HH:MM`` 소제목으로 체크포인트를 기록한다.
+
+    하루를 시각 순으로 죽 늘어놓으면 한 프로젝트가 어떻게 흘러갔는지 읽으려고
+    무관한 항목을 건너뛰어야 한다. 프로젝트를 바깥 축으로 두면 각 프로젝트의
+    하루가 한 덩어리로 읽힌다.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    text = path.read_text(encoding="utf-8") if path.exists() else initial
+    if marker in text:
+        return False
+
+    headings = list(_H1_RE.finditer(text))
+    target = next((m for m in headings if m.group("name").strip() == heading), None)
+    if target is None:
+        updated = f"{text.rstrip()}\n\n# {heading}\n\n{block.strip()}\n"
+    else:
+        following = next((m for m in headings if m.start() > target.start()), None)
+        start = target.end()
+        end = following.start() if following else len(text)
+        body = _insert_by_time(text[start:end], block, minutes)
+        updated = text[:start] + body + ("\n" + text[end:] if following else "")
+    path.write_text(updated, encoding="utf-8")
+    return True
 
 
 def _clean_journal_text(value: str) -> str:
@@ -294,28 +379,30 @@ def append_daily_checkpoint(
 ) -> dict[str, object]:
     """project_keys: 이 구간에 실제로 등장한 프로젝트 전부(많이 나온 순).
 
-    한 체크포인트 구간에 여러 프로젝트가 섞이는 게 예외가 아니라 기본이다.
-    대표 하나만 적으면 나머지 작업이 기록에서 사라진다.
+    대화별 세션 분리 이후로는 구간마다 프로젝트가 하나로 수렴하지만, 분리 이전에
+    열린 세션은 아직 여러 개를 담는다. 대표 하나만 적으면 나머지 작업이 기록에서
+    사라지므로, 섹션은 대표로 고르되 본문에는 전부 남긴다.
     """
     day = now.strftime("%Y-%m-%d")
     docs_root = Path(get_db_root_dir()) / "docs"
     engram_path = docs_root / "daily" / f"{day}.md"
     marker = f"engram-checkpoint:{checkpoint_id}"
-    observed = [_display_project(k) for k in (project_keys or []) if k]
-    project_label = project_node_id or (", ".join(observed) if observed else _display_project(project_key)) or "general"
     engram_block = _checkpoint_block(
         checkpoint_id,
         now,
         summary,
         open_intents,
-        project_label,
+        project_key,
         project_node_id=project_node_id or "",
+        project_keys=project_keys,
     )
-    engram_written = _append_once(
+    engram_written = _upsert_project_section(
         engram_path,
         marker,
         _engram_daily_initial(day, project_node_id or ""),
+        _section_heading(project_key, project_keys),
         engram_block,
+        now.hour * 60 + now.minute,
     )
 
     kg = get_kg()

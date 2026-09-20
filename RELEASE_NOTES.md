@@ -21,6 +21,13 @@
 - Fixed install failing at the very end on profiles where Windows special
   folders do not resolve (`GetFolderPath` returns an empty string, which then
   crashed `Join-Path`).
+- Daily notes now group by **project** instead of by time: project is the
+  outer heading and time is the inner one, so reading one project's day no
+  longer means skipping past every unrelated entry. A migration script
+  converts existing notes.
+- Fixed project-to-wiki-node linking to resolve the project's **overview**
+  note instead of an exact node-id match, which let an unrelated child report
+  win the link or leave some projects unlinked entirely.
 
 ### What Changed
 
@@ -39,6 +46,12 @@
 - `installer/install.ps1`, `installer/joint-startup.ps1`, and
   `installer/modules/{02_interactive,07_shims,10_shortcuts}.ps1` guard
   Windows special-folder resolution before `Join-Path`.
+- `core/memory/daily_checkpoint.py` groups checkpoint entries by project
+  heading instead of by time, and `core/context/project_scope.py` resolves a
+  project's overview note (four filename conventions, sort-prefix agnostic)
+  instead of matching node ids by prefix.
+  `scripts/dev/migrate_daily_notes_to_project_sections.py` migrates existing
+  notes (dry-run by default, `--apply` keeps a `.bak`).
 
 ### Impact
 
@@ -50,6 +63,10 @@
   provider result, particularly on the Codex path.
 - Installs on profiles with non-resolving special folders no longer fail at
   the last step.
+- A project's daily activity reads as one contiguous block instead of being
+  interleaved with every other project worked on the same day.
+- Project wikilinks in the daily note point at the actual overview page
+  instead of an unrelated report or nothing at all.
 
 ### Validation
 
@@ -84,6 +101,9 @@
 - overlay/bubble/session.py
 - overlay/bubble/codex_session.py
 - overlay/bubble/bubble_manager.py
+- core/memory/daily_checkpoint.py
+- core/context/project_scope.py
+- scripts/dev/migrate_daily_notes_to_project_sections.py
 
 ## 2026-09-18 - v1.5.20: Persona by Example and Per-Conversation Sessions
 

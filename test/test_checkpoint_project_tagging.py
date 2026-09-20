@@ -10,8 +10,11 @@ session-agent-orchestration(11,730줄)인데 기록은 전부 ProjectIntelContun
 """
 
 import json
+import tempfile
 import unittest
 from datetime import datetime
+from pathlib import Path
+from unittest import mock
 
 from core.memory.transcript_capture import extract_turn_record
 from core.memory.daily_checkpoint import _checkpoint_block
@@ -122,37 +125,133 @@ class DisplayNameTests(unittest.TestCase):
         self.assertEqual(_display_project(""), "")
 
 
-class HeadingLabelTests(unittest.TestCase):
-    def _h(self, label):
-        from core.memory.daily_checkpoint import _heading_label
+class SectionHeadingTests(unittest.TestCase):
+    def _h(self, project_key, project_keys=None):
+        from core.memory.daily_checkpoint import _section_heading
 
-        return _heading_label(label)
+        return _section_heading(project_key, project_keys)
 
-    def test_two_or_fewer_are_listed_in_full(self):
-        self.assertEqual(self._h("alpha, beta"), "alpha, beta")
+    def test_dominant_project_becomes_the_section(self):
+        """project_keys 는 많이 나온 순이라 앞이 대표다."""
+        self.assertEqual(
+            self._h("fallback", ["truviewcadmom-2586e5d8", "projectintelcontunuum-a323e1a1"]),
+            "truviewcadmom",
+        )
 
-    def test_more_than_two_are_folded(self):
-        self.assertEqual(self._h("alpha, beta, gamma, delta"), "alpha, beta 외 2개")
+    def test_falls_back_to_the_project_key(self):
+        self.assertEqual(self._h("session-agent-orchestration-88eff352", []), "session-agent-orchestration")
 
     def test_empty_falls_back(self):
-        self.assertEqual(self._h(""), "general")
+        self.assertEqual(self._h("", None), "general")
 
 
 class CheckpointBlockLabelTests(unittest.TestCase):
     def _block(self, **kw):
         return _checkpoint_block("cp-1", datetime(2026, 9, 17, 17, 53), "요약", "", **kw)
 
+    def test_time_is_the_only_heading(self):
+        """프로젝트는 바깥 섹션이 말한다. 항목 제목에는 시각만 남는다."""
+        out = self._block(project_label="engram", project_node_id="")
+        self.assertIn("## 17:53", out)
+        self.assertNotIn("###", out)
+        self.assertNotIn("—", out)
+
     def test_multiple_projects_are_all_recorded(self):
-        """헤딩은 접고 본문에 전부 남긴다 — 제목이 목록이 되면 시각이 안 보인다."""
-        label = "session-agent-orchestration, projectintelcontunuum, truviewcadmom"
-        out = self._block(project_label=label, project_node_id="")
-        self.assertIn("### 17:53 — session-agent-orchestration, projectintelcontunuum 외 1개", out)
-        self.assertIn(f"- 프로젝트: {label}", out)
+        """섹션은 대표 하나뿐이므로 나머지는 이 줄에서만 확인할 수 있다."""
+        keys = ["session-agent-orchestration", "projectintelcontunuum", "truviewcadmom"]
+        with mock.patch("core.memory.daily_checkpoint.resolve_kg_node_id", return_value=None):
+            out = self._block(project_label="", project_node_id="", project_keys=keys)
+        self.assertIn(f"- 프로젝트: {', '.join(keys)}", out)
         self.assertNotIn("[[", out)
+
+    def test_each_resolved_project_is_linked(self):
+        nodes = {"claude-image-forge": "claude-image-forge-overview", "mystery": None}
+        with mock.patch("core.memory.daily_checkpoint.resolve_kg_node_id", side_effect=nodes.get):
+            out = self._block(project_label="", project_node_id="",
+                              project_keys=["claude-image-forge", "mystery"])
+        self.assertIn("- 프로젝트: [[claude-image-forge-overview]], mystery", out)
 
     def test_single_known_project_keeps_the_wiki_link(self):
         out = self._block(project_label="engram", project_node_id="project-amber-project-engram")
         self.assertIn("- 프로젝트: [[project-amber-project-engram]]", out)
+
+
+class ProjectSectionWriterTests(unittest.TestCase):
+    """프로젝트가 바깥 축, 시각이 안쪽 축인 daily note 구조."""
+
+    def setUp(self):
+        self._dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._dir.cleanup)
+        self.path = Path(self._dir.name) / "2026-09-18.md"
+
+    def _write(self, heading, time_text, checkpoint_id="cp"):
+        from core.memory.daily_checkpoint import _upsert_project_section
+
+        hour, minute = (int(part) for part in time_text.split(":"))
+        block = f"<!-- engram-checkpoint:{checkpoint_id} -->\n## {time_text}\n- 요약: {checkpoint_id}"
+        return _upsert_project_section(
+            self.path, f"engram-checkpoint:{checkpoint_id}", "---\nid: daily\n---\n",
+            heading, block, hour * 60 + minute,
+        )
+
+    def _headings(self):
+        return [line for line in self.path.read_text(encoding="utf-8").splitlines()
+                if line.startswith("#")]
+
+    def test_project_is_the_outer_heading_and_time_the_inner_one(self):
+        self._write("projA", "12:30", "a1")
+        self.assertEqual(self._headings(), ["# projA", "## 12:30"])
+
+    def test_same_project_accumulates_under_one_heading(self):
+        self._write("projA", "12:30", "a1")
+        self._write("projA", "15:06", "a2")
+        self.assertEqual(self._headings(), ["# projA", "## 12:30", "## 15:06"])
+
+    def test_entries_are_ordered_by_time_not_arrival(self):
+        self._write("projA", "15:06", "a2")
+        self._write("projA", "12:30", "a1")
+        self.assertEqual(self._headings(), ["# projA", "## 12:30", "## 15:06"])
+
+    def test_an_earlier_entry_does_not_split_a_later_one(self):
+        """앵커가 시각 줄이면 새 블록이 기존 주석과 제목 사이로 끼어든다."""
+        self._write("projA", "15:06", "a2")
+        self._write("projA", "12:30", "a1")
+        text = self.path.read_text(encoding="utf-8")
+        self.assertIn("<!-- engram-checkpoint:a2 -->\n## 15:06", text)
+        self.assertIn("<!-- engram-checkpoint:a1 -->\n## 12:30", text)
+
+    def test_a_new_project_gets_its_own_section(self):
+        self._write("projA", "12:30", "a1")
+        self._write("projB", "09:30", "b1")
+        self._write("projA", "15:06", "a2")
+        self.assertEqual(self._headings(),
+                         ["# projA", "## 12:30", "## 15:06", "# projB", "## 09:30"])
+
+    def test_the_same_checkpoint_is_not_written_twice(self):
+        self.assertTrue(self._write("projA", "12:30", "a1"))
+        self.assertFalse(self._write("projA", "12:30", "a1"))
+        self.assertEqual(self._headings().count("## 12:30"), 1)
+
+    def test_spacing_does_not_drift_with_repeated_writes(self):
+        """끼워넣기를 반복해도 항목 간격이 호출 순서를 타지 않는다."""
+        for i, time_text in enumerate(["15:06", "12:30", "16:40", "09:05", "13:00"]):
+            self._write("projA", time_text, f"a{i}")
+        self._write("projB", "10:00", "b0")
+        self._write("projA", "11:11", "a9")
+        self.assertNotIn("\n\n\n", self.path.read_text(encoding="utf-8"))
+
+    def test_a_preamble_under_a_project_is_kept(self):
+        """섹션을 다시 렌더링해도 사람이 써 둔 머리글은 지우지 않는다."""
+        self._write("projA", "15:06", "a1")
+        text = self.path.read_text(encoding="utf-8")
+        self.path.write_text(text.replace("# projA\n", "# projA\n\n사람이 쓴 메모\n"), encoding="utf-8")
+        self._write("projA", "12:30", "a2")
+        self.assertIn("사람이 쓴 메모", self.path.read_text(encoding="utf-8"))
+
+    def test_frontmatter_survives_an_insert_before_the_first_section(self):
+        self._write("projA", "15:06", "a2")
+        self._write("projA", "12:30", "a1")
+        self.assertTrue(self.path.read_text(encoding="utf-8").startswith("---\nid: daily\n---\n"))
 
 
 if __name__ == "__main__":

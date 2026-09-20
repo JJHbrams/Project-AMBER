@@ -114,21 +114,89 @@ def resolve_project_tag(cwd: Optional[str] = None) -> str:
     return resolve_project_key(cwd=raw)
 
 
+_OVERVIEW_STEMS = ("overview", "index")
+
+
+def _normalize_name(value: str) -> str:
+    return re.sub(r"[-_]", "", (value or "").lower())
+
+
+def _project_dir_aliases(directory: str) -> set[str]:
+    """위키 프로젝트 디렉터리가 가리킬 수 있는 이름들.
+
+    ``001_TruviewCADMOM`` 처럼 정렬용 숫자 접두사를 붙이는 관습이 있어서
+    디렉터리명 그대로와 접두사를 뗀 이름 둘 다 후보다.
+    """
+    names = {directory}
+    stripped = re.sub(r"^\d+[_-]", "", directory)
+    if stripped:
+        names.add(stripped)
+    return {n for n in (_normalize_name(name) for name in names) if n}
+
+
+def _overview_candidates() -> dict[str, set[str]]:
+    """프로젝트 이름 -> 그 프로젝트의 overview 노드 id 집합.
+
+    위키는 프로젝트마다 디렉터리 하나를 두고 그 **바로 아래**에 대표 노트를 둔다.
+    파일명 관습은 갈린다 — ``overview.md``, ``index.md``, ``<프로젝트>-overview.md``,
+    ``<프로젝트>.md`` 가 모두 쓰인다. 하위 디렉터리(``report/``, ``dev/``)의 노트는
+    대표 노트가 아니다.
+
+    깊이 제한이 핵심이다. ``projects/**`` 아래 노트는 전부 ``type='project'`` 로
+    저장되기 때문에, 그 제한이 없으면 ``000_Project_Engram/report/
+    session-agent-orchestration.md`` 같은 하위 보고서가 같은 이름의 프로젝트
+    키에 먼저 걸린다(2026-09-18 실측).
+    """
+    conn = get_connection()
+    try:
+        rows = conn.execute("SELECT id, path FROM kg_nodes WHERE type='project'").fetchall()
+    finally:
+        conn.close()
+
+    candidates: dict[str, set[str]] = {}
+    for row in rows:
+        node_id = str(row["id"] or "").strip()
+        parts = str(row["path"] or "").replace("\\", "/").split("/")
+        # projects/<디렉터리>/<파일>.md 만 대표 노트 후보다.
+        if len(parts) != 3 or parts[0] != "projects":
+            continue
+        directory = parts[1]
+        stem = re.sub(r"\.md$", "", parts[2], flags=re.IGNORECASE)
+        aliases = _project_dir_aliases(directory)
+        stem_norm = _normalize_name(stem)
+        is_overview = (
+            stem.lower() in _OVERVIEW_STEMS
+            or stem_norm in aliases
+            or any(stem_norm == f"{alias}overview" for alias in aliases)
+        )
+        if not is_overview or not node_id:
+            continue
+        for alias in aliases:
+            candidates.setdefault(alias, set()).add(node_id)
+        # id 자체로도 찾을 수 있게 한다 — 디렉터리명과 다른 경우가 있다.
+        for name in (node_id, re.sub(r"-overview$", "", node_id)):
+            normalized = _normalize_name(name)
+            if normalized:
+                candidates.setdefault(normalized, set()).add(node_id)
+    return candidates
+
+
 def resolve_kg_node_id(project_key: str) -> str | None:
-    """project_key(slug)에 대응하는 KG node_id를 찾는다. 없으면 None.
+    """project_key(slug)에 대응하는 프로젝트 overview 노드 id. 없으면 None.
 
     우선순위:
     1. config의 memory.scope.kg_node_map에서 직접 매핑
-    2. kg_nodes 테이블에서 정규화 후 **정확히 일치**하는 노드
+    2. 위키 프로젝트 디렉터리의 대표(overview) 노트 중 이름이 정확히 일치하는 것
 
     추측하지 않는다. 자동 체크포인트는 여기서 나온 노드의 ``## Progress`` 를
-    실제로 덮어쓰므로, 틀린 매칭은 무관한 위키 문서를 오염시킨다.
+    실제로 덮어쓰므로, 틀린 매칭은 무관한 위키 문서를 오염시킨다. 후보가 둘 이상
+    이면 고르지 않고 None 을 돌려준다.
 
-    이전 구현은 양방향 prefix 매칭을 ``ORDER BY updated_at DESC LIMIT 50`` 위에서
-    돌렸다. 그래서 (a) 짧은 노드 id 가 아무 키에나 붙고 — ``truviewcadmom`` 이
-    버그리포트 ``truviewcadmom-mode-collapse-…`` 에 걸렸다 — (b) 최근 갱신 노드가
-    먼저 걸린 뒤 갱신되어 더 최신이 되는 되먹임이 생겼다. 2026-09-17 실측에서
-    daily note 의 프로젝트 링크 34건 중 33건이 같은 노드 하나로 몰렸다.
+    이전 구현은 노드 id 정확 일치만 봤다. 그래서 (a) 대표 노트를
+    ``<프로젝트>-overview.md`` 로 만든 신규 프로젝트는 링크가 아예 안 붙고
+    (``claude-image-forge``), (b) 하위 보고서가 프로젝트 키와 이름이 같으면
+    그쪽이 걸렸다 (``session-agent-orchestration`` → ``000_Project_Engram/report/``).
+    2026-09-18 실측.
 
     매칭이 없으면 호출부는 project_key 자체를 기록한다. 링크가 없는 것은 정보가
     덜 남는 것이지만, 틀린 링크는 다른 문서를 망가뜨린다.
@@ -141,29 +209,15 @@ def resolve_kg_node_id(project_key: str) -> str | None:
         if key_no_digest in mapping:
             return mapping[key_no_digest]
 
-    if not key_no_digest:
+    key_norm = _normalize_name(key_no_digest)
+    if not key_norm:
         return None
 
     try:
-        conn = get_connection()
-        rows = conn.execute("SELECT id FROM kg_nodes WHERE type='project'").fetchall()
-        conn.close()
-
-        def _normalize(s: str) -> str:
-            return re.sub(r"[-_]", "", (s or "").lower())
-
-        key_norm = _normalize(key_no_digest)
-        if not key_norm:
-            return None
-
-        for row in rows:
-            node_id: str = row["id"]
-            if _normalize(node_id) == key_norm:
-                return node_id
+        matches = _overview_candidates().get(key_norm, set())
     except Exception:
-        pass
-
-    return None
+        return None
+    return next(iter(matches)) if len(matches) == 1 else None
 
 
 def _slugify(value: str) -> str:

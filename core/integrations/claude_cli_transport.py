@@ -38,6 +38,37 @@ if sys.platform == "win32":
     anyio.open_process = _open_process_no_console
 
 
+# 값이 비어 있으면 인증을 망가뜨리기만 하는 환경변수들. CLI 는 빈 문자열을
+# "설정 디렉터리 없음"으로 받아 `~/.claude` 의 OAuth 자격증명을 못 찾고
+# "Not logged in · Please run /login" 으로 exit 1 한다. 빈 값에 쓸모 있는 의미가
+# 없으므로 지운다 — 엔그램 코드도 이미 빈 값을 "기본 경로"로 해석한다
+# (claude_monitor_hooks.default_settings_path).
+_BLANK_HOSTILE_ENV = ("CLAUDE_CONFIG_DIR",)
+_blank_env_reported: set[str] = set()
+
+
+def drop_blank_credential_env() -> list[str]:
+    """빈 문자열로 설정된 자격증명 경로 변수를 프로세스 환경에서 제거한다.
+
+    2026-09-20 실측: overlay 를 띄운 셸에 ``CLAUDE_CONFIG_DIR=''`` 이 실려 있어서
+    자동 체크포인트의 요약 호출이 이틀 내내(4,807회) exit 1 로 죽었다. 실패는
+    WARNING 한 줄로 흘렀고 증상은 "daily note 가 안 생긴다"뿐이라 알아채는 데
+    이틀이 걸렸다. 상속받은 환경을 고치는 편이 호출부마다 방어하는 것보다 낫다.
+    """
+    removed = []
+    for name in _BLANK_HOSTILE_ENV:
+        if name in os.environ and not os.environ[name].strip():
+            del os.environ[name]
+            removed.append(name)
+            if name not in _blank_env_reported:
+                _blank_env_reported.add(name)
+                logger.warning(
+                    "%s 가 빈 값으로 설정돼 있어 제거했다 — 그대로 두면 claude CLI 가 "
+                    "자격증명을 찾지 못해 모든 호출이 exit 1 로 실패한다.", name,
+                )
+    return removed
+
+
 def find_claude_cmd_parts() -> list[str]:
     """claude 실행 커맨드 파트 반환. Windows 앱 모드(PATH 미포함)에서도 동작."""
     home = Path(os.environ.get("USERPROFILE", os.path.expanduser("~")))
@@ -120,6 +151,9 @@ def make_transport(
     options: ClaudeCodeOptions,
     passthrough_types: frozenset[str] = frozenset(),
 ) -> PassthroughCLITransport:
+    # SDK 는 자식 프로세스에 이 프로세스의 환경을 그대로 물려준다. CLI 를 띄우는
+    # 모든 경로가 여기를 지나므로, 인증을 깨뜨리는 빈 값은 여기서 한 번 걷어낸다.
+    drop_blank_credential_env()
     return PassthroughCLITransport(prompt, options, find_claude_cmd_parts(), passthrough_types)
 
 

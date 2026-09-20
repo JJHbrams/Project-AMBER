@@ -642,6 +642,34 @@ def _evaluate_checkpoint_candidate(
     }
 
 
+# 요약이 연달아 실패하면 체크포인트는 한 건도 안 남는다. 증상은 "daily note 가
+# 안 생긴다"뿐이고 로그는 폴링마다 같은 WARNING 한 줄이라, 2026-09-20 실측에서
+# 알아채기까지 이틀·4,807회가 걸렸다. 몇 번 연속 실패하면 원인 후보를 짚어
+# 크게 알린다.
+_SUMMARY_FAILURE_ALERT_AFTER = 3
+_SUMMARY_FAILURE_ALERT_EVERY = 60
+_summary_failure_streak = 0
+
+
+def _note_summary_outcome(succeeded: bool, session_id: int) -> None:
+    global _summary_failure_streak
+    if succeeded:
+        if _summary_failure_streak >= _SUMMARY_FAILURE_ALERT_AFTER:
+            logger.warning("요약 호출이 %d회 연속 실패 뒤 복구됐다.", _summary_failure_streak)
+        _summary_failure_streak = 0
+        return
+    _summary_failure_streak += 1
+    streak = _summary_failure_streak
+    if streak < _SUMMARY_FAILURE_ALERT_AFTER or (streak - _SUMMARY_FAILURE_ALERT_AFTER) % _SUMMARY_FAILURE_ALERT_EVERY:
+        return
+    logger.error(
+        "자동 체크포인트 요약이 %d회 연속 실패했다 (session=%d). 그동안 daily note 와 "
+        "working memory 가 전혀 갱신되지 않는다. claude CLI 인증을 먼저 확인하라 — "
+        "CLAUDE_CONFIG_DIR 가 빈 값이면 CLI 가 자격증명을 못 찾고 exit 1 한다.",
+        streak, session_id,
+    )
+
+
 def maybe_auto_checkpoint(
     scope_key: str = CONTINUUM_SCOPE,
     *,
@@ -671,6 +699,7 @@ def maybe_auto_checkpoint(
         done = []
         for candidate in candidates[: max(1, int(max_per_run))]:
             result = _summarize_working_memory_with_claude(candidate["messages"])
+            _note_summary_outcome(bool(result), candidate["session_id"])
             if not result:
                 done.append({"status": "summary_failed", "session_id": candidate["session_id"]})
                 continue
