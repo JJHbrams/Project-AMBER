@@ -62,6 +62,17 @@ All notable changes to this project are documented in this file.
 
 ### Fixed
 
+- Automatic checkpoints produced nothing for two days. The shell that launched
+  the overlay carried `CLAUDE_CONFIG_DIR` as an **empty string**, which the CLI
+  reads as "no config directory"; it then could not find the credentials under
+  `~/.claude` and exited. A blank value carries no useful meaning, so it is now
+  dropped before the CLI is spawned. A real path is left alone.
+  - **Taking two days to notice is the worse half.** Each failure logged a
+    single warning and retried 60 seconds later, 4,807 times; the only visible
+    symptom was a daily note that never appeared. Three consecutive summary
+    failures now log an error naming what stopped working and where to look
+    first, repeated hourly rather than every minute, with a line when it
+    recovers.
 - A bubble turn could stay open forever — thinking bubble stuck, no reply —
   because every turn-closing side effect (state transition, terminal emit,
   gate release, request-key cleanup) lived only in the `ResultMessage`

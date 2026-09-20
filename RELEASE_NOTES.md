@@ -52,6 +52,10 @@
   instead of matching node ids by prefix.
   `scripts/dev/migrate_daily_notes_to_project_sections.py` migrates existing
   notes (dry-run by default, `--apply` keeps a `.bak`).
+- `core/integrations/claude_cli_transport.py` drops a blank `CLAUDE_CONFIG_DIR`
+  before spawning the CLI, and `core/graph/semantic/stm_promoter.py` escalates
+  three consecutive summary failures to an error naming what stopped working —
+  automatic checkpoints had been silently producing nothing for two days.
 
 ### Impact
 
