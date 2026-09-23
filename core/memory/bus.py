@@ -86,11 +86,17 @@ class MemoryBus:
         project_key: Optional[str] = None,
         cwd: Optional[str] = None,
         session: Optional[MemorySession] = None,
+        session_key: Optional[int] = None,
         is_session_init: bool = False,
     ) -> str:
         resolved_scope = self._resolve_scope_key(session, scope_key, project_key=project_key, cwd=cwd)
         resolved_project_key = project_key or resolve_project_key(cwd=cwd)
-        return await build_system_prompt(user_query, caller=caller, scope_key=resolved_scope, project_key=resolved_project_key or "", is_session_init=is_session_init)
+        effective_session_key = session.session_id if isinstance(session, MemorySession) else session_key
+        return await build_system_prompt(
+            user_query, caller=caller, scope_key=resolved_scope,
+            project_key=resolved_project_key or "", is_session_init=is_session_init,
+            session_key=effective_session_key,
+        )
 
     def maybe_save_episodic_memory(
         self,

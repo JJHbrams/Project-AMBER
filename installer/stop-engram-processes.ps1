@@ -39,8 +39,16 @@ function Stop-EngramArtifactProcesses {
     }
 
     $stopped = @()
-    foreach ($processName in @("engram-overlay", "engram-dashboard")) {
-        foreach ($process in @(Get-Process -Name $processName -ErrorAction SilentlyContinue)) {
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    $stableZeroPasses = 0
+    $pass = 0
+    # A parent may launch another role while the first matched role exits.
+    # Do not let setup copy until two scans find no live approved executable.
+    while ([DateTime]::UtcNow -lt $deadline -and $stableZeroPasses -lt 2) {
+        $pass++
+        $matched = @()
+        foreach ($processName in @("engram-overlay", "engram-dashboard")) {
+            foreach ($process in @(Get-Process -Name $processName -ErrorAction SilentlyContinue)) {
             try {
                 # Pin the OS object before reading its image. A later PID reuse
                 # cannot redirect termination to a different process.
@@ -66,24 +74,42 @@ function Stop-EngramArtifactProcesses {
             if (-not [EngramArtifactProcessNative]::TerminateProcess($handle, 1)) {
                 throw "Could not stop verified artifact process: $processPath"
             }
-            $stopped += [PSCustomObject]@{
+            $entry = [PSCustomObject]@{
                 Process = $process
                 Path = $processPath
                 Name = $managedExecutables[$processPath]
             }
+            $matched += $entry
+            $stopped += $entry
+            }
+        }
+
+        if ($matched.Count -eq 0) {
+            $stableZeroPasses++
+            Write-Host "Engram artifact stop pass ${pass}: no matching processes ($stableZeroPasses/2 stable)."
+            if ($stableZeroPasses -lt 2) { Start-Sleep -Milliseconds 250 }
+            continue
+        }
+
+        $stableZeroPasses = 0
+        Write-Host "Engram artifact stop pass ${pass}: terminating $($matched.Count) verified process(es)."
+        foreach ($entry in $matched) {
+            $remainingMilliseconds = [Math]::Max(0, [int](($deadline - [DateTime]::UtcNow).TotalMilliseconds))
+            $null = $entry.Process.WaitForExit($remainingMilliseconds)
+            if (-not $entry.Process.HasExited) {
+                throw "Timed out stopping Engram process: $($entry.Path)"
+            }
         }
     }
 
-    foreach ($entry in $stopped) {
-        $null = $entry.Process.WaitForExit($TimeoutSeconds * 1000)
-        if (-not $entry.Process.HasExited) {
-            throw "Timed out stopping Engram process: $($entry.Path)"
-        }
+    if ($stableZeroPasses -lt 2) {
+        throw "Timed out waiting for Engram artifact processes to quiesce after $pass scan(s)."
     }
 
     return [PSCustomObject]@{
         OverlayPaths = @($stopped | Where-Object { $_.Name -eq "engram-overlay.exe" } | Select-Object -ExpandProperty Path -Unique)
         StoppedPaths = @($stopped | Select-Object -ExpandProperty Path -Unique)
+        StoppedProcessCount = $stopped.Count
     }
 }
 

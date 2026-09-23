@@ -32,4 +32,9 @@ from .curiosity import (
 )
 from .reflection import apply_reflection, prepare_reflection_context, run_reflection
 from .evidence import IdentityEvidence, get_self_reflection_evidence
+from .personality import (
+    PERSONALITY_MODULES,
+    clear_situational_humor_state,
+    evaluate_situational_humor,
+)
 

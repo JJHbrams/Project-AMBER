@@ -49,7 +49,7 @@ from overlay.character_assets import (
 from overlay.external_renderer import InstalledRenderer, apply_renderer_selection, discover_renderers, legacy_renderer_diagnostic
 from overlay.remote_tunnel import sanitize_for_display
 from overlay.cli_capabilities import effort_key, efforts as provider_efforts, model_key, models as provider_models, validate as validate_cli
-from core.identity import get_persona_db_baseline, set_persona_baseline
+from core.identity import get_persona_db_baseline, is_persona_initialized, seed_persona, set_persona_baseline
 from core.config.runtime_config import normalize_policy_guidance_level
 from core.install.versioning import resolve_version
 from core.tutorial import complete_tutorial_step, has_user_persona_override, reset_tutorial_state
@@ -702,6 +702,8 @@ class _SettingsWindow:
         self._persona_numeric_pin_vars: dict[str, tk.BooleanVar] = {}
         self._persona_numeric_label_vars: dict[str, tk.StringVar] = {}
         self._persona_numeric_overwrite_btns: dict[str, ttk.Button] = {}
+        # Slider/pin/option widgets that must be read-only while the DB is unreadable.
+        self._persona_lockable_widgets: list = []
         self._persona_db_baselines: dict[str, float] = {}
         self._persona_load_ok = False
         self._persona_banner_var = tk.StringVar(value="현재 기본 페르소나가 적용되어 있습니다. 커스텀 페르소나를 적용해 보세요.")
@@ -1252,11 +1254,13 @@ class _SettingsWindow:
         fewshot_fr, self._persona_fewshot_txt = self._make_resizable_text(f, height=4)
         fewshot_fr.grid(row=6, column=1, columnspan=3, sticky="ew", **PAD)
         self._persona_fewshot_only_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(
+        fewshot_only_chk = ttk.Checkbutton(
             f,
             text="이 예시만 사용 (대화에서 쌓인 예시를 쓰지 않음)",
             variable=self._persona_fewshot_only_var,
-        ).grid(row=7, column=1, columnspan=3, sticky="w", padx=8, pady=(0, 2))
+        )
+        fewshot_only_chk.grid(row=7, column=1, columnspan=3, sticky="w", padx=8, pady=(0, 2))
+        self._persona_lockable_widgets.append(fewshot_only_chk)
         ttk.Label(
             f,
             text=("응답 예시를 자유롭게 입력하세요.\n"
@@ -1282,7 +1286,7 @@ class _SettingsWindow:
             self._persona_numeric_label_vars[field] = label_var
 
             ttk.Label(f, text=f"{field}:").grid(row=row, column=0, sticky="w", **PAD)
-            ttk.Scale(
+            scale = ttk.Scale(
                 f,
                 from_=0.0,
                 to=1.0,
@@ -1290,9 +1294,12 @@ class _SettingsWindow:
                 orient="horizontal",
                 length=190,
                 command=lambda raw, key=field: self._on_persona_slider_changed(key, raw),
-            ).grid(row=row, column=1, sticky="ew", padx=8, pady=4)
+            )
+            scale.grid(row=row, column=1, sticky="ew", padx=8, pady=4)
             ttk.Label(f, textvariable=label_var, width=5).grid(row=row, column=2, sticky="w", padx=(0, 6), pady=4)
-            ttk.Checkbutton(f, variable=pin_var).grid(row=row, column=3, sticky="w", padx=(0, 8), pady=4)
+            pin_chk = ttk.Checkbutton(f, variable=pin_var)
+            pin_chk.grid(row=row, column=3, sticky="w", padx=(0, 8), pady=4)
+            self._persona_lockable_widgets.extend((scale, pin_chk))
             btn = ttk.Button(
                 f,
                 text="→ DB",
@@ -2344,6 +2351,22 @@ class _SettingsWindow:
 
         self._load_persona_values()
 
+    def _persona_text_widgets(self) -> tuple:
+        return (
+            self._persona_voice_txt,
+            self._persona_traits_txt,
+            self._persona_quirks_txt,
+            self._persona_values_txt,
+            self._persona_fewshot_txt,
+        )
+
+    def _set_persona_inputs_locked(self, locked: bool) -> None:
+        ttk_state = ["disabled"] if locked else ["!disabled"]
+        for widget in (*getattr(self, "_persona_lockable_widgets", ()), *self._persona_numeric_overwrite_btns.values()):
+            widget.state(ttk_state)
+        for widget in self._persona_text_widgets():
+            widget.configure(state="disabled" if locked else "normal")
+
     def _load_persona_values(self):
         # Prepare and validate every source before changing a single widget.  A
         # failed load must never leave construction-time defaults actionable.
@@ -2355,34 +2378,54 @@ class _SettingsWindow:
                 user_persona = loaded or {}
             else:
                 user_persona = {}
+            for field in _PERSONA_NUMERIC_FIELDS:
+                user_raw = user_persona.get(field)
+                if user_raw is not None and (isinstance(user_raw, bool) or not isinstance(user_raw, (int, float)) or not 0.0 <= float(user_raw) <= 1.0):
+                    raise ValueError(f"persona.user.yaml {field} is invalid")
+        except Exception as exc:
+            # Nothing trustworthy to show: keep every persona input locked.
+            self._persona_load_ok = False
+            self._persona_db_baselines = {}
+            self._set_persona_inputs_locked(True)
+            self._persona_banner_var.set(f"페르소나 로드 실패: {exc} — DB 반영과 페르소나 파일 저장이 차단되었습니다.")
+            return
+
+        db_error: Exception | None = None
+        numeric_db: dict[str, float] = {}
+        try:
+            # A fresh install has an empty identity.persona until something seeds
+            # it (the tutorial opens this window before any model call does).
+            # Seed it the same way update_persona/set_persona_baseline do; the
+            # seed is compare-and-set, so an evolved baseline is never replaced.
+            if not is_persona_initialized():
+                seed_persona("project_yaml")
             db_baseline = get_persona_db_baseline()
-            numeric_db: dict[str, float] = {}
             for field in _PERSONA_NUMERIC_FIELDS:
                 raw = db_baseline.get(field)
                 if isinstance(raw, bool) or not isinstance(raw, (int, float)) or not 0.0 <= float(raw) <= 1.0:
                     raise ValueError(f"DB baseline {field} is missing or invalid")
                 numeric_db[field] = round(float(raw), 2)
-                user_raw = user_persona.get(field)
-                if user_raw is not None and (isinstance(user_raw, bool) or not isinstance(user_raw, (int, float)) or not 0.0 <= float(user_raw) <= 1.0):
-                    raise ValueError(f"persona.user.yaml {field} is invalid")
-            numeric_values = {
-                field: (_coerce_persona_number(user_persona[field], _PERSONA_DEFAULTS[field]), True)
-                if field in user_persona else (numeric_db[field], False)
-                for field in _PERSONA_NUMERIC_FIELDS
-            }
         except Exception as exc:
-            self._persona_load_ok = False
-            self._persona_db_baselines = {}
-            for btn in self._persona_numeric_overwrite_btns.values():
-                btn.state(["disabled"])
-            self._persona_banner_var.set(f"페르소나 로드 실패: {exc} — DB 반영과 페르소나 파일 저장이 차단되었습니다.")
-            return
+            db_error = exc
+            numeric_db = {}
+
+        # persona.user.yaml is valid, so show it even when the DB is unreadable —
+        # a blank tab reads as "my persona was lost".  Unpinned sliders have no
+        # trustworthy value in that case and stay at their defaults, locked.
+        numeric_values = {
+            field: (_coerce_persona_number(user_persona[field], _PERSONA_DEFAULTS[field]), True)
+            if field in user_persona
+            else (numeric_db.get(field, _PERSONA_DEFAULTS[field]), False)
+            for field in _PERSONA_NUMERIC_FIELDS
+        }
 
         def _txt_set(widget: tk.Text, value: str) -> None:
             widget.delete("1.0", "end")
             if value:
                 widget.insert("1.0", value)
 
+        # tk.Text ignores insert() while disabled, so unlock before refilling.
+        self._set_persona_inputs_locked(False)
         voice = user_persona.get("voice")
         _txt_set(self._persona_voice_txt, voice.strip() if isinstance(voice, str) else "")
         _txt_set(self._persona_traits_txt, ", ".join(_coerce_persona_list(user_persona.get("traits"))))
@@ -2399,10 +2442,18 @@ class _SettingsWindow:
             self._persona_numeric_pin_vars[field].set(pinned)
             self._persona_numeric_label_vars[field].set(f"{value:.2f}")
 
+        if db_error is not None:
+            self._persona_load_ok = False
+            self._persona_db_baselines = {}
+            self._set_persona_inputs_locked(True)
+            self._persona_banner_var.set(
+                f"⚠ 페르소나 DB를 읽지 못했습니다: {db_error}\n"
+                "persona.user.yaml 값은 표시만 되며, 슬라이더·DB 반영·페르소나 저장이 잠겨 있습니다."
+            )
+            return
+
         self._persona_db_baselines = numeric_db
         self._persona_load_ok = True
-        for btn in self._persona_numeric_overwrite_btns.values():
-            btn.state(["!disabled"])
         self._update_persona_banner(user_persona)
 
     def _update_persona_banner(self, user_persona: dict | None = None):
@@ -2717,8 +2768,9 @@ class _SettingsWindow:
 
     def _save_persona_user_file(self) -> int:
         if not self._persona_load_ok:
-            # Other settings are intentionally still saved by _do_save().
-            self._persona_banner_var.set("페르소나 로드 실패 상태입니다. 페르소나 파일은 저장하지 않았습니다.")
+            # Other settings are intentionally still saved by _do_save().  The
+            # banner already names the load failure and the lock; replacing it
+            # here would erase the cause, and _save() toasts the skipped write.
             return 0
         self._ensure_user_persona_file()
 

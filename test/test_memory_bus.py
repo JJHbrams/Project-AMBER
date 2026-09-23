@@ -41,6 +41,7 @@ class MemoryBusTests(unittest.TestCase):
             scope_key="default:main",
             project_key="project-key",
             is_session_init=False,
+            session_key=7,
         )
 
     @patch("core.memory.bus.resolve_project_key", return_value="project-key")
@@ -63,6 +64,7 @@ class MemoryBusTests(unittest.TestCase):
             scope_key="project:auto-5678",
             project_key="project-key",
             is_session_init=False,
+            session_key=None,
         )
 
     @patch("core.memory.bus.append_working_memory_hint")

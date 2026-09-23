@@ -46,22 +46,25 @@ $target = Join-Path $fixture 'target'
 $foreign = Join-Path $fixture 'foreign'
 New-Item -ItemType Directory -Path $target,$foreign | Out-Null
 $targetExe = Join-Path $target 'engram-overlay.exe'
+$dashboardExe = Join-Path $target 'engram-dashboard.exe'
 $foreignExe = Join-Path $foreign 'engram-overlay.exe'
 Add-Type -TypeDefinition 'public class SafeFixture { public static void Main() { System.Threading.Thread.Sleep(60000); } }' -OutputAssembly $targetExe -OutputType ConsoleApplication
+Copy-Item -LiteralPath $targetExe -Destination $dashboardExe
 Copy-Item -LiteralPath $targetExe -Destination $foreignExe
-$first = $null
-$second = $null
+$first = $null; $dashboard = $null; $foreignProcess = $null; $lateStarter = $null
 try {
     $first = Start-Process -FilePath $targetExe -PassThru -WindowStyle Hidden
-    $second = Start-Process -FilePath $foreignExe -PassThru -WindowStyle Hidden
-    $firstHandle = $first.Handle
-    $secondHandle = $second.Handle
+    $dashboard = Start-Process -FilePath $dashboardExe -PassThru -WindowStyle Hidden
+    $foreignProcess = Start-Process -FilePath $foreignExe -PassThru -WindowStyle Hidden
+    $lateSource = 'using System; using System.Diagnostics; using System.Threading; public class LateStarter { public static void Main(string[] args) { Thread.Sleep(100); Process.Start(args[0]); Thread.Sleep(1000); } }'
+    Add-Type -TypeDefinition $lateSource -OutputAssembly (Join-Path $fixture 'late-starter.exe') -OutputType ConsoleApplication
+    $lateStarter = Start-Process -FilePath (Join-Path $fixture 'late-starter.exe') -ArgumentList ('"' + $targetExe + '"') -PassThru -WindowStyle Hidden
     $result = Stop-EngramArtifactProcesses -ArtifactDir $target
-    if (-not $first.WaitForExit(5000) -or $second.HasExited) { throw 'Wrong process termination' }
-    if (@($result.StoppedPaths).Count -ne 1 -or $result.StoppedPaths[0] -ne $targetExe) { throw 'Incorrect stop evidence' }
+    if (-not $first.WaitForExit(5000) -or -not $dashboard.WaitForExit(5000) -or $foreignProcess.HasExited) { throw 'Wrong process termination' }
+    if ($result.StoppedProcessCount -ne 3 -or @($result.StoppedPaths).Count -ne 2 -or @($result.OverlayPaths).Count -ne 1 -or $result.StoppedPaths -notcontains $dashboardExe) { throw 'Incorrect stop evidence' }
     Write-Output 'HANDLE_STOP_PASS'
 } finally {
-    foreach ($owned in @($first,$second)) {
+    foreach ($owned in @($first,$dashboard,$foreignProcess,$lateStarter)) {
         if ($owned -and -not $owned.HasExited) { $owned.Kill(); $owned.WaitForExit() }
     }
 }

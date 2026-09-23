@@ -13,7 +13,7 @@ from core.context.directives import render_directives_prompt
 from core.context.project_scope import resolve_kg_node_id
 from core.graph.knowledge import get_kg
 from core.graph.semantic import get_semantic_graph
-from core.identity import get_identity, get_themes, get_persona, render_persona
+from core.identity import get_identity, get_themes, get_persona, render_persona, evaluate_situational_humor
 from core.identity import render_curiosity_prompt
 from core.memory.store import (
     get_recent_messages_by_scope,
@@ -220,13 +220,25 @@ async def _kg_context_snippet(
     return "\n".join(snippets)
 
 
-async def build_system_prompt(user_query: str = "", caller: str = "all", scope_key: str = "", project_key: str = "", is_session_init: bool = False) -> str:
+async def build_system_prompt(
+    user_query: str = "", caller: str = "all", scope_key: str = "", project_key: str = "",
+    is_session_init: bool = False, session_key: int | None = None,
+) -> str:
     identity = get_identity()
     persona = get_persona()
     themes = get_themes(5)
     theme_str = ", ".join(f"{t[0]}({t[1]:.1f})" for t in themes) if themes else "없음"
 
     persona_section = render_persona(persona, include_examples=True)
+    try:
+        humor_signal = evaluate_situational_humor(
+            persona.get("humor"), user_query=user_query, session_key=session_key,
+            is_bootstrap=is_session_init and not bool((user_query or "").strip()),
+        )
+        persona_section = f"{persona_section}\n{humor_signal.text}"
+    except Exception:
+        # Optional behavior must never make memory/context retrieval fail.
+        pass
     narrative = identity.get("narrative", "")
 
     # 지침 — caller에 맞는 활성 지침 + user_query 트리거 기반 필터링

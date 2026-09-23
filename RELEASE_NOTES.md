@@ -1,5 +1,79 @@
 # Release Notes
 
+## 2026-09-23 - v1.5.22: Situational Humor and a Tutorial Persona Fix
+
+### Highlights
+
+- The first persona patch. `humor` now drives a **situational humor module**
+  instead of reaching the model as a bare number: off in serious or
+  safety-sensitive situations, light in casual ones, never mandatory.
+- Fixed new users getting a blank persona tab and a refused save when they
+  open the persona settings from the tutorial. A fresh install's empty
+  persona DB is now seeded before loading.
+- When the persona DB is genuinely unreadable, `persona.user.yaml` values
+  are still shown, while inputs are locked and the banner explains why.
+- Upgrade installs stop the running overlay before replacing files.
+
+### What Changed
+
+- `core/identity/personality.py` (new), `core/identity/service.py`,
+  `core/identity/__init__.py`, `core/context/context_builder.py`,
+  `core/memory/bus.py`, and `mcp_server.py` add the situational humor
+  evaluator and thread the Engram session key into prompt context so cadence
+  is isolated per session.
+- `overlay/settings_window.py` seeds an uninitialized persona before reading
+  the DB baseline, shows the user YAML when the DB is unreadable, and locks
+  sliders, pins, the fewshot-only option, DB overwrite buttons, and text
+  inputs in that state.
+- `installer/engram-overlay.iss` and `installer/stop-engram-processes.ps1`
+  stop processes under the installed artifact path before install and enable
+  Restart Manager for `*.exe`, `*.dll`, and `*.pyd`.
+
+### Impact
+
+- New users can finish the tutorial's persona step.
+- Existing installs keep their evolved persona baseline; the seed only
+  writes an empty row.
+- Existing 1.5.21 installs are offered this release through the overlay's
+  **check for update** menu.
+
+### Validation
+
+- `test/test_settings_persona_safety.py` (12 tests) covers the empty-DB seed,
+  an evolved baseline surviving the seed, the unreadable-DB lock, the invalid
+  YAML lock, unlocking on a later successful load, and keeping the failure
+  banner after Save. The empty-DB test fails without the fix.
+- The real Tk settings window was opened from source with an unreadable and a
+  valid DB baseline and captured.
+- The full test suite was compared against v1.5.21: no new failures remain
+  (three stale call expectations were updated for the new session key).
+- Not yet exercised: the tutorial flow on a clean profile with the frozen
+  installer.
+
+### Files
+
+- `core/identity/personality.py`
+- `core/identity/service.py`
+- `core/identity/__init__.py`
+- `core/context/context_builder.py`
+- `core/memory/bus.py`
+- `mcp_server.py`
+- `overlay/settings_window.py`
+- `installer/engram-overlay.iss`
+- `installer/stop-engram-processes.ps1`
+- `docs/design/0008-situational-humor.md`
+- `VERSION`
+- `CHANGELOG.md`
+- `test/test_context_once_cache_key.py`
+- `test/test_context_personality_modules.py`
+- `test/test_situational_humor.py`
+- `test/test_session_lifecycle.py`
+- `test/test_settings_persona_safety.py`
+- `test/test_memory_bus.py`
+- `test/test_mcp_directives_api.py`
+- `test/test_build_smoke_profile.py`
+- `test/test_install_user_config.py`
+
 ## 2026-09-20 - v1.5.21: Update Check, Optional Add-ons, and a Bubble Turn-Close Fix
 
 ### Highlights

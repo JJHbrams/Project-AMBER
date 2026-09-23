@@ -218,6 +218,11 @@ session:
         self.assertIn("ExtractTemporaryFile('stop-engram-processes.ps1')", iss)
         self.assertIn("-ArtifactDir", iss)
         self.assertIn("ewWaitUntilTerminated", iss)
+        self.assertIn("PrepareToInstall: stopping installed artifact processes under", iss)
+        self.assertIn("PrepareToInstall: process-stop helper exit=", iss)
+        self.assertIn("CloseApplications=yes", iss)
+        self.assertIn("CloseApplicationsFilter=*.exe,*.dll,*.pyd", iss)
+        self.assertIn("RestartApplications=no", iss)
 
     def test_rejects_invalid_db_config_without_overwriting_file(self):
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -83,6 +83,7 @@ class MCPContextBootstrapTests(unittest.IsolatedAsyncioTestCase):
             scope_key="scope-a",
             project_key="project-a",
             cwd="C:/repo",
+            session_key=None,
             is_session_init=True,
         )
         self.assertIn("context", result)

@@ -10,6 +10,7 @@ from overlay.stm_server import _resolve_open_session_id
 from core.memory import store
 from core.graph.semantic import stm_promoter
 from core.storage import db
+from core.identity import personality
 
 
 class SessionLifecycleTests(unittest.TestCase):
@@ -45,6 +46,15 @@ class SessionLifecycleTests(unittest.TestCase):
         start.assert_called_once_with(scope_key="overlay", continued_from_session_id=274)
         self.assertEqual(mcp_server._FINGERPRINT_TO_SESSION["client:two"], 275)
         self.assertEqual(mcp_server._CONTEXT_ONCE_KEYS["cache-key"][0], 275)
+
+    def test_invalidation_boundary_clears_personality_cadence(self):
+        personality.evaluate_situational_humor(.8, user_query="ordinary", session_key=274)
+        mcp_server._CONTEXT_ONCE_KEYS["cache-key"] = (274, 1.0)
+        mcp_server._FINGERPRINT_TO_SESSION["client:old"] = 274
+        mcp_server._invalidate_session_bindings(274)
+        self.assertNotIn(274, personality._SESSION_STATE)
+        self.assertNotIn("cache-key", mcp_server._CONTEXT_ONCE_KEYS)
+        self.assertNotIn("client:old", mcp_server._FINGERPRINT_TO_SESSION)
 
     @patch.object(mcp_server, "_session_is_ended", return_value=True)
     @patch.object(mcp_server, "_stm_post", return_value=None)

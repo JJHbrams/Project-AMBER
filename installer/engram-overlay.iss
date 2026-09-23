@@ -47,6 +47,14 @@ WizardStyle=modern
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 UninstallDisplayIcon={app}\dist\engram-overlay\{#AppExeName}
+; Inno Setup 6's Restart Manager support is a second, file-lock-specific
+; safeguard. The exact-path helper below remains authoritative for roles
+; which do not hold a copied file; never restart the old runtime.
+CloseApplications=yes
+; The default filter omits Python extension modules. Keep this scoped to
+; installed executable/library artifacts so a locked win32gui.pyd is released.
+CloseApplicationsFilter=*.exe,*.dll,*.pyd
+RestartApplications=no
 
 [Languages]
 Name: "korean"; MessagesFile: "compiler:Languages\Korean.isl"
@@ -463,12 +471,16 @@ begin
   HelperPath := ExpandConstant('{tmp}\stop-engram-processes.ps1');
   Params := '-NoProfile -ExecutionPolicy Bypass -File "' + HelperPath +
     '" -ArtifactDir "' + ExpandConstant('{app}\dist\engram-overlay') + '"';
+  Log('PrepareToInstall: stopping installed artifact processes under ' +
+    ExpandConstant('{app}\dist\engram-overlay'));
   if (not Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'), Params,
     '', SW_HIDE, ewWaitUntilTerminated, ResultCode)) then
   begin
+    Log('PrepareToInstall: process-stop helper could not be launched.');
     Result := '실행 중인 AMBER (ENGRAM) 프로세스를 종료하지 못했습니다.';
     Exit;
   end;
+  Log('PrepareToInstall: process-stop helper exit=' + IntToStr(ResultCode));
   if ResultCode <> 0 then
     Result := '실행 중인 AMBER (ENGRAM) 프로세스를 종료하지 못했습니다. (exit=' + IntToStr(ResultCode) + ')';
 end;

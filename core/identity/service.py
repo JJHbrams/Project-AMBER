@@ -199,7 +199,9 @@ def render_persona(persona: dict, include_examples: bool = False) -> str:
         lines.append(f"quirks: {' | '.join(p['quirks'])}")
     if p["values"]:
         lines.append(f"values: {', '.join(p['values'])}")
-    dims = [f"{d}:{p[d]}" for d in ("warmth", "formality", "humor", "directness")]
+    # ``humor`` is interpreted by the bounded situational module at context
+    # assembly time; do not expose its raw scalar as an instruction.
+    dims = [f"{d}:{p[d]}" for d in ("warmth", "formality", "directness")]
     lines.append(" ".join(dims))
     if include_examples:
         # 두 출처는 경쟁이 아니라 앵커와 성장이다.

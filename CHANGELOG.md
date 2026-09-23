@@ -4,6 +4,46 @@ All notable changes to this project are documented in this file.
 
 ## Unreleased
 
+## [1.5.22] — 2026-09-23
+
+The first persona patch.
+
+### Added
+
+- A **situational humor module**, the first personality module. The `humor`
+  value used to reach the model as a bare number, so raising it made no
+  noticeable difference in conversation. Context now carries one short
+  situational signal instead of the number.
+  - Serious or safety-sensitive situations get `off`, light contexts get
+    `light`, and a query-less bootstrap gets `adaptive`. No mode ever makes a
+    joke mandatory.
+  - Cadence state is isolated per Engram session and dropped on session
+    close, TTL expiry, or rebind.
+  - The existing `humor` value and the user > DB > project > default
+    precedence are unchanged. Internal rules, keywords, and examples are not
+    exposed in the prompt. Design: `docs/design/0008-situational-humor.md`.
+
+### Fixed
+
+- A new user opening the persona settings from the tutorial got a **blank
+  persona tab with a load failure**, and saving the persona was refused. A
+  fresh install's DB persona stays empty until the model calls
+  `engram_seed_persona`, but the tutorial opens the settings window first,
+  and the window read that empty value as corruption.
+  - An empty persona is now seeded first, the same way `update_persona` and
+    `set_persona_baseline` already do. The seed only writes an empty row, so
+    a baseline that evolved through reflection is never replaced.
+  - When the DB genuinely cannot be read, the values in `persona.user.yaml`
+    are still shown, since a blank tab reads as "my persona was lost". The
+    sliders, pins, DB overwrite, and inputs are locked instead, and the
+    banner states the cause and the lock.
+  - When `persona.user.yaml` itself is invalid, saving was already blocked
+    but the sliders could still be moved. They are now locked too.
+- Upgrade installs no longer trip over file locks held by a running overlay.
+  Processes under the installed path are stopped right before install, Inno
+  Setup's Restart Manager is enabled as a second safeguard (including
+  `*.pyd`), and the stop step's outcome is written to the setup log.
+
 ## [1.5.21] — 2026-09-20
 
 ### Added

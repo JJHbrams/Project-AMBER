@@ -44,6 +44,7 @@ from core.identity import (
     is_persona_initialized,
     seed_persona,
     get_persona_status,
+    clear_situational_humor_state,
 )
 from core.identity import (
     add_example,
@@ -668,6 +669,19 @@ def _invalidate_session_bindings(session_id: int) -> None:
         for fingerprint, bound in list(_FINGERPRINT_TO_SESSION.items()):
             if bound == session_id:
                 _FINGERPRINT_TO_SESSION.pop(fingerprint, None)
+    clear_situational_humor_state(session_id)
+
+
+def _resolved_context_session_key(ctx: Context | None) -> int | None:
+    """Use a stateful key only when the caller is already bound unambiguously."""
+    fingerprint = _context_session_fingerprint(ctx)
+    if not fingerprint:
+        return None
+    with _CONTEXT_ONCE_LOCK:
+        session_id = _FINGERPRINT_TO_SESSION.get(fingerprint)
+    if session_id is not None and _session_is_open(session_id):
+        return session_id
+    return None
 
 
 def _session_is_open(session_id: int, scope_key: str = "") -> bool:
@@ -875,12 +889,14 @@ async def engram_get_context(
     if policy_result.get("ok") is False:
         logging.getLogger(__name__).warning("repo policy bootstrap 실패: %s", policy_result)
 
+    session_key = _resolved_context_session_key(ctx)
     prompt_ctx = await memory_bus.compose_prompt_context(
         user_query,
         caller=caller,
         scope_key=scope_key or None,
         project_key=project_key or None,
         cwd=cwd or None,
+        session_key=session_key,
         is_session_init=True,
     )
     # get_context 호출 = 오케스트레이터 세션 확인 → sync gate 개방
@@ -1087,6 +1103,8 @@ async def engram_get_context_once(
                     _mark_trusted_root_bootstrap(session_id, caller, client_token)
                     return f"[engram] context reinitialized after closed session. session_id={session_id}."
             # TTL 만료 — 새 세션으로 간주하고 아래에서 재초기화
+            if cached_sid is not None:
+                clear_situational_humor_state(cached_sid)
             _CONTEXT_ONCE_KEYS.pop(cache_key, None)
         _CONTEXT_ONCE_KEYS[cache_key] = (None, now)  # placeholder — session_id로 곧 업데이트
         if len(_CONTEXT_ONCE_KEYS) > _CONTEXT_ONCE_MAX:
