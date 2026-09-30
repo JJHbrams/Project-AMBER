@@ -1,42 +1,21 @@
-<p align="center"><img src="resource/icon.png" width="120" alt="호박 속에 보존된 디지털 정체성 칩을 표현한 AMBER 아이콘" /></p>
+<p align="center"><img src="resource/asset/readme/amber-header.svg" width="1200" alt="AMBER — Experience becomes identity. An amber stone preserves a digital identity chip." /></p>
 
-<h1 align="center">AMBER</h1>
+<p align="center"><strong>경험이 쌓여, 정체성이 됩니다. AI 에이전트의 기억을 다음 세션으로.</strong></p>
 
-<p align="center"><strong>경험이 쌓여, 정체성이 됩니다.</strong></p>
+<p align="center"><b>A</b>gent <b>M</b>emory <b>B</b>ackend with <b>E</b>pisodic <b>R</b>ecall<br /><sub>Engram의 배포 이름입니다.</sub></p>
 
-<p align="center">AI 에이전트의 기억과 정체성을 다음 세션으로 이어갑니다.</p>
+<p align="center">
+  <a href="https://github.com/JJHbrams/Project-AMBER/releases/latest"><img src="https://img.shields.io/github/v/release/JJHbrams/Project-AMBER?style=flat-square&amp;label=release&amp;labelColor=252b32&amp;color=e5ac55" alt="Latest release" /></a>
+  <img src="https://img.shields.io/badge/platform-Windows-e5ac55?style=flat-square&amp;labelColor=252b32" alt="Platform: Windows" />
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-e5ac55?style=flat-square&amp;labelColor=252b32" alt="License: MIT" /></a>
+  <a href="docs/architecture.md"><img src="https://img.shields.io/badge/connect-MCP-e5ac55?style=flat-square&amp;labelColor=252b32" alt="Connect with MCP" /></a>
+</p>
 
-<p align="center"><sub>Agent Memory Backend with Episodic Recall · AMBER는 Engram의 배포 이름입니다.</sub></p>
+<p align="center"><a href="https://github.com/JJHbrams/Project-AMBER/releases/latest"><strong>↓ Windows 다운로드</strong></a> &nbsp; · &nbsp; <a href="#빠른-시작">빠른 시작</a> &nbsp; · &nbsp; <a href="README.md">English</a></p>
 
-<p align="center"><a href="https://github.com/JJHbrams/Project-AMBER/releases/latest"><strong>Windows 다운로드</strong></a> · <a href="README.md">English</a> · <a href="#빠른-시작">빠른 시작</a></p>
-
-<p align="center"><sub>Windows · 로컬 저장소 · MCP 연결 · MIT</sub></p>
+---
 
 AMBER는 기억·페르소나·지식을 세션과 설정된 AI 도구 사이에서 이어가는 로컬 런타임 **Engram의 배포명**입니다. 호박석 안에 담긴 칩은 경험이 쌓여 형성되는 디지털 정체성을 상징합니다.
-
-## 이어지는 것
-
-- **정체성** — 저장된 경험과 반성을 바탕으로 이어지는 자기 서술과 페르소나.
-- **기억** — 다음 세션에서 다시 찾을 수 있는 세션 요약, 결정, 미완료 작업.
-- **지식** — 로컬 지식 그래프로 연결하고 검색하는 Markdown 노트와 프로젝트 문서.
-
-## 빠른 시작
-
-1. [최신 AMBER Windows 설치 프로그램](https://github.com/JJHbrams/Project-AMBER/releases/latest)을 내려받아 실행합니다.
-2. 시작 메뉴에서 **AMBER (ENGRAM)**을 열고 로컬 설정을 마칩니다.
-3. 설정한 코딩 도구로 프로젝트 세션을 시작합니다. 지원되는 연결에는 같은 로컬 프로젝트 맥락이 제공됩니다.
-
-일반 사용자는 Windows 설치 프로그램을 사용하면 됩니다. 설치 파일에 필요한 런타임이 포함되어 있어 Python이나 Conda를 별도로 설치할 필요가 없습니다.
-
-## 코딩 도구 사이의 연속성
-
-AMBER는 설정된 로컬 클라이언트를 하나의 프로젝트 기억 서비스에 연결합니다. 예를 들면 다음과 같습니다.
-
-- **Claude Code**에서 구현한 뒤 **Codex CLI**에서 같은 저장 프로젝트 맥락으로 검토합니다.
-- **GitHub Copilot CLI**에서 이전 세션의 결정을 다시 찾아 특정 작업을 이어 갑니다.
-- 호환되는 다른 MCP 클라이언트도, 제공하는 lifecycle 신호 범위에서 연동할 수 있습니다.
-
-클라이언트마다 지원 범위와 lifecycle 정보는 다릅니다. AMBER의 지속 프로젝트 맥락은 특정 터미널·모델·UI와 분리되어 있습니다.
 
 ## 바탕화면에서 보는 AMBER
 
@@ -54,6 +33,28 @@ Windows 오버레이는 선택한 세션 활동을 보여 주고, 캐릭터 옆�
 커스텀 아트·매핑과 합성 이벤트로 촬영한 v1.5.15.736 예시입니다. [캡처 정보](resource/asset/readme/trickcal-demo-v1.5.15.provenance.json).
 
 </details>
+
+## 이어지는 것
+
+<p align="center">
+  <img src="resource/asset/readme/amber-identity-ko.svg" width="260" alt="정체성: 경험이 쌓여 만들어지는 페르소나" />
+  <img src="resource/asset/readme/amber-memory-ko.svg" width="260" alt="기억: 다음 세션으로 이어지는 결정" />
+  <img src="resource/asset/readme/amber-knowledge-ko.svg" width="260" alt="지식: 맥락으로 연결되는 노트와 문서" />
+</p>
+
+## 빠른 시작
+
+1. [최신 AMBER Windows 설치 프로그램](https://github.com/JJHbrams/Project-AMBER/releases/latest)을 내려받아 실행합니다.
+2. 시작 메뉴에서 **AMBER (ENGRAM)**을 열고 로컬 설정을 마칩니다.
+3. 설정한 코딩 도구로 프로젝트 세션을 시작합니다. 지원되는 연결에는 같은 로컬 프로젝트 맥락이 제공됩니다.
+
+일반 사용자는 Windows 설치 프로그램을 사용하면 됩니다. 설치 파일에 필요한 런타임이 포함되어 있어 Python이나 Conda를 별도로 설치할 필요가 없습니다.
+
+## 코딩 도구 사이의 연속성
+
+**Claude Code · Codex CLI · GitHub Copilot CLI · 호환 MCP 클라이언트**
+
+설정한 도구에서 구현하고, 다른 도구에서 검토하며 같은 프로젝트의 저장된 결정을 다시 찾습니다. 제공되는 맥락과 lifecycle 연동 범위는 클라이언트마다 다릅니다.
 
 ## 로컬 저장소와 공급자
 
