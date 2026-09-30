@@ -194,7 +194,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=['resource\\icon.png'],
+    icon=['resource\\icon.ico'],
     version=_windows_version,
 )
 
@@ -215,7 +215,7 @@ dashboard_exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=['resource\\icon.png'],
+    icon=['resource\\icon.ico'],
     version=_windows_version,
 )
 

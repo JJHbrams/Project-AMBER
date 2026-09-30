@@ -1,6 +1,11 @@
 # AMBER
 
-<p align="center"><a href="https://github.com/JJHbrams/Project-AMBER"><img src="resource/asset/readme/amber-header.svg" width="100%" alt="AMBER — persistent project memory" /></a></p>
+<p align="center"><img src="resource/icon.png" width="160" alt="AMBER — a digital identity chip preserved in amber" /></p>
+
+<p align="center"><strong>Agent Memory Backend with Episodic Recall</strong></p>
+
+AMBER is the distribution name of **Engram**, a persistent memory and identity runtime for AI agents.
+The chip preserved in amber symbolizes a digital identity shaped by accumulated experiences and carried across sessions.
 
 <p align="center"><strong>Switch AI tools. Keep your project memory.</strong></p>
 

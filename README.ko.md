@@ -1,4 +1,9 @@
-<p align="center"><a href="README.md"><img src="resource/asset/readme/amber-header.svg" width="100%" alt="AMBER" /></a></p>
+<p align="center"><img src="resource/icon.png" width="160" alt="AMBER — a digital identity chip preserved in amber" /></p>
+
+<p align="center"><strong>Agent Memory Backend with Episodic Recall</strong></p>
+
+AMBER는 AI 에이전트의 기억과 정체성을 이어가는 런타임 **Engram의 배포명**입니다.
+호박석 안에 보존된 칩은 경험이 쌓여 형성되고, 세션을 넘어 이어지는 디지털 정체성을 상징합니다.
 
 <p align="center"><strong>AI 도구를 바꿔도 프로젝트 기억은 이어집니다.</strong></p>
 
