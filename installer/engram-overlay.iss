@@ -44,6 +44,7 @@ OutputBaseFilename=AMBER_{#AppVersion}{#BuildOutputSuffix}_x64-setup
 Compression={#BuildCompression}
 SolidCompression={#BuildSolidCompression}
 WizardStyle=modern
+SetupIconFile=..\resource\icon.ico
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 UninstallDisplayIcon={app}\dist\engram-overlay\{#AppExeName}
