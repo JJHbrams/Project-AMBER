@@ -45,7 +45,7 @@ Windows 오버레이는 선택한 세션 활동을 보여 주고, 캐릭터 옆�
 ## 빠른 시작
 
 1. [최신 AMBER Windows 설치 프로그램](https://github.com/JJHbrams/Project-AMBER/releases/latest)을 내려받아 실행합니다.
-2. 시작 메뉴에서 **AMBER (ENGRAM)**을 열고 로컬 설정을 마칩니다.
+2. 시작 메뉴에서 <strong>AMBER (ENGRAM)</strong>을 열고 로컬 설정을 마칩니다.
 3. 설정한 코딩 도구로 프로젝트 세션을 시작합니다. 지원되는 연결에는 같은 로컬 프로젝트 맥락이 제공됩니다.
 
 일반 사용자는 Windows 설치 프로그램을 사용하면 됩니다. 설치 파일에 필요한 런타임이 포함되어 있어 Python이나 Conda를 별도로 설치할 필요가 없습니다.
