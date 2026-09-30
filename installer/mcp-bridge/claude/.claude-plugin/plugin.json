@@ -1,0 +1,9 @@
+{
+  "name": "engram-recovery-bridge",
+  "version": "1.0.0",
+  "description": "Persistent Engram MCP transport with readiness-event recovery.",
+  "mcpServers": "./.mcp.json",
+  "author": {
+    "name": "Engram"
+  }
+}

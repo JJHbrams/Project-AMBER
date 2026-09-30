@@ -1,0 +1,22 @@
+{
+  "name": "engram-recovery-bridge",
+  "version": "1.0.0",
+  "description": "Persistent Engram MCP transport with readiness-event recovery.",
+  "mcpServers": "./.mcp.json",
+  "author": {
+    "name": "Engram"
+  },
+  "interface": {
+    "displayName": "Engram Recovery Bridge",
+    "shortDescription": "Keep Engram connected across server restarts.",
+    "developerName": "Engram",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Interactive"
+    ],
+    "longDescription": "Maintain the client MCP connection while the local Engram backend restarts.",
+    "defaultPrompt": [
+      "Check Engram connection recovery."
+    ]
+  }
+}

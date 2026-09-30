@@ -123,8 +123,10 @@ def process_provider_hook_input(
         )
         reason = _guidance_reason(result, backend_exit_code)
         enforce = _should_enforce(result, backend_exit_code)
+        if reason and backend_exit_code != 0:
+            reason = f"nonblocking policy diagnostic: {reason}"
     except Exception as exc:
-        reason = str(exc).strip() or "policy guidance adapter error"
+        reason = f"nonblocking policy adapter diagnostic: {str(exc).strip() or 'adapter error'}"
         enforce = False
 
     # Antigravity only accepts top-level decision/reason.  It cannot use the

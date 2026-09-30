@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
     Engram Overlay — 설치타임 경량 구성기 (frozen/통짜 installer 전용)
 
@@ -419,7 +419,7 @@ $httpEntry = @{ type = "http"; url = $mcpUrl }
 # Copilot CLI (~/.copilot/mcp-config.json) : mcpServers
 if (Merge-JsonMcp -Path (Join-Path $env:USERPROFILE ".copilot\mcp-config.json") -ServersKey "mcpServers" -Entry $httpEntry) { Write-Ok "Copilot CLI" }
 # Claude Code (~/.claude.json) : mcpServers
-if (Merge-JsonMcp -Path (Join-Path $env:USERPROFILE ".claude.json") -ServersKey "mcpServers" -Entry $httpEntry) { Write-Ok "Claude Code" }
+# Claude registration is performed by the preserving bridge adapter below.
 # ~/.engram/claude-mcp.json
 Write-Step "Claude session lifecycle hooks (compatible CLI only)"
 $claudeHooks = Get-EngramLaunchContract -Executable $DistExe -Role claude-monitor-hooks
@@ -441,7 +441,7 @@ foreach ($codexRoot in @($codexHooks.roots)) {
 }
 if ($codexHooks.title_policy_review_required) { Write-Warn $codexHooks.title_policy_notice }
 
-[System.IO.File]::WriteAllText((Join-Path $ShimDir "claude-mcp.json"), (@{ mcpServers = @{ engram = $httpEntry } } | ConvertTo-Json -Depth 6), $Utf8NoBom)
+# The bridge adapter also owns ~/.engram/claude-mcp.json.
 # VSCode global (%APPDATA%/Code/User/mcp.json) : servers
 if (Merge-JsonMcp -Path (Join-Path $env:APPDATA "Code\User\mcp.json") -ServersKey "servers" -Entry $httpEntry) { Write-Ok "VSCode (global)" }
 # Antigravity CLI (official AGY user MCP command)
@@ -449,16 +449,16 @@ if (Get-Command agy -ErrorAction SilentlyContinue) {
     & agy mcp add engram $mcpUrl *> $null
     if ($LASTEXITCODE -eq 0) { Write-Ok "Antigravity (agy)" } else { Write-Warn "Antigravity MCP 등록 실패 (수동: agy mcp add engram $mcpUrl)" }
 }
-# Codex CLI (기존 사용자 정의 engram 항목은 보존)
-if (Get-Command codex -ErrorAction SilentlyContinue) {
-    & codex mcp get engram *> $null
-    if ($LASTEXITCODE -eq 0) {
-        Write-Ok "Codex CLI (existing engram MCP preserved)"
-    } else {
-        & codex mcp add engram --url $mcpUrl *> $null
-        if ($LASTEXITCODE -eq 0) { Write-Ok "Codex CLI" } else { Write-Warn "Codex MCP 등록 실패 (수동: codex mcp add engram --url $mcpUrl)" }
-    }
-}
+# Stable server key preserves native MCP hook references for both providers.
+Write-Step "MCP recovery bridge (Claude and Codex)"
+$BridgeExe = Join-Path (Split-Path $DistExe) 'engram-mcp-bridge.exe'
+if (-not (Test-Path $BridgeExe)) { Write-Warn 'MCP bridge executable missing'; Exit-Configure 1 }
+$BridgeDiscovery = Join-Path $env:USERPROFILE '.engram/overlay-state-api-v1.json'
+& $BridgeExe --install --auto-home --command $BridgeExe `
+    "--arg=--upstream-url" "--arg=$mcpUrl" `
+    "--arg=--state-url" "--arg=http://127.0.0.1:17384/state/mcp/events" `
+    "--arg=--discovery-file" "--arg=$BridgeDiscovery"
+if ($LASTEXITCODE -ne 0) { Write-Warn 'MCP bridge registration failed'; Exit-Configure 1 }
 
 # ── 5. .env 템플릿 ───────────────────────────────────────────
 if (-not (Test-Path $EnvFile)) {

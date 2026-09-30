@@ -265,6 +265,7 @@ class PolicyPreflightTests(unittest.TestCase):
                 ("Bash", "git show HEAD~1 --stat"),
                 ("Bash", "git branch"),
                 ("Bash", "git branch --show-current"),
+                ("Bash", "git worktree list --porcelain"),
                 ("Bash", "git rev-parse --show-toplevel"),
                 ("Bash", "cmd /c git status"),
                 ("PowerShell", "powershell -Command git status"),
@@ -273,6 +274,43 @@ class PolicyPreflightTests(unittest.TestCase):
                     result = classify_claude_pretool_payload(self._hook_payload(tool_name, command), str(repo))
                     self.assertFalse(result["classified"])
                     self.assertIn("read-only", result["reason"])
+
+    def test_safe_new_feature_worktree_is_out_of_scope_even_from_dev(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            subprocess.run(["git", "init", str(repo)], check=True, capture_output=True, text=True)
+            subprocess.run(["git", "-C", str(repo), "checkout", "-b", "dev"], check=True, capture_output=True, text=True)
+            target = Path(tmp) / "isolated-feature"
+            for command in (
+                f"git worktree add -b feat/example {target.as_posix()} dev",
+                f"git worktree add {target.as_posix()} -b experiment/example HEAD",
+            ):
+                with self.subTest(command=command):
+                    result = classify_claude_pretool_payload(self._hook_payload("Bash", command), str(repo))
+                    self.assertFalse(result["classified"])
+                    self.assertIn("safe isolated worktree", result["reason"])
+                    self.assertEqual(result["hook"]["git_subcommand"], "worktree")
+
+    def test_unsafe_worktree_operations_fail_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            subprocess.run(["git", "init", str(repo)], check=True, capture_output=True, text=True)
+            target = Path(tmp) / "isolated-feature"
+            for command in (
+                f"git worktree add -b dev {target.as_posix()}",
+                f"git worktree add -B feat/example {target.as_posix()}",
+                f"git worktree add --force -b feat/example {target.as_posix()}",
+                f"git worktree add --detach {target.as_posix()}",
+                f"git --bare worktree add -b feat/example {target.as_posix()}",
+                f"git --git-dir={repo / '.git'} worktree add -b feat/example {target.as_posix()}",
+                f"git -c protocol.file.allow=always worktree add -b feat/example {target.as_posix()}",
+                f"GIT_DIR={repo / '.git'} git worktree add -b feat/example {target.as_posix()}",
+                f"git worktree add -b feat/example {target.as_posix()} unknown/start",
+                f"git worktree add -b feat/example {target.as_posix()} && git status",
+            ):
+                with self.subTest(command=command):
+                    with self.assertRaises(HookPayloadError):
+                        classify_claude_pretool_payload(self._hook_payload("Bash", command), str(repo))
 
     def test_ambiguous_or_unsupported_git_commands_fail_closed(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -292,9 +330,10 @@ class PolicyPreflightTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
             (repo / ".git").mkdir()
-            with self.assertRaisesRegex(HookPayloadError, "agent pretool policy") as raised:
+            with self.assertRaisesRegex(HookPayloadError, "could not be classified safely") as raised:
                 classify_claude_pretool_payload(self._hook_payload("Bash", "git ci"), str(repo))
         self.assertNotIn("Claude", str(raised.exception))
+        self.assertNotIn("not allowed", str(raised.exception))
 
     def test_execution_capable_git_read_options_fail_closed(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -422,7 +461,7 @@ class PolicyPreflightTests(unittest.TestCase):
         self.assertEqual(unsupported.returncode, 0)
         self.assertEqual(unsupported.stderr, "")
         self.assertIn(
-            "git subcommand 'ci'",
+            "git subcommand 'ci' could not be classified safely",
             json.loads(unsupported.stdout)["hookSpecificOutput"]["additionalContext"],
         )
 

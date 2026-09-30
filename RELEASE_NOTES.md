@@ -1,5 +1,90 @@
 # Release Notes
 
+## 2026-10-01 - v1.5.23: MCP Auto-Reconnect, UTF-8 Bridge, AMBER Launcher, Faster Builds
+
+### Highlights
+
+- Claude and Codex now reach Engram through a **persistent stdio recovery
+  bridge**. When the overlay restarts or is replaced, the bridge follows the
+  readiness stream and reattaches to the new backend by itself; no `/mcp`
+  reconnect is needed.
+- Fixed MCP calls with Korean arguments (`engram_save_memory`,
+  `kg_patch_section`, ...) failing with `backend transport lost`. The bridge
+  decoded Windows stdin as cp949; it now reads UTF-8 bytes.
+- The collapsed launcher shows the **AMBER identity mark** instead of the
+  purple chat pebble, and the exe and installer icons use it too.
+- Frozen builds: a code-only change now ships in about 5 minutes instead of
+  46, and a full build takes about 18 minutes.
+
+### What Changed
+
+- `core/integrations/mcp_recovery_bridge.py`, `scripts/engram_mcp_bridge.py`,
+  `engram-mcp-bridge.spec`, `overlay/mcp_recovery_events.py`,
+  `overlay/stm_server.py`, `core/install/mcp_bridge_config.py`,
+  `installer/mcp-bridge/**`, and `installer/modules/05_config.ps1` add the
+  bridge, its readiness event stream, and its registration for Claude and
+  Codex. Only protocol initialization is replayed; an application request in
+  flight when the backend is lost returns `outcome_unknown` and is never
+  resent.
+- The bridge reads `sys.stdin.buffer` and decodes UTF-8 per line; an
+  undecodable line gets a `-32700` reply instead of dropping the pipe.
+- `overlay/character.py` draws the launcher from the bundled
+  `resource/icon.png` with a brighter hover frame and a focus ring. Alpha is
+  hardened because the window is chroma-keyed; the canvas pebble remains the
+  fallback.
+- `installer/build-exe.ps1` builds only the exe (no install steps 1-8).
+  `installer/build-overlay.ps1` asks `core/install/overlay_manifest.py --plan`
+  for reuse, fast, or full against the artifact's schema-2 manifest. A fast
+  plan hardlink-clones the artifact, recompiles only the changed app `.pyc`
+  files (`core/install/app_payload.py`), restamps the PE version
+  (`core/install/pe_version.py`), and runs only the smoke roles the change
+  reaches. The live overlay stays up during the build and is stopped only for
+  the publish swap. Old artifacts are deleted in the background.
+- `engram_overlay_entry.py` is a stub; its logic moved to
+  `core/entrypoint.py`. The frozen runtime contract reports the app payload
+  digest, module origins, and build kind, and a build fails if they disagree
+  with the manifest.
+- Codex gets its own SessionStart directive, the unsupported Claude
+  SessionEnd MCP hook is retired, and closed-session context-once rebinding
+  stays within its own conversation.
+
+### Impact
+
+- Sessions survive overlay upgrades and restarts without manual reconnects.
+- Korean memory saves and wiki patches work.
+- Release installers are always built with a full PyInstaller build and the
+  full smoke set; the fast path is for local development builds.
+- Existing 1.5.22 installs are offered this release through the overlay's
+  **check for update** menu.
+
+### Validation
+
+- `test/test_mcp_recovery_bridge.py` reproduces the cp949 failure (it fails
+  on the old code with `UnicodeDecodeError`) and passes with the fix; a live
+  probe against the running backend returned 4/4 for raw UTF-8 Korean calls.
+- Six bridges started before an overlay swap reattached to the new backend on
+  their own.
+- `test/test_overlay_fast_path.py` and `test/test_build_exe_publish.py` (53
+  tests) plus the broader build/runtime suites (194 tests) pass.
+- Measured builds: full 1,063-1,097 s; code-only fast path 294 s and 326 s,
+  both running runtime-contract and smoke-check on the stage before publish.
+- Release build: `build-installer.ps1 -Release` ran a full build with
+  runtime-contract, smoke-check (including a real embedding), and dashboard
+  smoke all passing, then packaged `AMBER_1.5.23.883_x64-setup.exe`.
+- Not yet exercised at runtime: the fast path's bridge-rebuild branch, PE
+  restamp on a version change, and a cleanup failure on a locked file.
+
+### Files
+
+- `core/integrations/mcp_recovery_bridge.py`, `scripts/engram_mcp_bridge.py`,
+  `engram-mcp-bridge.spec`, `overlay/mcp_recovery_events.py`
+- `overlay/character.py`, `resource/icon.ico`, `resource/icon.png`
+- `installer/build-exe.ps1`, `installer/build-overlay.ps1`,
+  `installer/build-installer.ps1`, `core/install/app_payload.py`,
+  `core/install/overlay_manifest.py`, `core/install/pe_version.py`,
+  `core/install/stage_clone.py`, `core/install/runtime_contract.py`,
+  `core/entrypoint.py`, `engram_overlay_entry.py`, `engram-overlay.spec`
+
 ## 2026-09-23 - v1.5.22: Situational Humor and a Tutorial Persona Fix
 
 ### Highlights

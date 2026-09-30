@@ -20,7 +20,8 @@ class BubbleBootstrapTests(unittest.TestCase):
     def test_codex_bubble_uses_codex_caller_and_same_title_policy(self):
         prompt = bubble_bootstrap_prompt("C:/workspace/project", caller="Codex")
 
-        self.assertIn("caller='Codex'", prompt)
+        self.assertIn("caller:'Codex'", prompt)
+        self.assertNotIn("ToolSearch with query", prompt)
         self.assertIn("engram_get_context_once", prompt)
         self.assertIn("Do not generate or report a session title", prompt)
         self.assertNotIn("engram_report_session_title", prompt)

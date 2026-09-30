@@ -25,7 +25,7 @@ class HookProvisioningTests(unittest.TestCase):
             self.assertEqual(set(result), {'supported', 'changed', 'applied', 'hook_count', 'reason'})
             if result['supported']:
                 self.assertTrue(result['applied'])
-                self.assertEqual(result['hook_count'], 9)
+                self.assertEqual(result['hook_count'], 8)
                 self.assertEqual(json.loads(target.read_text(encoding='utf-8'))['hooks'], hooks.generated_hooks())
             else:
                 self.assertFalse(target.exists())
@@ -88,6 +88,37 @@ class HookProvisioningTests(unittest.TestCase):
         result = hooks.merge_settings(settings)
         self.assertEqual(result['hooks']['SessionStart'], [unrelated, current, unrelated])
         self.assertEqual(hooks.merge_settings(result), result)
+
+    def test_generated_hooks_exclude_unsupported_session_end(self):
+        self.assertNotIn('SessionEnd', hooks.generated_hooks())
+        self.assertNotIn('SessionEnd', hooks.generated_hooks(native_identity=True))
+
+    def test_session_end_fix_converges_for_clean_generated_settings(self):
+        settings = {'hooks': hooks.generated_hooks()}
+        self.assertEqual(hooks.merge_settings(settings), settings)
+        self.assertEqual(hooks.merge_settings(hooks.merge_settings(settings)), settings)
+
+    def test_exact_legacy_session_end_groups_are_removed_idempotently(self):
+        plain, native = hooks.legacy_session_end_groups('engram')
+        unrelated = {'hooks': [{'type': 'command', 'command': 'orca preserved'}]}
+        settings = {'hooks': {'SessionEnd': [plain, unrelated, native, plain]}}
+        merged = hooks.merge_settings(settings)
+        self.assertEqual(merged['hooks']['SessionEnd'], [unrelated])
+        self.assertEqual(hooks.merge_settings(merged), merged)
+
+    def test_altered_legacy_session_end_group_fails_closed(self):
+        altered = hooks.legacy_session_end_groups('engram')[0]
+        altered = {**altered, 'hooks': [{**altered['hooks'][0], 'timeout': 3}]}
+        with self.assertRaisesRegex(ValueError, 'modified native monitor hook preserved'):
+            hooks.merge_settings({'hooks': {'SessionEnd': [altered]}})
+
+    def test_mixed_and_unrelated_session_end_groups_are_preserved(self):
+        legacy = hooks.legacy_session_end_groups('engram')[0]['hooks'][0]
+        unrelated = {'hooks': [{'type': 'command', 'command': 'user SessionEnd'}]}
+        mixed = {'hooks': [legacy, {'type': 'command', 'command': 'user companion'}]}
+        self.assertEqual(hooks.merge_settings({'hooks': {'SessionEnd': [unrelated]}})['hooks']['SessionEnd'], [unrelated])
+        with self.assertRaisesRegex(ValueError, 'modified native monitor hook preserved'):
+            hooks.merge_settings({'hooks': {'SessionEnd': [mixed]}})
 
     def test_current_connection_hint_is_explicit_and_metadata_only(self):
         from core.integrations.claude_lifecycle import TITLE_CONTEXT
@@ -188,7 +219,7 @@ class HookProvisioningTests(unittest.TestCase):
         setup = (ROOT / 'installer/configure.ps1').read_text(encoding='utf-8-sig')
         self.assertIn('--role claude-monitor-hooks --provision --apply', source)
         self.assertIn('-Role claude-monitor-hooks', setup)
-        self.assertIn('from core.install.claude_monitor_hooks import main', (ROOT / 'engram_overlay_entry.py').read_text(encoding='utf-8-sig'))
+        self.assertIn('from core.install.claude_monitor_hooks import main', (ROOT / 'core' / 'entrypoint.py').read_text(encoding='utf-8-sig'))
 
 
 if __name__ == '__main__':

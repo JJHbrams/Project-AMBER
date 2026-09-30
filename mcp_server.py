@@ -415,6 +415,20 @@ def _build_context_once_key(
     return "|".join(key_parts)
 
 
+def _context_once_connection_key(ctx: Context | None) -> str:
+    """dedupe 를 LLM 세션 단위로 묶는 식별자 — MCP 연결(transport) 하나가 대화 하나다.
+
+    session_fingerprint 는 서버 프로세스 단위라 세션을 가르지 못한다. 그것만으로
+    dedupe 하면 30분 안에 먼저 bootstrap 한 다른 대화(예: 예약작업)의 캐시를 맞고
+    "already initialized" 만 받아 페르소나가 주입되지 않는다(2026-09-28 실측).
+    presence 와 같은 연결 식별자를 써서, 같은 대화의 재호출만 생략한다.
+    """
+    if ctx is None:
+        return ""
+    identity = _mcp_presence.context_identity(ctx)
+    return f"conn:{identity[0]}" if identity else ""
+
+
 def _consume_tutorial_notice_once(notice_key: str, ctx: Context | None = None) -> bool:
     key = str(notice_key or "").strip()
     if not key:
@@ -1079,8 +1093,15 @@ async def engram_get_context_once(
         # not share the process-wide context-once cache entry with another
         # root CLI that happens to use the same caller/scope/cwd tuple.
         cache_key = f"{cache_key}|root:{client_token}"
+    connection_key = _context_once_connection_key(ctx)
+    if connection_key:
+        cache_key = f"{cache_key}|{connection_key}"
+    # 같은 대화의 재호출임을 증명할 수 없으면 "already" 로 컨텍스트를 생략하지 않는다.
+    # 컨텍스트는 대화마다 들어가야 하고, 중복 주입보다 누락이 훨씬 비싸다.
+    same_conversation_proven = bool(client_token or connection_key)
 
     now = time.time()
+    reused_session_id: int | None = None
     with _CONTEXT_ONCE_LOCK:
         cached = _CONTEXT_ONCE_KEYS.get(cache_key)
         if cached is not None:
@@ -1090,53 +1111,68 @@ async def engram_get_context_once(
                     if client_token and not _bind_root_client_token(cached_sid, client_token):
                         return "[engram] invalid root client token."
                     _mark_trusted_root_bootstrap(cached_sid, caller, client_token)
-                    sid_hint = f" session_id={cached_sid}."
-                    return f"[engram] context already initialized for this request session key.{sid_hint}"
+                    if same_conversation_proven:
+                        sid_hint = f" session_id={cached_sid}."
+                        return f"[engram] context already initialized for this request session key.{sid_hint}"
+                    # 기록 행만 재사용하고 컨텍스트는 전부 돌려준다.
+                    reused_session_id = cached_sid
                 # Ended cached binding: never silently reuse it.  The new open
                 # continuation preserves lineage across a client restart/close.
-                if cached_sid is not None:
+                elif cached_sid is not None:
                     _invalidate_session_bindings(cached_sid)
                     effective_scope = scope_key or os.environ.get("ENGRAM_SCOPE_KEY") or ""
-                    session_id = _rebind_continuation(session_fingerprint, cached_sid, effective_scope, cache_key)
+                    # 프로세스 공용 fingerprint 로 이으면 마지막에 bootstrap 한 다른 대화의
+                    # 열린 세션을 넘겨받는다 — 연결 단위로 묶는다.
+                    rebind_fingerprint = (
+                        f"{session_fingerprint}|{connection_key}" if connection_key else session_fingerprint
+                    )
+                    session_id = _rebind_continuation(rebind_fingerprint, cached_sid, effective_scope, cache_key)
+                    if session_fingerprint and rebind_fingerprint != session_fingerprint:
+                        _FINGERPRINT_TO_SESSION[session_fingerprint] = session_id
                     if client_token and not _bind_root_client_token(session_id, client_token):
                         return "[engram] invalid root client token."
                     _mark_trusted_root_bootstrap(session_id, caller, client_token)
-                    return f"[engram] context reinitialized after closed session. session_id={session_id}."
-            # TTL 만료 — 새 세션으로 간주하고 아래에서 재초기화
-            if cached_sid is not None:
-                clear_situational_humor_state(cached_sid)
-            _CONTEXT_ONCE_KEYS.pop(cache_key, None)
-        _CONTEXT_ONCE_KEYS[cache_key] = (None, now)  # placeholder — session_id로 곧 업데이트
-        if len(_CONTEXT_ONCE_KEYS) > _CONTEXT_ONCE_MAX:
-            _CONTEXT_ONCE_KEYS.popitem(last=False)
+                    if same_conversation_proven:
+                        return f"[engram] context reinitialized after closed session. session_id={session_id}."
+                    reused_session_id = session_id
+            if reused_session_id is None:
+                # TTL 만료 — 새 세션으로 간주하고 아래에서 재초기화
+                if cached_sid is not None:
+                    clear_situational_humor_state(cached_sid)
+                _CONTEXT_ONCE_KEYS.pop(cache_key, None)
+        if reused_session_id is None:
+            _CONTEXT_ONCE_KEYS[cache_key] = (None, now)  # placeholder — session_id로 곧 업데이트
+            if len(_CONTEXT_ONCE_KEYS) > _CONTEXT_ONCE_MAX:
+                _CONTEXT_ONCE_KEYS.popitem(last=False)
 
     # STM 세션 생성 (브로커 → fallback direct SQLite)
-    session_id: int | None = None
-    try:
-        effective_scope = scope_key or os.environ.get("ENGRAM_SCOPE_KEY") or None
-        sess_result = _stm_post(
-            "/stm/session/start",
-            {"scope_key": effective_scope or "", "project_key": project_key or ""},
-        )
-        if sess_result and "session_id" in sess_result:
-            session_id = int(sess_result["session_id"])
-        else:
-            _parsed_keys = [project_key.strip()] if project_key.strip() else []
-            _sess = memory_bus.start_session(scope_key=effective_scope, project_keys=_parsed_keys or None)
-            session_id = _sess.session_id
-        with _CONTEXT_ONCE_LOCK:
-            _CONTEXT_ONCE_KEYS[cache_key] = (session_id, now)
-        if session_id and client_token and not _bind_root_client_token(session_id, client_token):
-            return "[engram] invalid root client token."
-        if session_id:
-            _mark_trusted_root_bootstrap(session_id, caller, client_token)
-        # fingerprint → session_id 저장 (save_message 자동 resolve용)
-        if session_id is not None and session_fingerprint:
-            _FINGERPRINT_TO_SESSION[session_fingerprint] = session_id
-    except Exception as _e:
-        import logging as _logging
+    session_id: int | None = reused_session_id
+    if reused_session_id is None:
+        try:
+            effective_scope = scope_key or os.environ.get("ENGRAM_SCOPE_KEY") or None
+            sess_result = _stm_post(
+                "/stm/session/start",
+                {"scope_key": effective_scope or "", "project_key": project_key or ""},
+            )
+            if sess_result and "session_id" in sess_result:
+                session_id = int(sess_result["session_id"])
+            else:
+                _parsed_keys = [project_key.strip()] if project_key.strip() else []
+                _sess = memory_bus.start_session(scope_key=effective_scope, project_keys=_parsed_keys or None)
+                session_id = _sess.session_id
+            with _CONTEXT_ONCE_LOCK:
+                _CONTEXT_ONCE_KEYS[cache_key] = (session_id, now)
+            if session_id and client_token and not _bind_root_client_token(session_id, client_token):
+                return "[engram] invalid root client token."
+            if session_id:
+                _mark_trusted_root_bootstrap(session_id, caller, client_token)
+            # fingerprint → session_id 저장 (save_message 자동 resolve용)
+            if session_id is not None and session_fingerprint:
+                _FINGERPRINT_TO_SESSION[session_fingerprint] = session_id
+        except Exception as _e:
+            import logging as _logging
 
-        _logging.getLogger(__name__).warning("get_context_once STM 세션 생성 실패: %s", _e)
+            _logging.getLogger(__name__).warning("get_context_once STM 세션 생성 실패: %s", _e)
 
     ctx_text = await engram_get_context(
         user_query=user_query,

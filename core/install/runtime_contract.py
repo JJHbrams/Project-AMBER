@@ -17,6 +17,67 @@ from typing import Any
 from core.install.versioning import resolve_version
 
 
+def _under(path: Path, base: Path) -> bool:
+    try:
+        Path(os.path.normcase(str(path.resolve()))).relative_to(
+            Path(os.path.normcase(str(base.resolve())))
+        )
+    except ValueError:
+        return False
+    return True
+
+
+def _module_origins(modules: dict[str, Any]) -> dict[str, str]:
+    """``__file__`` of the core modules; frozen code must come from ``sys._MEIPASS``."""
+    origins = {name: str(getattr(module, "__file__", "") or "") for name, module in modules.items()}
+    if getattr(sys, "frozen", False):
+        base = Path(getattr(sys, "_MEIPASS", ""))
+        for name, origin in origins.items():
+            if not origin or not _under(Path(origin), base):
+                raise RuntimeError(
+                    f"frozen module {name} loaded from outside the bundle: {origin or '<none>'}"
+                )
+    return origins
+
+
+def _build_manifest_facts() -> tuple[str, str]:
+    """``(build_kind, app_payload_digest)`` from ``<exe dir>/build-manifest.json``."""
+    if not getattr(sys, "frozen", False):
+        return "", ""
+    executable_dir = Path(sys.executable).resolve().parent
+    try:
+        manifest = json.loads((executable_dir / "build-manifest.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return "", ""
+    files = (manifest.get("app") or {}).get("payload_files") or []
+    digest = ""
+    if files:
+        digest = _payload_digest(Path(getattr(sys, "_MEIPASS", executable_dir)), files)
+    return str(manifest.get("build_kind", "")), digest
+
+
+def _payload_digest(contents: Path, files: list[str]) -> str:
+    """Same bytes as ``app_payload.digest_files``; kept dependency-light on purpose.
+
+    The frozen artifact only bundles stdlib modules PyInstaller saw at the full
+    build, so the runtime must not import the (heavier) build-side helper.
+    """
+    import hashlib
+
+    digest = hashlib.sha256()
+    for dest in sorted(set(files)):
+        path = Path(contents) / dest
+        value = "MISSING"
+        if path.is_file():
+            file_hash = hashlib.sha256()
+            with path.open("rb") as stream:
+                for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                    file_hash.update(chunk)
+            value = file_hash.hexdigest()
+        digest.update(f"{dest}\0{value}\n".encode("utf-8"))
+    return digest.hexdigest()
+
+
 def evaluate_runtime_contract() -> dict[str, Any]:
     if not getattr(sys, "frozen", False):
         source_root = Path(__file__).resolve().parents[2]
@@ -53,6 +114,12 @@ def evaluate_runtime_contract() -> dict[str, Any]:
     source_root = "" if frozen else str(Path(__file__).resolve().parents[2])
     version = resolve_version()
     from core.install.service_config import service_config_provenance
+    import core as core_package
+
+    module_origins = _module_origins(
+        {"overlay.main": overlay_main, "core": core_package, "mcp_server": mcp_server}
+    )
+    build_kind, app_payload_digest = _build_manifest_facts()
     return {
         "contract_version": 1,
         "runtime": "frozen" if frozen else "source",
@@ -71,6 +138,9 @@ def evaluate_runtime_contract() -> dict[str, Any]:
         "dashboard_port": int(dashboard_cfg.get("port", 8501)),
         "selected_renderer_id": str((overlay_cfg.get('external_renderer') or {}).get('selected_renderer_id', '')),
         "resources": resolved_resources,
+        "app_payload_digest": app_payload_digest,
+        "module_origins": module_origins,
+        "build_kind": build_kind,
     }
 
 

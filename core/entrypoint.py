@@ -1,0 +1,333 @@
+"""engram-overlay 엔트리 로직 (얇은 engram_overlay_entry.py 스텁이 run() 을 호출한다).
+
+PyInstaller 는 엔트리 스크립트를 exe 의 PKG 에 굽기 때문에, 로직을 이 앱 모듈로 옮겨
+코드만 바뀐 경우 _internal 의 .pyc 교체만으로 반영할 수 있게 한다.
+"""
+
+import os
+import sys
+from pathlib import Path as _Path
+import time
+import datetime
+import logging
+import traceback
+import yaml
+import json as _json
+import urllib.request
+import urllib.error
+import ctypes
+
+from core.install.versioning import resolve_version
+
+# 저장소 루트(소스 모드) / _MEIPASS(frozen). 원래 엔트리 스크립트의 Path(__file__).parent 와 동일.
+# 이 모듈은 <root>/core/entrypoint.py 에 있으므로 두 단계 위가 항상 그 디렉터리다.
+_ROOT = _Path(__file__).resolve().parent.parent
+
+
+def _prepare_frozen_streams() -> None:
+    """Give console-oriented libraries valid streams in a windowed executable."""
+    for name in ("stdin", "stdout", "stderr"):
+        stream = getattr(sys, name)
+        if stream is None:
+            mode = "r" if name == "stdin" else "w"
+            setattr(sys, name, open(os.devnull, mode, encoding="utf-8"))
+            continue
+        try:
+            stream.reconfigure(encoding="utf-8")
+        except (AttributeError, OSError):
+            pass
+
+
+def _write_frozen_failure(label: str) -> None:
+    path = os.environ.get("ENGRAM_SMOKE_LOG")
+    if not path:
+        path = str(_Path.home() / ".engram" / "logs" / "frozen-smoke.log")
+    try:
+        log_path = _Path(path)
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with log_path.open("a", encoding="utf-8") as handle:
+            handle.write(f"\n[{datetime.datetime.now().isoformat()}] {label}\n")
+            traceback.print_exc(file=handle)
+    except OSError:
+        pass
+
+
+def _run_dashboard_sidecar(argv: list[str]) -> None:
+    """Run the dedicated frozen Streamlit dashboard sidecar."""
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Engram dashboard sidecar")
+    parser.add_argument("--port", type=int, default=8501)
+    parser.add_argument("--smoke-check", action="store_true")
+    args = parser.parse_args(argv)
+
+    app_path = _Path(getattr(sys, "_MEIPASS", _ROOT)) / "core" / "dashboard" / "app.py"
+    if not app_path.is_file():
+        raise RuntimeError(f"bundled dashboard entry missing: {app_path}")
+
+    if args.smoke_check:
+        from streamlit.testing.v1 import AppTest
+
+        result = AppTest.from_file(str(app_path), default_timeout=30).run()
+        if result.exception:
+            messages = "; ".join(str(item.value) for item in result.exception)
+            raise RuntimeError(f"dashboard render smoke failed: {messages}")
+        titles = [str(item.value) for item in result.title]
+        if not any("Overview" in title for title in titles):
+            raise RuntimeError(f"dashboard title missing: {titles}")
+        return
+
+    from streamlit.web import bootstrap as streamlit_bootstrap
+
+    options = {
+        "server.headless": True,
+        "server.address": "127.0.0.1",
+        "server.port": max(1, min(65535, int(args.port))),
+        "global.developmentMode": False,
+        "browser.gatherUsageStats": False,
+    }
+    streamlit_bootstrap.load_config_options(options)
+    streamlit_bootstrap.run(
+        str(app_path),
+        False,
+        [],
+        options,
+    )
+
+
+# ── 멀티콜 바이너리 디스패치 ────────────────────────────────────────────
+# 같은 exe 가 `--role` 인자에 따라 백엔드(mcp_server / kg_watcher)로도 동작한다.
+# frozen 번들에서 conda python 없이 백엔드를 구동하기 위함(통짜 installer 핵심).
+# 백엔드 역할이면 무거운 tk/pystray(overlay.main) import 전에 바로 처리하고 종료한다.
+# overlay 역할일 때만 아래로 계속 진행한다.
+def _dispatch_backend_role() -> bool:
+    argv = sys.argv[1:]
+    if getattr(sys, "frozen", False):
+        _prepare_frozen_streams()
+        if _Path(sys.executable).stem.lower() == "engram-dashboard":
+            try:
+                _run_dashboard_sidecar(argv)
+                return True
+            except BaseException:
+                _write_frozen_failure("dashboard sidecar")
+                sys.exit(1)
+    if not argv or argv[0] != "--role":
+        return False
+    role = argv[1] if len(argv) > 1 else ""
+    rest = argv[2:]
+    # 백엔드 역할: UTF-8 콘솔 강제. frozen exe 는 stdout 이 cp949(한국어 로케일)로 잡혀
+    # kg_watcher/mcp_server 의 한글·이모지 로그 줄에서 UnicodeEncodeError 로 크래시한다.
+    _prepare_frozen_streams()
+    if not getattr(sys, "frozen", False):
+        # 소스 모드: 루트 및 scripts/kg 를 import 경로에 추가
+        here = _ROOT
+        sys.path.insert(0, str(here))
+        sys.path.insert(0, str(here / "scripts" / "kg"))
+    # 백엔드 역할은 부모(overlay)가 stdout/stderr 를 로그 파일로 리다이렉트한 서브프로세스다.
+    # 크래시 시 PyInstaller 윈도우 부트로더의 모달 다이얼로그가 뜨지 않도록 여기서 잡아
+    # stderr(=로그)로 트레이스백만 남기고 조용히 종료한다.
+    try:
+        if role == "mcp-server":
+            import mcp_server
+            mcp_server.main(rest)
+            return True
+        if role == "claude-root-launcher":
+            from core.integrations.claude_root_launcher import main
+            raise SystemExit(main(argv[2:]))
+        if role == "kg-watcher":
+            import kg_watcher
+            kg_watcher.main(rest)
+            return True
+        if role == "install-bootstrap":
+            from core.install.bootstrap import main as bootstrap_main
+            bootstrap_main(rest)
+            return True
+        if role == "model-cache":
+            from core.install.model_manifest import _main as model_cache_main
+
+            raise SystemExit(model_cache_main(rest))
+        if role == "policy-preflight":
+            from core.integrations.policy_preflight import main as policy_preflight_main
+
+            policy_preflight_main(rest)
+            return True
+        if role == "agent-policy-hook":
+            from core.integrations.agent_policy_hook import main as agent_policy_hook_main
+
+            raise SystemExit(agent_policy_hook_main(rest))
+        if role == "git-hook":
+            from core.integrations.git_policy_hook import main as git_hook_main
+
+            git_hook_main(rest)
+            return True
+        if role == "install-user-config":
+            from core.install.user_config import main as user_config_main
+            user_config_main(rest)
+            return True
+        if role == 'claude-monitor-hooks':
+            from core.install.claude_monitor_hooks import main as claude_hooks_main
+            claude_hooks_main(rest)
+            return True
+        if role == 'codex-monitor-hooks':
+            from core.install.codex_monitor_hooks import main as codex_hooks_main
+            codex_hooks_main(rest)
+            return True
+        if role == 'service-config':
+            from core.install.service_config import main as service_config_main
+            raise SystemExit(service_config_main(rest))
+        if role == "bubble-smoke":
+            from scripts.dev.smoke_native_bubble import main as bubble_smoke
+            sys.argv = [sys.argv[0], *argv[2:]]
+            raise SystemExit(bubble_smoke())
+        if role == "runtime-contract":
+            from core.install.runtime_contract import main as runtime_contract_main
+
+            raise SystemExit(runtime_contract_main(rest))
+        if role == "smoke-check":
+            from mcp.server.fastmcp import FastMCP
+
+            if not callable(FastMCP):
+                raise RuntimeError("mcp.server.fastmcp.FastMCP is not importable")
+            import mcp_server
+            import kg_watcher
+            import overlay.main
+
+            from core.graph.semantic import get_semantic_graph, run_sg_coro
+
+            graph = get_semantic_graph()
+            vector = run_sg_coro(
+                graph.compute_query_embedding("engram smoke check")
+            )
+            if len(vector) != 384:
+                raise RuntimeError(
+                    "embedding smoke check failed: "
+                    f"model={graph.embedding_model_name}, dimension={len(vector)}"
+                )
+            return True
+        if role == "embedding-check":
+            from core.graph.semantic import get_semantic_graph, run_sg_coro
+            graph = get_semantic_graph()
+            vector = run_sg_coro(
+                graph.compute_query_embedding("engram embedding check")
+            )
+            if len(vector) != 384:
+                raise RuntimeError(
+                    "bundled embedding model validation failed: "
+                    f"model={graph.embedding_model_name}, dimension={len(vector)}"
+                )
+            return True
+        raise SystemExit(f"[entry] unknown --role: {role!r}")
+    except SystemExit:
+        raise
+    except BaseException:
+        _write_frozen_failure(f"backend role {role}")
+        sys.exit(1)
+
+
+_log_path = _Path.home() / ".engram" / "overlay.log"
+_session_log_path = _Path.home() / ".engram" / "logs" / "overlay-unset.log"
+
+
+def _raw_log(msg: str) -> None:
+    """logging 모듈 없이 타임스탬프와 함께 overlay.log + 세션 로그에 한 줄 추가."""
+    try:
+        ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        line = f"{ts} {msg}\n"
+        with open(str(_log_path), "a", encoding="utf-8") as _f:
+            _f.write(line)
+        with open(str(_session_log_path), "a", encoding="utf-8") as _f:
+            _f.write(line)
+    except Exception:
+        pass
+
+
+def _get_stm_port() -> int:
+    from core.install.service_config import effective_service_config
+    return int(effective_service_config()['overlay']['stm_server_port'])
+
+
+def _shutdown_existing_overlay() -> bool:
+    from core.install.service_config import effective_service_config
+    from core.install.service_lifecycle import prepare_service_handover
+    from overlay.config import editable_project_root
+    project = editable_project_root() or _ROOT
+    prepare_service_handover(effective_service_config(), project, sys.executable)
+    return True
+
+
+def _cleanup_dev_restart_orphans() -> None:
+    if os.environ.get("ENGRAM_DEV_SOURCE_RESTART") != "1":
+        return
+    try:
+        from core.install.process_identity import cleanup_dev_restart_orphans
+
+        stopped = cleanup_dev_restart_orphans(_ROOT)
+        _raw_log(f"[entry] dev restart orphan cleanup stopped={stopped}")
+    except Exception as exc:
+        _raw_log(f"[entry] dev restart orphan cleanup failed: {exc}")
+
+
+def run() -> None:
+    """원래 engram_overlay_entry.py 의 모듈 레벨 본문. 순서 유지."""
+    global _log_path, _session_log_path
+
+    if _dispatch_backend_role():
+        sys.exit(0)
+
+    from overlay.main import main
+
+    # ── 가장 먼저: import 전에도 파일에 기록하는 원시 로거 ───────────────────
+    _log_path = _Path.home() / ".engram" / "overlay.log"
+    _log_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # 세션 로그 파일: ~/.engram/logs/overlay-YYYYMMDD-HHMMSS.log
+    _session_ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    _session_log_dir = _Path.home() / ".engram" / "logs"
+    _session_log_dir.mkdir(parents=True, exist_ok=True)
+    _session_log_path = _session_log_dir / f"overlay-{_session_ts}.log"
+
+    _raw_log(f"[entry] 시작 — frozen={getattr(sys, 'frozen', False)}" f", cwd={os.getcwd()}" f", exe={sys.executable}")
+
+    # KuzuDB 소유권: overlay 프로세스는 KuzuDB를 열지 않음 (MCP 서버 독점).
+    # 반드시 다른 import보다 먼저 설정해야 함.
+    os.environ["ENGRAM_RUNTIME_ROLE"] = "overlay"
+
+    try:
+        # 패키지 루트를 sys.path에 추가 (pyinstaller 환경 대응)
+        sys.path.insert(0, str(_ROOT))
+        logging.basicConfig(
+            level=logging.INFO,
+            format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+            handlers=[
+                logging.FileHandler(str(_log_path), encoding="utf-8"),
+                logging.FileHandler(str(_session_log_path), encoding="utf-8"),
+            ],
+        )
+        _raw_log("[entry] logging 설정 완료")
+        _raw_log(f"[entry] Engram Overlay version={resolve_version().version}")
+
+        _raw_log("[entry] 기존 overlay 종료 처리 시작")
+        old_overlay_stopped = _shutdown_existing_overlay()
+        if not old_overlay_stopped:
+            raise RuntimeError('Previous overlay exit was not verified; startup aborted')
+        # Handover owns only the snapshotted prior family. Never sweep all default
+        # installed children or all same-checkout workers after an isolated launch.
+        _raw_log("[entry] overlay.main 임포트 완료, main() 호출")
+        main()
+
+    except Exception as _e:
+
+        _tb = traceback.format_exc()
+        _raw_log(f"[entry] 치명적 오류: {_e}\n{_tb}")
+
+        # --noconsole 환경에서도 오류를 알 수 있도록 메세지박스 표시
+        try:
+            ctypes.windll.user32.MessageBoxW(
+                0,
+                f"engram-overlay 시작 실패:\n\n{_e}\n\n로그: {_log_path}",
+                "engram-overlay 오류",
+                0x10,  # MB_ICONERROR
+            )
+        except Exception:
+            pass
+        sys.exit(1)

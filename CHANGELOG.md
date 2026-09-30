@@ -4,6 +4,51 @@ All notable changes to this project are documented in this file.
 
 ## Unreleased
 
+## [1.5.23] — 2026-10-01
+
+### Added
+
+- **MCP recovery bridge**: Claude and Codex now attach to Engram through a
+  persistent stdio bridge. When the overlay restarts or is replaced, the
+  bridge watches the readiness stream and reattaches to the new backend, so a
+  session no longer needs a `/mcp` reconnect. Only initialization is
+  replayed; application requests are never resent, and a write lost in
+  flight returns `outcome_unknown`.
+- The collapsed launcher shows the **AMBER icon** instead of the purple chat
+  pebble. The exe and installer icons now use the AMBER icon too.
+- **Code-only fast build**: `installer\build-exe.ps1` builds only the exe,
+  without install steps 1-8. When dependencies, the spec, and the entry stub
+  are unchanged, it skips PyInstaller, replaces only the changed app `.pyc`
+  files, restamps the PE version, and runs only the smoke roles the change
+  reaches. `overlay_manifest --plan` decides against the artifact manifest
+  (schema 2) and prints why. Releases (`build-installer.ps1 -Release`) always
+  use a full build and the full smoke set.
+
+### Changed
+
+- A full build drops from 46 to about 18 minutes. The running overlay stays
+  up during PyInstaller and smoke and is stopped only for the publish swap
+  (about a second). Old artifacts are deleted in the background, smoke uses a
+  hash-validated persistent model cache, and torch/IPython subpackages that
+  are never loaded are excluded from the bundle.
+- `engram_overlay_entry.py` is now a stub; the logic lives in
+  `core/entrypoint.py`. The frozen runtime contract reports the app payload
+  digest, module origins, and build kind, and the build fails if they
+  disagree with the manifest.
+
+### Fixed
+
+- MCP calls with Korean text (`engram_save_memory`, `kg_patch_section`, ...)
+  failed with `backend transport lost` because the bridge read Windows stdin
+  as cp949. It now reads UTF-8 bytes and rejects an undecodable line with
+  `-32700` instead of dropping the connection.
+- Codex gets its own SessionStart directive; it used to receive Claude's
+  (ToolSearch-first) directive and skip the bootstrap.
+- Retired the unsupported Claude SessionEnd MCP hook. Closed-session
+  context-once rebinding no longer leaks into another conversation.
+- Safe worktrees are classified correctly and Codex execution directories
+  are honored.
+
 ## [1.5.22] — 2026-09-23
 
 The first persona patch.

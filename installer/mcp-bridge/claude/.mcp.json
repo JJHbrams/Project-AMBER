@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "engram": {
+      "command": "__ENGRAM_BRIDGE_EXECUTABLE__",
+      "args": [
+        "--upstream-url",
+        "http://127.0.0.1:17385/mcp",
+        "--state-url",
+        "http://127.0.0.1:17384/state/mcp/events",
+        "--discovery-file",
+        "${USERPROFILE}/.engram/overlay-state-api-v1.json"
+      ]
+    }
+  }
+}

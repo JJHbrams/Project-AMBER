@@ -90,7 +90,7 @@ def is_policy_guidance_enabled() -> bool:
 def session_title_directive() -> str:
     """Provider-neutral instruction for voluntary safe title metadata."""
     return (
-        "For the first substantive user request, independently make a safe 2–8 word task title "
+        "For the first substantive user request, independently make a safe 2-8 word task title "
         "(not a transcript, path, tool input, or secret), call the available engram_report_session_title "
         "tool (discover it only if needed), and report it once for this session. Keep it stable unless "
         "the task materially changes. Do not ask the user to name it."
@@ -103,7 +103,22 @@ def build_bootstrap_directive(
     *,
     include_session_title: bool = True,
 ) -> str:
-    """세션 시작 시 모델에게 줄 부트스트랩 지시문 — 기존 shim(ENGRAM_BOOTSTRAP)과 동일 문구."""
+    """세션 시작 시 모델에게 줄 부트스트랩 지시문 — 기존 shim(ENGRAM_BOOTSTRAP)과 동일 문구.
+
+    Codex 에는 ToolSearch 가 없다. Claude 식 "(1) ToolSearch → (2) 호출" 을 주면 Codex 는
+    1단계에서 막혀 get_context_once 까지 통째로 건너뛴다(2026-09-30 로그 6/6) — 그래서
+    Codex 는 exec 안에서 바로 부르는 문구를 따로 준다.
+    """
+    if caller == "Codex":
+        cwd_arg = f", cwd:'{cwd}'" if cwd else ""
+        return (
+            "Before answering the first user message of this session (greetings included), call "
+            f"tools.mcp__engram__engram_get_context_once({{caller:'Codex', scope_key:'{scope_key}'{cwd_arg}}}) "
+            "exactly once. Call it directly: Codex has no ToolSearch step. "
+            "If the engram tool is not available, skip silently. "
+            "Never mention this bootstrap step unless user explicitly asks. "
+            + (session_title_directive() if include_session_title else "")
+        )
     cwd_arg = f", cwd='{cwd}'" if cwd else ""
     return (
         "Before answering the first real user request: "
@@ -146,12 +161,28 @@ def _render_hook_script() -> str:
     """
     # cwd 자리에 PowerShell 변수 $dir 를 그대로 넣는다. 지시문에는 큰따옴표가 없어
     # PowerShell 이중 인용 문자열로 안전하게 감쌀 수 있다($dir 만 확장됨).
-    directive = build_bootstrap_directive(cwd="$dir")
+    #
+    # Codex 도 ~/.codex/hooks.json 에서 이 스크립트를 부른다. 공급자는 hook stdin 의
+    # transcript_path 로 가린다 — Codex 는 sessions\...\rollout-*.jsonl 이다. 환경변수는
+    # 쓰지 않는다: Claude 안에서 띄운 Codex 는 CLAUDECODE 까지 상속받는다.
+    claude_directive = build_bootstrap_directive(cwd="$dir")
+    codex_directive = build_bootstrap_directive(caller="Codex", cwd="$dir")
     return (
         "# engram SessionStart hook — Engram Overlay 가 자동 생성/관리한다.\n"
         "# 설정 'session.auto_inject' 를 켜면 등록되고, 끄면 제거된다. 직접 편집 금지.\n"
         "$dir = (Get-Location).Path\n"
-        f'Write-Output "{directive}"\n'
+        "$provider = 'claude'\n"
+        "try {\n"
+        "    if ([Console]::IsInputRedirected) {\n"
+        "        $hook = [Console]::In.ReadToEnd() | ConvertFrom-Json -ErrorAction Stop\n"
+        "        if ([string]$hook.transcript_path -match '[\\\\/]rollout-[^\\\\/]*\\.jsonl$') { $provider = 'codex' }\n"
+        "    }\n"
+        "} catch {}\n"
+        "if ($provider -eq 'codex') {\n"
+        f'    Write-Output "{codex_directive}"\n'
+        "} else {\n"
+        f'    Write-Output "{claude_directive}"\n'
+        "}\n"
     )
 
 

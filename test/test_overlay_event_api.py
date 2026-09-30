@@ -125,7 +125,19 @@ class OverlayEventApiTests(unittest.TestCase):
         self.assertEqual(overlay.on_expand.call_count, 2)
         overlay.on_activate.assert_not_called()
 
+    def test_launcher_uses_amber_identity_art_with_hard_alpha(self):
+        art = character_module.launcher_icon_images()
+        self.assertIsNotNone(art)
+        normal, hover = art
+        self.assertLessEqual(max(normal.size), 46)
+        self.assertEqual(normal.size, hover.size)
+        # Chroma-keyed window: only fully opaque or fully transparent pixels.
+        self.assertLessEqual(set(normal.getchannel("A").tobytes()), {0, 255})
+        self.assertEqual(normal.getchannel("A").tobytes(), hover.getchannel("A").tobytes())
+        self.assertIsNone(character_module.launcher_icon_images(Path("missing-launcher-art.png")))
+
     def test_launcher_canvas_uses_native_purple_chat_button_visual_tokens(self):
+        # Fallback visual when the identity art cannot be loaded.
         source = Path(__file__).resolve().parents[1].joinpath("overlay", "character.py").read_text(encoding="utf-8")
         launcher = source[source.index("    def show_launcher("):source.index("    def show_full(")]
         for token in ("#5b3db7", "launcher-shadow", "launcher-glyph", "create_polygon", "_set_launcher_hover"):

@@ -8,7 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from core.integrations.agent_policy_hook import process_provider_hook_input, provider_hook_main
-from core.integrations.policy_preflight import classify_agent_pretool_payload, process_policy_request
+from core.integrations.policy_preflight import HookPayloadError, classify_agent_pretool_payload, process_policy_request
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -32,6 +32,69 @@ class CodexPolicyHookTests(unittest.TestCase):
         self.assertEqual(request["action_metadata"]["category"], "codex-pretool")
         self.assertIn("codex-pretool", request["action_metadata"]["tags"])
         self.assertTrue(request["advisory_only"])
+
+    def test_codex_exec_command_workdir_overrides_session_cwd_for_git_scope(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp) / "base-dev"
+            feature = Path(tmp) / "feature"
+            nested = feature / "nested"
+            for directory in (base, feature, nested):
+                directory.mkdir(parents=True, exist_ok=True)
+            (base / ".git").mkdir()
+            (feature / ".git").mkdir()
+            payload = {
+                "toolCall": {
+                    "name": "exec_command",
+                    "args": {"cmd": "git -C nested add README.md", "workdir": str(feature)},
+                },
+            }
+            result = classify_agent_pretool_payload(payload, str(base), "codex")
+
+        self.assertTrue(result["classified"])
+        self.assertEqual(result["hook"]["git_worktree_root"], str(feature.resolve()))
+        self.assertEqual(result["hook"]["git_command_cwd"], str(nested.resolve()))
+        self.assertEqual(result["request"]["cwd"], str(nested.resolve()))
+
+    def test_command_tool_rejects_invalid_explicit_workdir(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            repo.mkdir()
+            (repo / ".git").mkdir()
+            for workdir in ("", 42, str(repo / "missing")):
+                with self.subTest(workdir=workdir):
+                    with self.assertRaises(HookPayloadError):
+                        classify_agent_pretool_payload(
+                            {"tool_name": "exec_command", "tool_input": {"cmd": "git add README.md", "workdir": workdir}},
+                            str(repo),
+                            "codex",
+                        )
+
+            default_result = classify_agent_pretool_payload(
+                {"tool_name": "exec_command", "tool_input": {"cmd": "git add README.md", "workdir": None}},
+                str(repo),
+                "codex",
+            )
+            absolute_result = classify_agent_pretool_payload(
+                {"tool_name": "exec_command", "tool_input": {"cmd": "git add README.md", "workdir": str(repo)}},
+                str(repo / "missing-session-cwd"),
+                "codex",
+            )
+        self.assertTrue(default_result["classified"])
+        self.assertTrue(absolute_result["classified"])
+
+    def test_bash_does_not_accept_codex_exec_command_workdir_override(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp) / "base"
+            feature = Path(tmp) / "feature"
+            for directory in (base, feature):
+                directory.mkdir()
+                (directory / ".git").mkdir()
+            result = classify_agent_pretool_payload(
+                {"tool_name": "Bash", "tool_input": {"command": "git add README.md", "workdir": str(feature)}},
+                str(base),
+                "codex",
+            )
+        self.assertEqual(result["hook"]["git_worktree_root"], str(base.resolve()))
 
     def test_apply_patch_extracts_supported_headers_and_excludes_outside_repo(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -181,6 +244,23 @@ class CodexPolicyHookTests(unittest.TestCase):
             self.assertNotIn("permissionDecision", hook_output)
             self.assertIn("additionalContext", hook_output)
 
+    def test_classification_error_is_nonblocking_guidance_in_enforce_agents_mode(self):
+        policy_result = {
+            "decision": "error", "policy_decision": "error", "would_block": False,
+            "reason": "git worktree command could not be classified safely",
+            "classified": True, "guidance_level": "enforce_agents",
+        }
+        with patch("core.integrations.agent_policy_hook.process_policy_request", return_value=(policy_result, 1, "")):
+            stdout, stderr, exit_code = process_provider_hook_input("{}", "codex")
+
+        hook_output = json.loads(stdout)["hookSpecificOutput"]
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(stderr, "")
+        self.assertIn("additionalContext", hook_output)
+        self.assertNotIn("permissionDecision", hook_output)
+        self.assertIn("could not be classified safely", hook_output["additionalContext"])
+        self.assertNotIn("allow", hook_output["additionalContext"].lower())
+
     def test_all_adapter_errors_remain_nonblocking(self):
         with patch(
             "core.integrations.agent_policy_hook.process_policy_request",
@@ -249,6 +329,30 @@ class CodexPolicyHookTests(unittest.TestCase):
 
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertEqual(json.loads(completed.stdout)["hookSpecificOutput"]["hookEventName"], "PreToolUse")
+
+    def test_source_provider_entrypoint_allows_bounded_isolated_worktree_creation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            target = Path(tmp) / "isolated-feature"
+            subprocess.run(["git", "init", str(repo)], check=True, capture_output=True, text=True)
+            subprocess.run(["git", "-C", str(repo), "checkout", "-b", "dev"], check=True, capture_output=True, text=True)
+            payload = json.dumps({
+                "cwd": str(repo),
+                "tool_name": "Bash",
+                "tool_input": {"command": f"git worktree add -b feat/example {target.as_posix()} HEAD"},
+            })
+            completed = subprocess.run(
+                [
+                    sys.executable, str(ROOT / "engram_overlay_entry.py"), "--role", "agent-policy-hook",
+                    "--provider", "codex", "--cwd", str(repo),
+                ],
+                input=payload, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                check=False, timeout=60,
+            )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(completed.stderr, "")
+        self.assertEqual(completed.stdout, "")
 
 
 if __name__ == "__main__":

@@ -92,6 +92,7 @@ Source: "..\config\clients\copilot.md"; DestDir: "{app}\config\clients"; Flags: 
 Source: "..\config\agents\*"; DestDir: "{app}\config\agents"; Flags: recursesubdirs createallsubdirs ignoreversion
 Source: "deploy_agent_definitions.ps1"; DestDir: "{app}\installer"; Flags: ignoreversion
 Source: "templates\*"; DestDir: "{app}\installer\templates"; Flags: recursesubdirs createallsubdirs ignoreversion
+Source: "mcp-bridge\*"; DestDir: "{app}\installer\mcp-bridge"; Flags: recursesubdirs createallsubdirs ignoreversion
 Source: "..\.github\skills\*"; DestDir: "{app}\.github\skills"; Flags: recursesubdirs createallsubdirs ignoreversion
 ; 설치타임 구성기
 Source: "configure.ps1"; DestDir: "{app}\installer"; Flags: ignoreversion

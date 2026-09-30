@@ -543,6 +543,7 @@ class OverlayApp:
             self._overlay_events.stop()
             self.root.destroy()
             raise RuntimeError('STM listener ownership failed; startup aborted instead of disabling monitoring')
+        self._stm_server.publish_mcp_ready(False)
         self._init_session_stack()
         try:
             self._mcp_http_proc = self._start_mcp_http_server()
@@ -686,6 +687,7 @@ class OverlayApp:
             self._last_mcp_recovery_at = now
             port = int(settings["port"])
             log.warning("[mcp_http] 헬스체크 복구 시작: reason=%s port=%d", reason, port)
+            self._stm_server.publish_mcp_ready(False, replaced=True)
 
             self._terminate_managed_process("_mcp_http_proc", "mcp_http", "MCP HTTP 서버")
             self._mcp_http_proc = self._start_mcp_http_server()
@@ -1086,6 +1088,7 @@ class OverlayApp:
         while time.monotonic() < deadline:
             if self._is_mcp_listener_ready(port, timeout=1.0) and self._is_mcp_http_healthy(port, timeout=1.5):
                 log.info("[mcp_http] MCP server ready (port=%d)", port)
+                self._stm_server.publish_mcp_ready(True, f"http://127.0.0.1:{port}/mcp")
                 return True
             time.sleep(0.5)
         log.warning("[mcp_http] MCP server not ready after %.1fs", timeout)

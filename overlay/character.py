@@ -11,7 +11,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable
 
-from PIL import Image, ImageTk
+from PIL import Image, ImageEnhance, ImageTk
 import yaml
 
 from overlay.bubble import geometry as bubble_geometry
@@ -31,7 +31,7 @@ from overlay.character_assets import (
 )
 from overlay.reaction_badge import crop_sprite, is_memory_tool_name, key_chroma, public_event
 from overlay.config import (
-    _USER_CONFIG_PATH, resolve_editable_overlay_path, load_cfg,
+    _USER_CONFIG_PATH, resolve_editable_overlay_path, resolve_path, load_cfg,
     get_overlay_state, set_flip_horizontal, update_overlay_state,
     update_overlay_state_async,
 )
@@ -41,6 +41,26 @@ USER_OVERLAY_RESOURCE = USER_CONFIG_DIR / "overlay.png"
 USER_CHARACTER_DIR = USER_CONFIG_DIR / "character"
 RESOURCE_OVERLAY = resolve_editable_overlay_path("resource/overlay.png")
 _CHROMA = "#010101"
+LAUNCHER_ICON = resolve_path("resource/icon.png")
+_LAUNCHER_ICON_MAX = 46
+
+
+def launcher_icon_images(path: Path = LAUNCHER_ICON) -> tuple[Image.Image, Image.Image] | None:
+    """Return (normal, hover) RGBA art for the collapsed launcher, or None.
+
+    The window is chroma-keyed on one exact colour, so any partially
+    transparent edge pixel would blend into a dark fringe; alpha is hardened.
+    """
+    try:
+        with Image.open(path) as raw:
+            art = raw.convert("RGBA")
+    except (OSError, ValueError):
+        return None
+    art.thumbnail((_LAUNCHER_ICON_MAX, _LAUNCHER_ICON_MAX), Image.Resampling.LANCZOS)
+    art.putalpha(art.getchannel("A").point(lambda a: 255 if a >= 128 else 0))
+    hover = ImageEnhance.Brightness(art).enhance(1.18)
+    hover.putalpha(art.getchannel("A"))
+    return art, hover
 
 
 def launcher_tooltip_position(lx: int, ly: int, width: int, height: int, work: tuple[int, int, int, int]) -> tuple[int, int]:
@@ -1160,14 +1180,23 @@ class CharacterOverlay:
             return
         self._full_rect = self.get_phys_rect()
         canvas = tk.Canvas(self.root, width=52, height=52, bg=_CHROMA, highlightthickness=0, bd=0)
-        # Keep this entirely canvas-native: it stays sharp on high-DPI screens
-        # and does not add a separate launcher bitmap to package or reload.
-        canvas.create_oval(5, 7, 49, 51, fill="#241642", outline="", tags="launcher-shadow")
-        ring = canvas.create_oval(3, 3, 49, 49, fill="#5b3db7", outline="#ffffff", width=2, tags="launcher-face")
-        canvas.create_oval(14, 16, 39, 34, fill="#ffffff", outline="", tags="launcher-glyph")
-        canvas.create_polygon(19, 31, 18, 38, 25, 33, fill="#ffffff", outline="", tags="launcher-glyph")
-        for dot_x in (21, 26, 31):
-            canvas.create_oval(dot_x, 23, dot_x + 3, 26, fill="#5b3db7", outline="", tags="launcher-glyph")
+        # The AMBER identity mark (already bundled for the tray) is the launcher.
+        # The canvas-drawn pebble stays as the fallback when the art is missing.
+        art = launcher_icon_images()
+        if art is not None:
+            canvas._launcher_photos = tuple(ImageTk.PhotoImage(image) for image in art)
+            canvas.create_image(26, 26, image=canvas._launcher_photos[0], tags="launcher-face")
+            ring = canvas.create_oval(1, 1, 51, 51, outline="", width=3, tags="launcher-focus")
+            idle_outline = ""
+        else:
+            canvas._launcher_photos = None
+            canvas.create_oval(5, 7, 49, 51, fill="#241642", outline="", tags="launcher-shadow")
+            ring = canvas.create_oval(3, 3, 49, 49, fill="#5b3db7", outline="#ffffff", width=2, tags="launcher-face")
+            canvas.create_oval(14, 16, 39, 34, fill="#ffffff", outline="", tags="launcher-glyph")
+            canvas.create_polygon(19, 31, 18, 38, 25, 33, fill="#ffffff", outline="", tags="launcher-glyph")
+            for dot_x in (21, 26, 31):
+                canvas.create_oval(dot_x, 23, dot_x + 3, 26, fill="#5b3db7", outline="", tags="launcher-glyph")
+            idle_outline = "#ffffff"
         canvas.configure(takefocus=True)
         canvas.bind("<ButtonPress-1>", self._on_launcher_press)
         canvas.bind("<B1-Motion>", self._on_launcher_drag)
@@ -1176,7 +1205,7 @@ class CharacterOverlay:
         canvas.bind("<Return>", self._activate_launcher)
         canvas.bind("<space>", self._activate_launcher)
         canvas.bind("<FocusIn>", lambda _event: canvas.itemconfigure(ring, outline="#ffff00", width=4))
-        canvas.bind("<FocusOut>", lambda _event: canvas.itemconfigure(ring, outline="#ffffff", width=3))
+        canvas.bind("<FocusOut>", lambda _event: canvas.itemconfigure(ring, outline=idle_outline, width=3))
         canvas.bind("<Enter>", lambda _event: (canvas.configure(cursor="hand2"), self._set_launcher_hover(True), self._show_launcher_tooltip()))
         canvas.bind("<Leave>", lambda _event: (canvas.configure(cursor=""), self._set_launcher_hover(False), self._hide_launcher_tooltip()))
         self._label.pack_forget()
@@ -1285,7 +1314,11 @@ class CharacterOverlay:
         canvas = self._launcher_canvas
         if canvas is None:
             return
-        canvas.itemconfigure("launcher-face", fill="#7659cf" if hovered else "#5b3db7")
+        photos = getattr(canvas, "_launcher_photos", None)
+        if photos:
+            canvas.itemconfigure("launcher-face", image=photos[1 if hovered else 0])
+        else:
+            canvas.itemconfigure("launcher-face", fill="#7659cf" if hovered else "#5b3db7")
         # A one-pixel lift reads as a button response without changing the
         # host window rectangle used by drag/persistence.
         offset = -1 if hovered else 1

@@ -170,7 +170,20 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=['installer\\pyi_rth_engram_tk.py'],
-    excludes=[],
+    # Modules proven unloaded by every role: scripts/dev/trace_runtime_modules.py
+    # (source-mode sys.modules union of runtime-contract, smoke-check, embedding-check,
+    # dashboard AppTest, mcp_server, kg_watcher, overlay.main, mcp_recovery_bridge, ...).
+    # Never add a package the trace loads; never exclude bare torch/transformers.
+    excludes=[
+        'torch.testing._internal.opinfo', 'torch.testing._internal.generated',
+        'torch.testing._internal.distributed.rpc',
+        'torch.distributed.checkpoint', 'torch.distributed.elastic',
+        'torch.distributed.pipelining', 'torch.distributed._tools', 'torch.distributed.optim',
+        'torch.ao.ns', 'torch.ao.pruning',
+        'torch.utils.benchmark', 'torch.utils.hipify',
+        'torch._inductor.codegen', 'torch._inductor.fx_passes', 'torch._inductor.kernel',
+        'IPython', 'jedi', 'parso', 'prompt_toolkit', 'traitlets', 'matplotlib_inline',
+    ],
     # one-dir 배포에서 지연 import 모듈을 PYZ(zlib)에서 읽다 실패하는 환경을 피한다.
     noarchive=True,
     optimize=0,
@@ -219,9 +232,38 @@ dashboard_exe = EXE(
     version=_windows_version,
 )
 
+# Console-only standalone bridge, also collected by engram-overlay.spec.
+from PyInstaller.utils.hooks import copy_metadata
+bridge_a = Analysis(
+    ['scripts/engram_mcp_bridge.py'], pathex=['.'],
+    binaries=[], datas=copy_metadata('mcp'),
+    hiddenimports=['anyio._backends._asyncio', 'core.install.mcp_bridge_config'],
+    hookspath=[], runtime_hooks=[],
+    excludes=['tkinter', 'torch', 'transformers', 'numpy', 'pandas', 'streamlit'],
+    noarchive=False,
+)
+
+# App-owned module/data TOC for the code-only fast path (core/install/app_payload.py).
+# Loaded by file path so the spec does not depend on sys.path or import the app.
+import importlib.util
+_payload_spec = importlib.util.spec_from_file_location(
+    '_engram_app_payload', str(Path('core') / 'install' / 'app_payload.py')
+)
+_payload = importlib.util.module_from_spec(_payload_spec)
+sys.modules[_payload_spec.name] = _payload
+_payload_spec.loader.exec_module(_payload)
+_payload.dump_toc(Path.cwd(), a, bridge_a, Path('build') / _payload.TOC_NAME)
+
+bridge_exe = EXE(
+    PYZ(bridge_a.pure), bridge_a.scripts, bridge_a.binaries, bridge_a.datas,
+    name='engram-mcp-bridge', console=True, debug=False, upx=False, strip=False,
+    icon=['resource\\icon.ico'],
+)
+
 coll = COLLECT(
     exe,
     dashboard_exe,
+    bridge_exe,
     a.binaries,
     a.datas,
     strip=False,

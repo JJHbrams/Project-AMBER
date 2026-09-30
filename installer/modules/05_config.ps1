@@ -1,4 +1,4 @@
-﻿#
+#
 # 05_config.ps1 — Runtime config, User config, MCP config (모든 클라이언트)
 #   Copilot CLI / Claude Code / Antigravity / VSCode workspace / VSCode global / project .mcp.json
 #
@@ -105,41 +105,7 @@ if (Test-Path $McpConfigPath) {
 [System.IO.File]::WriteAllText($McpConfigPath, $mcpJson, [System.Text.UTF8Encoding]::new($false))
 Write-Ok $McpConfigPath
 
-# 5b. MCP config (Claude Code)
-# ~/.claude.json 은 Claude Code 내부 상태 파일(대화 기록 등 포함)이므로
-# 파싱 실패 시 Python hardening 단계(아래)에서 안전하게 처리하도록 폴백한다.
-Write-Step "MCP config (Claude Code)..."
-$httpEntry = [PSCustomObject]@{ type = "http"; url = "http://127.0.0.1:$MCP_HTTP_PORT/mcp" }
-if (Test-Path $ClaudeConfigPath) {
-    try {
-        $claudeConfig = Get-Content $ClaudeConfigPath -Raw | ConvertFrom-Json
-        if (-not $claudeConfig.mcpServers) {
-            $claudeConfig | Add-Member -NotePropertyName mcpServers -NotePropertyValue ([PSCustomObject]@{}) -Force
-        }
-        # 구 이름(stdio) 정리
-        foreach ($serverProp in @($claudeConfig.mcpServers.PSObject.Properties)) {
-            $serverArgs = @($serverProp.Value.args)
-            if ($serverProp.Name -ne "engram" -and $serverArgs -contains $McpServerScript) {
-                $claudeConfig.mcpServers.PSObject.Properties.Remove($serverProp.Name)
-            }
-        }
-        $claudeConfig.mcpServers | Add-Member -NotePropertyName engram -NotePropertyValue $httpEntry -Force
-        $claudeJson = $claudeConfig | ConvertTo-Json -Depth 10
-        [System.IO.File]::WriteAllText($ClaudeConfigPath, $claudeJson, [System.Text.UTF8Encoding]::new($false))
-        Write-Ok $ClaudeConfigPath
-    } catch {
-        Write-Warn "Claude Code 설정 파일 파싱 실패 (Claude Code 실행 중 race condition 가능) — Python hardening 단계에서 처리됩니다."
-    }
-} else {
-    $claudeJson = @{ mcpServers = @{ engram = $httpEntry } } | ConvertTo-Json -Depth 5
-    [System.IO.File]::WriteAllText($ClaudeConfigPath, $claudeJson, [System.Text.UTF8Encoding]::new($false))
-    Write-Ok $ClaudeConfigPath
-}
-
-$claudeMcpJson = @{ mcpServers = @{ engram = @{ type = "http"; url = "http://127.0.0.1:$MCP_HTTP_PORT/mcp" } } } | ConvertTo-Json -Depth 5
-[System.IO.File]::WriteAllText($ClaudeMcpConfigPath, $claudeMcpJson, [System.Text.UTF8Encoding]::new($false))
-Write-Ok $ClaudeMcpConfigPath
-
+# Claude transport is registered below by the preserving bridge adapter.
 Write-Step "Claude session lifecycle hooks (compatible CLI only)"
 & $PythonExe (Join-Path $ProjectRoot 'engram_overlay_entry.py') --role claude-monitor-hooks --provision --apply
 if ($LASTEXITCODE -ne 0) { throw 'Claude lifecycle hook provisioning failed; inspect settings JSON before retrying.' }
@@ -152,69 +118,6 @@ if (-not (Test-Path $CodexConfigPath)) { [System.IO.File]::WriteAllText($CodexCo
 Write-Step "Codex session lifecycle hooks (/hooks review required; trust is never automatic)"
 & $PythonExe (Join-Path $ProjectRoot 'engram_overlay_entry.py') --role codex-monitor-hooks --provision --apply
 if ($LASTEXITCODE -ne 0) { throw 'Codex lifecycle hook provisioning failed; inspect settings JSON before retrying.' }
-
-$claudeProjectHardeningScript = @"
-import json
-from pathlib import Path
-
-config_path = Path(r'$($ClaudeConfigPath -replace '\\', '/')')
-work_dir = r'$WorkDir'
-mcp_url = 'http://127.0.0.1:$MCP_HTTP_PORT/mcp'
-
-data = {}
-if config_path.exists():
-    try:
-        loaded = json.loads(config_path.read_text(encoding='utf-8'))
-        if isinstance(loaded, dict):
-            data = loaded
-    except Exception:
-        data = {}
-
-mcp_servers = data.get('mcpServers')
-if not isinstance(mcp_servers, dict):
-    mcp_servers = {}
-mcp_servers['engram'] = {'type': 'http', 'url': mcp_url}
-data['mcpServers'] = mcp_servers
-
-projects = data.get('projects')
-if not isinstance(projects, dict):
-    projects = {}
-project_cfg = projects.get(work_dir)
-if not isinstance(project_cfg, dict):
-    project_cfg = {}
-
-enabled = project_cfg.get('enabledMcpjsonServers')
-if not isinstance(enabled, list):
-    enabled = []
-enabled = [name for name in enabled if isinstance(name, str)]
-if 'engram' not in enabled:
-    enabled.append('engram')
-project_cfg['enabledMcpjsonServers'] = enabled
-
-disabled = project_cfg.get('disabledMcpjsonServers')
-if not isinstance(disabled, list):
-    disabled = []
-disabled = [name for name in disabled if isinstance(name, str) and name != 'engram']
-project_cfg['disabledMcpjsonServers'] = disabled
-
-project_mcp = project_cfg.get('mcpServers')
-if not isinstance(project_mcp, dict):
-    project_mcp = {}
-project_mcp['engram'] = {'type': 'http', 'url': mcp_url}
-project_cfg['mcpServers'] = project_mcp
-
-projects[work_dir] = project_cfg
-data['projects'] = projects
-
-config_path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding='utf-8')
-print('ok')
-"@
-$claudeHardeningResult = Invoke-PythonScriptText -PythonPath $PythonExe -ScriptText $claudeProjectHardeningScript
-if ($claudeHardeningResult -like "*ok*") {
-    Write-Ok "Claude project MCP hardening applied"
-} else {
-    Write-Warn "Claude project MCP hardening failed: $claudeHardeningResult"
-}
 
 # 5bb. MCP config (Antigravity / AGY) — overlay 수명 공유 HTTP
 Write-Step "MCP config (Antigravity)..."
@@ -230,24 +133,15 @@ if ($AntigravityCmdDetected) {
     Write-Warn "Antigravity (agy) not found — skipping MCP setup"
 }
 
-# 5bc. MCP config (Codex CLI) — 기존 사용자 정의 engram 항목은 보존
-Write-Step "MCP config (Codex CLI)..."
-if ($CodexCmdDetected) {
-    & codex mcp get engram *> $null
-    if ($LASTEXITCODE -eq 0) {
-        Write-Ok "Codex MCP server 'engram' already configured (preserved)"
-    } else {
-        $codexMcpOut = & codex mcp add engram --url "http://127.0.0.1:$MCP_HTTP_PORT/mcp" 2>&1
-        if ($LASTEXITCODE -eq 0) {
-            Write-Ok "Codex user MCP server registered: engram (HTTP)"
-        } else {
-            Write-Warn "Codex MCP 등록 실패: $codexMcpOut"
-            Write-Warn "수동 등록: codex mcp add engram --url `"http://127.0.0.1:$MCP_HTTP_PORT/mcp`""
-        }
-    }
-} else {
-    Write-Warn "Codex CLI not found — skipping Codex MCP setup"
-}
+# Register only the owned Engram transport. Native hook definitions/trust stay separate.
+Write-Step "MCP recovery bridge (Claude and Codex)"
+$BridgeLauncher = Join-Path $ProjectRoot 'scripts/engram_mcp_bridge.py'
+$BridgeDiscovery = Join-Path $env:USERPROFILE '.engram/overlay-state-api-v1.json'
+& $PythonExe $BridgeLauncher --install --auto-home --command $PythonExe `
+    "--arg=-u" "--arg=$BridgeLauncher" "--arg=--upstream-url" "--arg=http://127.0.0.1:$MCP_HTTP_PORT/mcp" `
+    "--arg=--state-url" "--arg=http://127.0.0.1:17384/state/mcp/events" `
+    "--arg=--discovery-file" "--arg=$BridgeDiscovery"
+if ($LASTEXITCODE -ne 0) { throw 'MCP bridge registration failed; original configuration was retained for the failing file.' }
 
 # 5c. MCP config (VSCode Copilot Chat — workspace)
 Write-Step "MCP config (VSCode Copilot Chat)..."
@@ -287,16 +181,11 @@ if (Test-Path $VscodeGlobalMcpPath) {
 [System.IO.File]::WriteAllText($VscodeGlobalMcpPath, $globalMcpJson, [System.Text.UTF8Encoding]::new($false))
 Write-Ok $VscodeGlobalMcpPath
 
-# 5e. MCP config (project-local .mcp.json for Claude Code and compatible clients)
-Write-Step "MCP config (project .mcp.json)..."
-$ProjectMcpPath = Join-Path $ProjectRoot ".mcp.json"
-$projectMcpJson = @{
-    mcpServers = @{
-        engram = @{
-            type = "http"
-            url  = "http://127.0.0.1:$MCP_HTTP_PORT/mcp"
-        }
-    }
-} | ConvertTo-Json -Depth 5
-[System.IO.File]::WriteAllText($ProjectMcpPath, $projectMcpJson, [System.Text.UTF8Encoding]::new($false))
-Write-Ok $ProjectMcpPath
+# Project Claude config can shadow the global entry; merge only Engram.
+Write-Step "MCP recovery bridge (project Claude config)"
+$ProjectMcpPath = Join-Path $ProjectRoot '.mcp.json'
+& $PythonExe $BridgeLauncher --install --claude-config $ProjectMcpPath --command $PythonExe `
+    "--arg=-u" "--arg=$BridgeLauncher" "--arg=--upstream-url" "--arg=http://127.0.0.1:$MCP_HTTP_PORT/mcp" `
+    "--arg=--state-url" "--arg=http://127.0.0.1:17384/state/mcp/events" `
+    "--arg=--discovery-file" "--arg=$BridgeDiscovery"
+if ($LASTEXITCODE -ne 0) { throw 'Project MCP bridge registration failed.' }

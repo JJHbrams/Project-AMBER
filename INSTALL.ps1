@@ -10,6 +10,7 @@
     Preserve startup (default): -AutoStart preserve; owned entries off: -AutoStart off
     Skip immediate renderer launch: -ExternalOverlay skip; skip both launches: -NoStart
     Install (overlay build mode): .\INSTALL.ps1 -OverlayBuildMode auto|rebuild|clean|skip
+    Fast exe-only build (no install steps): .\installer\build-exe.ps1 [-FullBuild] [-FullSmoke] [-Start]
     Remove:  .\INSTALL.ps1 -Uninstall
 
     Delegates to: installer\install.ps1

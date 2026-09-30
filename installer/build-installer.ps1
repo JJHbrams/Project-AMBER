@@ -146,7 +146,13 @@ if ($SkipBuild) {
     # describes current sources.
     $overlayMode = if ($FreshBuild) { "clean" } else { "auto" }
     Write-Step "Preparing frozen bundle ($overlayMode)"
-    & $Engine -Mode $overlayMode -CondaEnv $CondaEnv -Deploy $DistDir -NoStart
+    if ($Release) {
+        # A release ships a real PyInstaller build (never a fast-patched artifact)
+        # and must prove every smoke role on it.
+        & $Engine -Mode $overlayMode -CondaEnv $CondaEnv -Deploy $DistDir -NoStart -FullBuild -FullSmoke
+    } else {
+        & $Engine -Mode $overlayMode -CondaEnv $CondaEnv -Deploy $DistDir -NoStart
+    }
     if ($LASTEXITCODE -ne 0) {
         Write-Err "Shared overlay build failed"
     }
@@ -210,9 +216,22 @@ $frozenBuiltNow = (-not $SkipBuild) -and ($manifestWriteAfter -gt $manifestWrite
 if ($installerCacheHit) {
     Write-Ok "Reusing validated installer: $OutputPath"
 } else {
-    # A fresh frozen build already passed the same roles inside build-overlay.
-    if ($frozenBuiltNow) {
-        Write-Ok "Release smoke already passed during fresh frozen build"
+    # The engine records per-role results in build-manifest.json.  Skip the
+    # role block only when a build ran now and every role passed (a release
+    # build runs the engine with -FullSmoke).  Fast-patch smoke is selective,
+    # so it never satisfies this on its own.
+    $manifestSmoke = $null
+    try { $manifestSmoke = (Get-Content -LiteralPath $BuildManifestPath -Raw | ConvertFrom-Json).smoke } catch {}
+    $fullSmokePassed = $false
+    if ($manifestSmoke) {
+        $fullSmokePassed = $true
+        foreach ($smokeRole in @("runtime-contract", "embedding", "smoke", "dashboard")) {
+            $status = [string]$manifestSmoke.PSObject.Properties[$smokeRole].Value
+            if ($status -ne "pass" -and $status -ne "skipped:covered-by-smoke") { $fullSmokePassed = $false }
+        }
+    }
+    if ($frozenBuiltNow -and $fullSmokePassed) {
+        Write-Ok "Release smoke already passed during fresh frozen build (manifest smoke: all roles pass)"
     } else {
         Write-Step "Release role smoke tests"
         $embeddingExit = Invoke-FrozenRole "embedding-check"

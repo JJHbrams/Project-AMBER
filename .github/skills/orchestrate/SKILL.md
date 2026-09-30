@@ -1,11 +1,13 @@
 ---
 name: orchestrate
 description: >
-  Run Engram's Orchestrator-Planner-Coder-Servant workflow for multi-step development,
-  refactors, or research-plus-implementation tasks that need an acceptance contract and
-  independent verification. Trigger for "orchestrate", delegation requests, planning then
-  implementation, or complex multi-step development. Do not use for trivial one-file edits
-  or read-only answers.
+  session-orchestrate가 선택하는 대화형 위임 실행 스킬.
+  범위가 명확하고 현재 세션에서 끝낼 작업을 planner·coder·servant로 분담하고,
+  구현과 독립 검토를 수행해 완료 기준별 결과와 증거를 상위 흐름에 반환한다.
+  일반 개발 요청에서 이 스킬을 독립 진입점으로 선택하지 않는다.
+  session-orchestrate가 실행 방식으로 지정했거나 사용자가 orchestrate를
+  명시한 경우 사용한다. 명시 호출에서도 SAO 라우팅을 먼저 적용하며,
+  무인 반복·지속 상태·세션 재개 관리는 session-orchestrate에 맡긴다.
 ---
 
 # Orchestrate
@@ -16,8 +18,17 @@ change this behavioral flow.
 
 ## Phase 0 — Triage and contract
 
-Classify the request. Handle a simple isolated edit or read-only answer directly. For a
-multi-step task, capture the original request as an acceptance contract before implementation.
+First apply the routing section of `session-orchestrate`, including when the user explicitly
+names orchestrate. If that skill has already selected this conversational delegation path,
+continue here without routing back. Handle its L0 route directly; for unattended execution,
+repeat-until-pass, machine evidence audit, quantitative experiments, or cross-session resume,
+return to its runtime procedure instead of starting this workflow. If session-orchestrate is
+unavailable, report the missing routing dependency; do not silently substitute this workflow.
+
+This is a root-session skill procedure, not a nested SAO worker. This conversational path
+returns criterion-level evidence and a root-reviewed result; it does not create a persisted
+SAO task or claim a machine-audited SAO PASS.
+For a multi-step task, capture the original request as an acceptance contract before implementation.
 Ask the user only about a material ambiguity that cannot be safely discovered.
 
 Each `[PLAN]` criterion must contain:

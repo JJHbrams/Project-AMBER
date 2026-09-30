@@ -31,11 +31,12 @@ for payload in ({'cwd':{'raw':'PRIVATE_CANARY'}}, {'session_id':'PRIVATE_CANARY'
     except ValueError as error:
         assert 'PRIVATE_CANARY' not in str(error)
 context = SimpleNamespace()
-server._CONTEXT_ONCE_KEYS['fixture'] = (123, time.time())
+# A same-conversation recall: the cache hit must still refresh display metadata.
+server._CONTEXT_ONCE_KEYS['fixture|conn:same'] = (123, time.time())
 fn = server.engram_get_context_once
 while hasattr(fn, '__wrapped__'):
     fn = fn.__wrapped__
-with patch.object(server, 'ensure_repo_policy', return_value={'ok':True}), patch.object(server, '_context_session_fingerprint', return_value='unchanged-stm'), patch.object(server, '_build_context_once_key', return_value='fixture'), patch.object(server, '_session_is_open', return_value=True), patch.object(server, '_mark_trusted_root_bootstrap'), patch.object(server._mcp_presence, 'report_project', return_value={'accepted':True}) as report:
+with patch.object(server, 'ensure_repo_policy', return_value={'ok':True}), patch.object(server, '_context_session_fingerprint', return_value='unchanged-stm'), patch.object(server, '_build_context_once_key', return_value='fixture'), patch.object(server, '_context_once_connection_key', return_value='conn:same'), patch.object(server, '_session_is_open', return_value=True), patch.object(server, '_mark_trusted_root_bootstrap'), patch.object(server._mcp_presence, 'report_project', return_value={'accepted':True}) as report:
     result = asyncio.run(fn(caller='test', project_key='CallerKey', cwd='C:/private/Folder', ctx=context))
     assert 'already initialized' in result
     report.assert_called_once_with(context, 'CallerKey', 'C:/private/Folder', source=1)

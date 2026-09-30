@@ -45,6 +45,8 @@ _TOOL_NAME_ALIASES = {
     "run_command": "bash",
     "execute_bash": "bash",
     "terminal": "bash",
+    "exec_command": "bash",
+    "functions.exec_command": "bash",
     "pwsh": "powershell",
     # file writes
     "write_file": "write",
@@ -59,6 +61,7 @@ _TOOL_NAME_ALIASES = {
     "replace_file_content": "edit",
     "multi_replace_file_content": "multiedit",
 }
+_WORKDIR_COMMAND_TOOL_NAMES = {"exec_command", "functions.exec_command"}
 _WRITE_TOOL_PATH_FIELDS = {
     "write": ("file_path", "path", "absolute_path", "TargetFile", "targetFile"),
     "edit": ("file_path", "path", "absolute_path", "TargetFile", "targetFile"),
@@ -72,6 +75,7 @@ _GIT_UNSAFE_READ_OPTIONS = {"--ext-diff", "--textconv"}
 _GIT_UNSAFE_READ_ENV = {"GIT_EXTERNAL_DIFF", "GIT_DIFF_OPTS"}
 _GIT_FETCH_CONFIG_ENV_PREFIX = "GIT_CONFIG"
 _GIT_NON_WRITING_SUBCOMMANDS = {"help", "version"}
+_SAFE_ISOLATION_BRANCH_PREFIXES = ("feat/", "experiment/")
 _GIT_GLOBAL_OPTIONS_NO_VALUE = {
     "--bare",
     "--literal-pathspecs",
@@ -354,6 +358,24 @@ def _extract_bash_command(payload: dict[str, Any], tool_input: dict[str, Any]) -
         if text:
             return text
     return ""
+
+
+def _resolve_command_execution_cwd(
+    tool_input: dict[str, Any],
+    session_cwd: str,
+    *,
+    supports_workdir: bool,
+) -> str:
+    """Resolve a shell tool's explicit workdir without changing file-tool scope."""
+    if not supports_workdir or "workdir" not in tool_input or tool_input["workdir"] is None:
+        return session_cwd
+    workdir = tool_input["workdir"]
+    if not isinstance(workdir, str) or not workdir.strip():
+        raise HookPayloadError("command tool workdir must be a non-empty directory path")
+    candidate = Path(workdir.strip())
+    if not candidate.is_absolute():
+        candidate = Path(_require_directory(session_cwd)) / candidate
+    return _require_directory(str(candidate))
 
 
 def _path_values(value: Any) -> list[str]:
@@ -1037,6 +1059,138 @@ def _validate_git_safe_fetch_refspec(refspec: str, remote: str) -> None:
     raise HookPayloadError("git fetch refspec destination is not a safe remote-tracking mapping")
 
 
+def _is_safe_isolation_branch(branch: str) -> bool:
+    """Return whether ``branch`` is an ordinary new isolated-work branch name."""
+    normalized = _normalize_text(branch)
+    if not normalized.startswith(_SAFE_ISOLATION_BRANCH_PREFIXES):
+        return False
+    suffix = normalized.split("/", 1)[1]
+    if not suffix or suffix.startswith("/") or suffix.endswith(("/", ".")):
+        return False
+    if ".." in normalized or "@{" in normalized:
+        return False
+    return not any(character in normalized for character in " ~^:?*[\\")
+
+
+def _is_safe_isolation_start_point(start_point: str) -> bool:
+    normalized = _normalize_text(start_point)
+    if normalized in {"HEAD", "main", "master", "dev", "origin/main", "origin/master", "origin/dev"}:
+        return True
+    if re.fullmatch(r"[0-9a-fA-F]{7,64}", normalized):
+        return True
+    return _is_safe_isolation_branch(normalized)
+
+
+def _validate_git_safe_worktree_add_arguments(
+    args: list[str],
+    *,
+    current_dir: Path | None,
+    current_dir_known: bool,
+    config_overrides: bool,
+    env_overrides: dict[str, str],
+    git_dir: Path | None,
+    git_dir_error: bool,
+    work_tree: Path | None,
+    work_tree_error: bool,
+    bare_mode: bool,
+) -> dict[str, str]:
+    """Classify only explicit, new feature/experiment worktree creation."""
+    if (
+        config_overrides or env_overrides or git_dir is not None or git_dir_error
+        or work_tree is not None or work_tree_error or bare_mode
+    ):
+        raise HookPayloadError("git worktree add with environment or config overrides could not be classified safely")
+    branch = ""
+    target_path = ""
+    start_point = ""
+    index = 0
+    while index < len(args):
+        token = args[index]
+        normalized = token.lower()
+        if token in {"-b", "--branch"}:
+            if index + 1 >= len(args) or branch:
+                raise HookPayloadError("git worktree add branch option could not be classified safely")
+            branch = args[index + 1]
+            index += 2
+            continue
+        if normalized.startswith("--branch="):
+            if branch:
+                raise HookPayloadError("git worktree add branch option could not be classified safely")
+            branch = token.split("=", 1)[1]
+            index += 1
+            continue
+        if normalized in {"-b", "--force", "-f", "--detach"} or normalized.startswith("-b"):
+            raise HookPayloadError("git worktree add option could not be classified safely")
+        if token == "--" or token.startswith("-"):
+            raise HookPayloadError("git worktree add option could not be classified safely")
+        if not target_path:
+            target_path = token
+        elif not start_point:
+            start_point = token
+        else:
+            raise HookPayloadError("git worktree add arguments could not be classified safely")
+        index += 1
+    if not branch or not _is_safe_isolation_branch(branch):
+        raise HookPayloadError("git worktree add requires a new feat/ or experiment/ branch")
+    if not target_path:
+        raise HookPayloadError("git worktree add requires an explicit external target path")
+    if not current_dir_known or current_dir is None:
+        raise HookPayloadError("git worktree add working directory could not be resolved")
+    repo_root_text = _find_git_worktree_root(str(current_dir))
+    if repo_root_text is None:
+        raise HookPayloadError("git worktree add does not target a git worktree")
+    repo_root = Path(repo_root_text).resolve()
+    resolved_target = Path(target_path)
+    if not resolved_target.is_absolute():
+        resolved_target = current_dir / resolved_target
+    try:
+        resolved_target = resolved_target.resolve()
+    except OSError:
+        raise HookPayloadError("git worktree add target path could not be resolved")
+    if _is_path_within(resolved_target, repo_root):
+        raise HookPayloadError("git worktree add target path must be outside the source worktree")
+    if resolved_target.exists() and (not resolved_target.is_dir() or any(resolved_target.iterdir())):
+        raise HookPayloadError("git worktree add target path must be nonexistent or an empty directory")
+    if start_point and not _is_safe_isolation_start_point(start_point):
+        raise HookPayloadError("git worktree add start point could not be classified safely")
+    return {
+        "kind": "git-safe-isolation",
+        "git_subcommand": "worktree",
+        "git_isolation_branch": branch,
+        "git_isolation_target": str(resolved_target),
+    }
+
+
+def _classify_git_worktree_command(
+    args: list[str],
+    *,
+    current_dir: Path | None,
+    current_dir_known: bool,
+    config_overrides: bool,
+    env_overrides: dict[str, str],
+    git_dir: Path | None,
+    git_dir_error: bool,
+    work_tree: Path | None,
+    work_tree_error: bool,
+    bare_mode: bool,
+) -> dict[str, str]:
+    if not args:
+        raise HookPayloadError("git worktree command could not be classified safely")
+    subcommand = args[0].lower()
+    if subcommand == "list":
+        if config_overrides or env_overrides or any(value not in {"--porcelain", "-z"} for value in args[1:]):
+            raise HookPayloadError("git worktree list could not be classified safely")
+        return {"kind": "git-readonly", "git_subcommand": "worktree"}
+    if subcommand == "add":
+        return _validate_git_safe_worktree_add_arguments(
+            args[1:], current_dir=current_dir, current_dir_known=current_dir_known,
+            config_overrides=config_overrides, env_overrides=env_overrides,
+            git_dir=git_dir, git_dir_error=git_dir_error,
+            work_tree=work_tree, work_tree_error=work_tree_error, bare_mode=bare_mode,
+        )
+    raise HookPayloadError("git worktree command could not be classified safely")
+
+
 def _classify_direct_git_command(
     command_tokens: list[str],
     *,
@@ -1050,6 +1204,7 @@ def _classify_direct_git_command(
     git_dir_error = False
     work_tree_error = False
     config_overrides = False
+    bare_mode = False
     arg_index = 0
     while arg_index < len(args):
         token = args[arg_index]
@@ -1098,6 +1253,13 @@ def _classify_direct_git_command(
                 "kind": "git-remote-ref-update",
                 "git_subcommand": "fetch",
             }
+        if normalized == "worktree":
+            return _classify_git_worktree_command(
+                args[arg_index + 1 :], current_dir=current_dir, current_dir_known=current_dir_known,
+                config_overrides=config_overrides, env_overrides=env_overrides,
+                git_dir=git_dir, git_dir_error=git_dir_error,
+                work_tree=work_tree, work_tree_error=work_tree_error, bare_mode=bare_mode,
+            )
         if normalized in _GIT_NON_WRITING_SUBCOMMANDS or normalized in _GIT_TERMINAL_GLOBAL_OPTIONS:
             return {
                 "kind": "git-readonly",
@@ -1177,11 +1339,13 @@ def _classify_direct_git_command(
             arg_index += 1
             continue
         if normalized in _GIT_GLOBAL_OPTIONS_NO_VALUE:
+            if normalized == "--bare":
+                bare_mode = True
             arg_index += 1
             continue
         if token == "--" or token.startswith("-"):
             raise HookPayloadError("git command could not be classified safely")
-        raise HookPayloadError(f"git subcommand '{token}' is not allowed by the agent pretool policy")
+        raise HookPayloadError(f"git subcommand '{token}' could not be classified safely by the agent pretool policy")
     return {
         "kind": "git-readonly",
         "git_subcommand": "help",
@@ -1275,7 +1439,7 @@ def _extract_git_command_context(
         git_results.append(parsed)
     if not git_results:
         return None
-    if any(result.get("kind") == "git-write" for result in git_results):
+    if any(result.get("kind") in {"git-write", "git-safe-isolation"} for result in git_results):
         if len(git_results) != 1:
             raise HookPayloadError("multiple Git commands in one compound shell command are not supported")
         return git_results[0]
@@ -1421,10 +1585,19 @@ def classify_agent_pretool_payload(
     elif normalized_tool_name in _COMMAND_TOOL_NAMES:
         command = _extract_bash_command(hook_payload, tool_input)
         hook_context["command"] = command
+        command_cwd = _resolve_command_execution_cwd(
+            tool_input,
+            normalized_cwd,
+            supports_workdir=(
+                normalized_provider == "codex"
+                and reported_tool_name in _WORKDIR_COMMAND_TOOL_NAMES
+            ),
+        )
+        hook_context["command_workdir"] = command_cwd
         parsed_command = _extract_git_command_context(
             command,
             normalized_tool_name,
-            _initialize_shell_state(normalized_cwd),
+            _initialize_shell_state(command_cwd),
         )
         if parsed_command is None:
             return {
@@ -1444,6 +1617,15 @@ def classify_agent_pretool_payload(
             return {
                 "classified": False,
                 "reason": "git command is a bounded remote-ref update",
+                "hook": hook_context,
+            }
+        if parsed_command.get("kind") == "git-safe-isolation":
+            hook_context["git_subcommand"] = parsed_command.get("git_subcommand", "worktree")
+            hook_context["git_isolation_branch"] = parsed_command.get("git_isolation_branch", "")
+            hook_context["git_isolation_target"] = parsed_command.get("git_isolation_target", "")
+            return {
+                "classified": False,
+                "reason": "git command is a bounded safe isolated worktree creation",
                 "hook": hook_context,
             }
         repo_root = parsed_command["git_worktree_root"]

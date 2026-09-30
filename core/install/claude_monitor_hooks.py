@@ -26,7 +26,6 @@ EVENTS = (
     "PermissionRequest",
     "Stop",
     "StopFailure",
-    "SessionEnd",
 )
 TOOL_EVENTS = frozenset(
     {"PreToolUse", "PostToolUse", "PostToolUseFailure", "PermissionRequest"}
@@ -113,6 +112,28 @@ def generated_hooks(server="engram", *, native_identity=False, subagent_activity
     return result
 
 
+def legacy_session_end_groups(server):
+    """Return only the exact SessionEnd groups shipped before Claude rejected them.
+
+    SessionEnd has no MCP client context in current Claude Code.  Its prior
+    handler did not have a matcher, so equality here intentionally rejects a
+    matcher, extra group fields, changed timeout, or any altered input.
+    """
+    groups = []
+    for native_identity in (False, True):
+        arguments = {"event": "SessionEnd", "agent_id": "${agent_id}"}
+        if native_identity:
+            arguments["native_session_id"] = "${session_id}"
+        groups.append({"hooks": [{
+            "type": "mcp_tool",
+            "server": server,
+            "tool": TOOL,
+            "input": arguments,
+            "timeout": 2,
+        }]})
+    return tuple(groups)
+
+
 def merge_settings(settings, server="engram", *, upgrade_native_identity=False, upgrade_subagent_activity=False):
     """Replace only this server's Engram-owned native handlers, never Orca hooks."""
     if not isinstance(settings, dict):
@@ -126,6 +147,7 @@ def merge_settings(settings, server="engram", *, upgrade_native_identity=False, 
     generated = generated_hooks(server, native_identity=upgrade_native_identity, subagent_activity=upgrade_subagent_activity)
     newest = generated_hooks(server, subagent_activity=True)
     supported = (generated_hooks(server), generated_hooks(server, native_identity=True), newest)
+    legacy_session_end = legacy_session_end_groups(server)
     installed = set()
     owned_commands = owned_title_reminder_commands()
     for event, groups in list(hooks.items()):
@@ -135,6 +157,12 @@ def merge_settings(settings, server="engram", *, upgrade_native_identity=False, 
         for group in groups:
             if not isinstance(group, dict) or not isinstance(group.get("hooks"), list):
                 raise ValueError("invalid hook group")
+            # Claude 2.1.284 rejects mcp_tool SessionEnd handlers because the
+            # event has no MCP client context.  Remove only byte-for-byte
+            # equivalent groups we shipped before that constraint was known.
+            # Any variation stays fail-closed below as a user/custom hook.
+            if event == "SessionEnd" and group in legacy_session_end:
+                continue
             # Other Engram installers also append their own hook groups. Keep
             # one exact current group where it already is instead of competing
             # over ordering and generating a settings backup on every rebuild.

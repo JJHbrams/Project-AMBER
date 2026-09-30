@@ -11,7 +11,8 @@ scope_key 가 명시되면 resolve_scope_key 는 cwd 를 보지 않으므로, �
 
 import unittest
 import asyncio
-from unittest.mock import AsyncMock, patch
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock, patch
 
 import mcp_server
 from mcp_server import _build_context_once_key
@@ -119,6 +120,90 @@ class ContextOnceCadenceCleanupTests(unittest.TestCase):
             asyncio.run(mcp_server.engram_get_context_once(caller="codex", scope_key="overlay"))
 
         self.assertNotIn(711, personality._SESSION_STATE)
+
+
+def _connection(transport_id):
+    return SimpleNamespace(
+        request_context=SimpleNamespace(
+            request=SimpleNamespace(headers={}, scope={"engram.presence.transport_id": transport_id})
+        )
+    )
+
+
+class ContextOnceDedupesPerConversationTests(unittest.TestCase):
+    """dedupe 단위는 LLM 대화(MCP 연결)다.
+
+    2026-09-28 실측: 08:38 예약작업이 먼저 bootstrap 하자, 30분 안에 연 대화형 세션이
+    그 캐시를 맞아 "already initialized" 만 받고 페르소나 없이 시작했다.
+    """
+
+    def setUp(self):
+        self.sessions = iter(range(900, 950))
+        self.start_session = Mock(side_effect=lambda **_kw: SimpleNamespace(session_id=next(self.sessions)))
+        self.context = AsyncMock(return_value="[연속체] persona")
+        self.patches = [
+            patch.object(mcp_server, "ensure_repo_policy", return_value={}),
+            patch.object(mcp_server, "_report_bootstrap_project", AsyncMock()),
+            patch.object(mcp_server, "_context_session_fingerprint", return_value="startup:same-process"),
+            patch.object(mcp_server, "_session_is_open", return_value=True),
+            patch.object(mcp_server, "_mark_trusted_root_bootstrap"),
+            patch.object(mcp_server, "_stm_post", return_value=None),
+            patch.object(mcp_server.memory_bus, "start_session", self.start_session),
+            patch.object(mcp_server, "engram_get_context", self.context),
+        ]
+        for p in self.patches:
+            p.start()
+
+    def tearDown(self):
+        for p in reversed(self.patches):
+            p.stop()
+        mcp_server._CONTEXT_ONCE_KEYS.clear()
+        mcp_server._FINGERPRINT_TO_SESSION.clear()
+
+    def _once(self, ctx):
+        return asyncio.run(mcp_server.engram_get_context_once(
+            caller="claude-code", scope_key="overlay", cwd=HOOK_CWD, ctx=ctx))
+
+    def test_another_conversation_still_receives_full_context(self):
+        first = self._once(_connection("scheduled-task-connection"))
+        second = self._once(_connection("interactive-connection"))
+        self.assertIn("[연속체]", first)
+        self.assertIn("[연속체]", second)
+        self.assertNotIn("already initialized", second)
+
+    def test_same_conversation_recall_is_still_deduped(self):
+        # hook 지시와 전역 CLAUDE.md 지시가 cwd 만 다르게 같은 대화에서 두 번 부른다.
+        self._once(_connection("one-conversation"))
+        again = asyncio.run(mcp_server.engram_get_context_once(
+            caller="claude-code", scope_key="overlay", cwd=CLAUDE_MD_CWD, ctx=_connection("one-conversation")))
+        self.assertIn("already initialized", again)
+        self.assertEqual(self.context.await_count, 1)
+        self.assertEqual(self.start_session.call_count, 1)
+
+    def test_unidentified_caller_gets_context_without_a_new_session(self):
+        first = self._once(None)
+        second = self._once(None)
+        self.assertIn("[연속체]", second)
+        self.assertNotIn("already initialized", second)
+        self.assertIn("session_id=900", second)
+        self.assertEqual(self.start_session.call_count, 1)
+        self.assertIn("session_id=900", first)
+
+    def test_closed_session_never_rebinds_to_another_conversations_session(self):
+        self._once(_connection("conversation-a"))   # 900
+        self._once(_connection("conversation-b"))   # 901, 프로세스 fingerprint 는 이제 901
+        with patch.object(mcp_server, "_session_is_open", side_effect=lambda sid, *_a: sid != 900):
+            again = self._once(_connection("conversation-a"))
+        self.assertIn("session_id=902", again)
+        self.assertNotIn("session_id=901", again)
+        self.assertEqual(self.start_session.call_args.kwargs.get("continued_from_session_id"), 900)
+
+    def test_unidentified_caller_on_closed_session_still_gets_context(self):
+        self._once(None)                            # 900
+        with patch.object(mcp_server, "_session_is_open", side_effect=lambda sid, *_a: sid != 900):
+            again = self._once(None)
+        self.assertIn("[연속체]", again)
+        self.assertIn("session_id=901", again)
 
 
 if __name__ == "__main__":

@@ -34,6 +34,7 @@ from overlay.state_api import (authorized, new_credentials, publish_discovery,
                                remove_discovery_if_owner, state_discovery_file,
                                validate_payload, validate_presence, validate_title_payload, validate_project_payload,
                                validate_lifecycle_payload)
+from overlay.mcp_recovery_events import McpRecoveryEvents
 
 logger = logging.getLogger(__name__)
 
@@ -168,6 +169,34 @@ class _STMHandler(BaseHTTPRequestHandler):
             if not self._state_authorized():
                 return
             self._send_json({"sessions": self.server.state_registry.snapshot()})
+
+        elif path == "/state/mcp/events":
+            if not self._state_authorized():
+                return
+            # SSE is deliberately state metadata only.  The first snapshot and
+            # revision wait share one condition, so there is no lost wakeup.
+            try: after = int(parse_qs(parsed.query).get("after", ["-1"])[0])
+            except ValueError:
+                self._send_json({"error": "invalid revision"}, 400); return
+            hub = self.server.mcp_recovery_events
+            self.send_response(200); self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-cache"); self.send_header("Connection", "keep-alive"); self.end_headers()
+            # Persistent subscription: timed heartbeats are transport keepalive,
+            # never readiness reconciliation or a backend health probe.
+            first_snapshot = True
+            self.close_connection = True
+            while not hub.closed:
+                snapshot = hub.snapshot() if first_snapshot else hub.wait_after(after, 20.0)
+                if not first_snapshot and snapshot["revision"] == after:
+                    wire = b": heartbeat\n\n"
+                else:
+                    after = snapshot["revision"]
+                    wire = ("id: %s\nevent: mcp.ready\ndata: %s\n\n" % (after, json.dumps(snapshot, separators=(",", ":")))).encode("utf-8")
+                first_snapshot = False
+                try:
+                    self.wfile.write(wire); self.wfile.flush()
+                except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, TimeoutError):
+                    return
 
         elif path == "/state/renderers":
             if not self._state_authorized():
@@ -487,6 +516,7 @@ class STMServer:
             self._server.state_token = self._state_token
             self._server.state_instance_id = self._state_instance_id
             self._server.state_discovery_path = self._state_discovery_path
+            self._server.mcp_recovery_events = McpRecoveryEvents(self._state_instance_id)
             actual_port = self._server.server_address[1]
             publish_discovery(self._state_discovery_path, port=actual_port,
                               instance_id=self._state_instance_id, token=self._state_token)
@@ -560,6 +590,7 @@ class STMServer:
 
     def stop(self):
         if self._server:
+            self._server.mcp_recovery_events.close()
             self._server.shutdown()
             self._server.server_close()
             self._server = None
@@ -576,6 +607,11 @@ class STMServer:
     @property
     def port(self) -> int:
         return self._port
+
+    def publish_mcp_ready(self, ready: bool, endpoint: str | None = None, *, replaced: bool = False):
+        if self._server is not None:
+            return self._server.mcp_recovery_events.publish(ready=ready, endpoint=endpoint, replaced=replaced)
+        return None
 
 
 

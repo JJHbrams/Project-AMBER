@@ -95,7 +95,8 @@ class OverlayBuildArchitectureTests(unittest.TestCase):
         )
 
         self.assertIn("$deploysToDefault", build)
-        self.assertIn('$Mode -eq "auto" -and $reuseValid -and $deploysToDefault', build)
+        self.assertIn('$buildKind -eq "reuse" -and -not $reuseValid', build)
+        self.assertIn('-not $deploysToDefault', build)
 
     def test_build_manifest_reuse_and_input_invalidation(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -242,7 +243,7 @@ class OverlayBuildArchitectureTests(unittest.TestCase):
     def test_build_uses_canonical_manifest_without_refreshing_it(self):
         build = (ROOT / "installer" / "build-overlay.ps1").read_text(encoding="utf-8-sig")
         spec = (ROOT / "engram-overlay.spec").read_text(encoding="utf-8")
-        entry = (ROOT / "engram_overlay_entry.py").read_text(encoding="utf-8")
+        entry = (ROOT / "core" / "entrypoint.py").read_text(encoding="utf-8")
 
         self.assertIn('"--validate-metadata"', build)
         self.assertNotIn('"--allow-download"', build)
@@ -251,7 +252,7 @@ class OverlayBuildArchitectureTests(unittest.TestCase):
         self.assertNotIn("model_dir.rglob", spec)
         self.assertIn('if role == "model-cache":', entry)
         self.assertIn("ENGRAM_MODEL_CACHE_DIR", build)
-        self.assertIn("engram-smoke-model-", build)
+        self.assertIn("smoke-model-cache", build)
 
     def test_frozen_bundle_retains_embedding_runtime_dependencies(self):
         spec = (ROOT / "engram-overlay.spec").read_text(encoding="utf-8")
@@ -303,7 +304,7 @@ class OverlayBuildArchitectureTests(unittest.TestCase):
 
     def test_frozen_dashboard_uses_external_python_runtime(self):
         overlay_main = (ROOT / "overlay" / "main.py").read_text(encoding="utf-8")
-        entry = (ROOT / "engram_overlay_entry.py").read_text(encoding="utf-8")
+        entry = (ROOT / "core" / "entrypoint.py").read_text(encoding="utf-8")
         spec = (ROOT / "engram-overlay.spec").read_text(encoding="utf-8")
 
         self.assertNotIn('cmd = [sys.executable, "--role", "dashboard"]', overlay_main)
@@ -315,7 +316,7 @@ class OverlayBuildArchitectureTests(unittest.TestCase):
 
     def test_source_restart_uses_canonical_entrypoint_and_mcp_provenance(self):
         overlay_main = (ROOT / "overlay" / "main.py").read_text(encoding="utf-8")
-        entry = (ROOT / "engram_overlay_entry.py").read_text(encoding="utf-8")
+        entry = (ROOT / "core" / "entrypoint.py").read_text(encoding="utf-8")
         mcp = (ROOT / "mcp_server.py").read_text(encoding="utf-8")
 
         self.assertIn('PROJECT_ROOT / "engram_overlay_entry.py"', overlay_main)
