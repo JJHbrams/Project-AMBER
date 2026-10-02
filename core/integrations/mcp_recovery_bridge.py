@@ -1,7 +1,11 @@
 """Persistent provider-facing stdio; event-driven upstream MCP replacement.
 
-Only successful protocol initialization is replayed. Application requests and
-notifications are never queued for recovery or replayed across transports.
+Only successful protocol initialization is replayed, with one exception: a
+request the upstream rejected with "Session terminated" never reached a handler
+(the dead Mcp-Session-Id is refused before dispatch), so that single triggering
+request is re-sent once after the transport is re-initialized. Every other
+transport loss keeps the no-replay rule: requests in flight are reported as
+outcome_unknown and notifications are never queued or replayed.
 """
 from __future__ import annotations
 
@@ -23,6 +27,7 @@ MAX_LINE = 1_000_000
 MAX_INFLIGHT = 128
 UNKNOWN = -32071
 UNAVAILABLE = -32070
+REPLAY_WINDOW = 30.0  # seconds a session-terminated request waits for the transport to recover
 
 
 @dataclass(frozen=True)
@@ -48,6 +53,12 @@ def checked_url(value: str, path: str) -> str:
 def error(request_id, code, message):
     return {'jsonrpc': '2.0', 'id': request_id,
             'error': {'code': code, 'message': message}}
+
+
+def session_terminated(message):
+    err = message.get('error') if isinstance(message, dict) else None
+    return (isinstance(err, dict) and err.get('code') in (32600, -32600)
+            and err.get('message') == 'Session terminated')
 
 
 class StdioRecoveryBridge:
@@ -77,6 +88,7 @@ class StdioRecoveryBridge:
         self.initialize_result = None
         self.frontend_initialized = False
         self.init_deadline_task = None
+        self.replay = None  # {'id', 'message', 'epoch', 'timer'}: the one request safe to re-send
 
     def next_id(self, prefix):
         self.serial += 1
@@ -94,6 +106,44 @@ class StdioRecoveryBridge:
     def _write(self, wire):
         self.stdout.write(wire)
         self.stdout.flush()
+
+    async def flush_replay(self):
+        """The stashed request could not be re-sent: report it like any lost request."""
+        stash, self.replay = self.replay, None
+        if stash is None:
+            return
+        timer = stash.get('timer')
+        if timer is not None and timer is not asyncio.current_task():
+            timer.cancel()
+        await self.emit(error(stash['id'], UNKNOWN, 'outcome_unknown: backend transport lost'))
+
+    async def replay_expired(self, stash):
+        await asyncio.sleep(REPLAY_WINDOW)
+        if self.replay is stash:
+            await self.flush_replay()
+
+    def stash_for_replay(self, upstream_id):
+        """Keep the request that got 'Session terminated' (pre-dispatch rejection) for one re-send."""
+        item = self.pending.get(upstream_id)
+        if (item is None or item['kind'] != 'request' or item.get('replayed')
+                or item.get('message') is None or self.replay is not None):
+            return
+        del self.pending[upstream_id]
+        stash = {'id': item['id'], 'message': item['message'], 'epoch': self.epoch, 'timer': None}
+        stash['timer'] = asyncio.create_task(self.replay_expired(stash))
+        self.replay = stash
+
+    async def replay_stashed(self):
+        stash = self.replay
+        if stash is None or not self.available:
+            return
+        self.replay = None
+        stash['timer'].cancel()
+        upstream_id = self.next_id('request')
+        # Registered before sending so a second loss reports it instead of replaying again.
+        self.pending[upstream_id] = {'kind': 'request', 'id': stash['id'],
+                                     'message': stash['message'], 'replayed': True}
+        await self.send({**stash['message'], 'id': upstream_id})
 
     async def send(self, message):
         writer = self.writer
@@ -178,6 +228,10 @@ class StdioRecoveryBridge:
             return
         if method == 'notifications/cancelled':
             original_id = value.get('params', {}).get('requestId')
+            if self.replay is not None and self.replay['id'] == original_id:
+                self.replay['timer'].cancel()
+                self.replay = None  # the client no longer wants it; nothing to re-send
+                return
             match = next((key for key, item in self.pending.items()
                           if item.get('id') == original_id and item['kind'] == 'request'), None)
             if match is not None and self.writer is not None:
@@ -196,7 +250,7 @@ class StdioRecoveryBridge:
             await self.emit(error(value['id'], UNAVAILABLE, 'bridge_backpressure'))
             return
         upstream_id = self.next_id('request')
-        self.pending[upstream_id] = {'kind': 'request', 'id': value['id']}
+        self.pending[upstream_id] = {'kind': 'request', 'id': value['id'], 'message': value}
         await self.send({**value, 'id': upstream_id})
 
     async def frontend_loop(self):
@@ -270,11 +324,29 @@ class StdioRecoveryBridge:
                 async with streamable_http_client(endpoint, http_client=http) as (reader, writer, _):
                     self.writer = writer
 
+                    def fail_reinitialize():
+                        # initialize 응답을 기다리는 쪽이 20초를 다 채우지 않게 바로 깨운다.
+                        for pending in self.pending.values():
+                            if pending['kind'] == 'reinitialize' and not pending['future'].done():
+                                pending['future'].set_exception(ConnectionError('backend unavailable'))
+
                     async def read_upstream():
                         async for item in reader:
                             if isinstance(item, Exception):
+                                fail_reinitialize()
                                 raise item
-                            await self.backend_message(item.message.model_dump(mode='json', by_alias=True, exclude_none=True), epoch)
+                            message = item.message.model_dump(mode='json', by_alias=True, exclude_none=True)
+                            if session_terminated(message):
+                                # SDK는 404(세션 만료)를 예외가 아닌 JSON-RPC 에러로 전달하고 죽은
+                                # Mcp-Session-Id를 계속 쓴다. 세션 검증에서 거절돼 핸들러에 닿지 않은
+                                # 요청이므로 그 한 건만 재연결 후 한 번 다시 보낸다(이미 한 번 재전송했으면
+                                # pending 에 남겨 outcome_unknown 처리).
+                                if epoch == self.epoch:
+                                    self.stash_for_replay(message.get('id'))
+                                fail_reinitialize()
+                                raise ConnectionError('upstream session terminated')
+                            await self.backend_message(message, epoch)
+                        fail_reinitialize()
                         raise ConnectionError('backend closed')
 
                     read_task = asyncio.create_task(read_upstream())
@@ -294,6 +366,7 @@ class StdioRecoveryBridge:
                                     raise ConnectionError('backend capabilities changed')
                             await self.send({'jsonrpc': '2.0', 'method': 'notifications/initialized'})
                             self.available = self.frontend_initialized
+                            await self.replay_stashed()
                         else:
                             await self.send_first_initialize()
                         await read_task
@@ -310,6 +383,8 @@ class StdioRecoveryBridge:
         finally:
             if epoch == self.epoch:
                 await self.fail_transport()
+            if failed and self.replay is not None and epoch != self.replay['epoch']:
+                await self.flush_replay()  # the recovery attempt itself failed
             if failed:
                 # Reconcile only after this task becomes done; otherwise a fresh
                 # snapshot could race with manage() and be mistaken for a live pipe.

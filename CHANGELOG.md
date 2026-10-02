@@ -4,6 +4,45 @@ All notable changes to this project are documented in this file.
 
 ## Unreleased
 
+## [1.5.24] — 2026-10-02
+
+### Added
+
+- **The persona now holds in Codex.** The Codex SessionStart hook fetches the
+  live Engram context and injects it as a developer instruction instead of
+  leaving it to a tool result, which GPT models treat as data. The hook prints
+  nothing when Engram MCP is disabled, the overlay is down, or the identity is
+  the unnamed default. Claude's hook output is unchanged.
+- `engram_get_context_once` takes an optional `native_session_id`, so the
+  hook-created STM session and the model's MCP connection share one session.
+- A new default overlay character, `engram-icon`. The previous character can
+  still be selected in settings.
+- KG: frontmatter `relations: [{to, rel, context}]` become typed edges that
+  are replaced on re-sync; manual `kg_link_nodes` edges are kept.
+
+### Fixed
+
+- Every Engram tool failing with `Session terminated` after 30 idle minutes
+  (#12). The bridge now reconnects and resends the request the server
+  rejected before dispatch, once.
+- One conversation could summarize or close another conversation's STM
+  session. Lookup is now per Claude/Codex session ID and survives reconnects
+  and overlay restarts; a conversation no longer gets two sessions.
+- A no-argument `engram_summarize_session` / `engram_close_session` failing on
+  a scope mismatch; an open session in another scope is reported as
+  `scope_mismatch`, not `ended_session`.
+- After `/clear` on the same MCP connection, the new conversation inherited
+  the previous session and lost its persona.
+- KG: `[[file#^block|alias]]` links and links to targets synced later now
+  become edges.
+- Build: EOL-insensitive input hashes; build-only imports are no longer
+  treated as runtime dependencies.
+
+### Known issues
+
+- Open STM sessions accumulate (#13). New duplicates are prevented; existing
+  ones are not cleaned up yet.
+
 ## [1.5.23] — 2026-10-01
 
 ### Added

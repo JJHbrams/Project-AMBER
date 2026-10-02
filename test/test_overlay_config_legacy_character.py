@@ -16,7 +16,7 @@ class OverlayConfigLegacyCharacterTests(unittest.TestCase):
             user_path = root / "overlay.user.yaml"
             state_path = root / "overlay.state.yaml"
             default_path.write_text(
-                "overlay:\n  character:\n    name: engram\n    source_mode: sprite_grid\n",
+                "overlay:\n  character:\n    name: engram-icon\n    source_mode: native_engram_icon\n",
                 encoding="utf-8",
             )
             user_path.write_text(yaml.safe_dump(user_data), encoding="utf-8")
@@ -27,21 +27,21 @@ class OverlayConfigLegacyCharacterTests(unittest.TestCase):
             ):
                 return config.load_cfg(strict=True)
 
-    def test_legacy_custom_static_override_beats_new_sprite_default(self):
+    def test_legacy_custom_static_override_beats_new_icon_default(self):
         cfg = self._load({"overlay": {"character": {"name": "C:/characters/custom.png"}}})
 
         self.assertEqual(cfg["overlay"]["character"]["name"], "C:/characters/custom.png")
         self.assertEqual(cfg["overlay"]["character"]["source_mode"], "static")
 
-    def test_legacy_custom_sequence_override_beats_new_sprite_default(self):
+    def test_legacy_custom_sequence_override_beats_new_icon_default(self):
         cfg = self._load({"overlay": {"character": {"name": "C:/characters/frames"}}})
 
         self.assertEqual(cfg["overlay"]["character"]["source_mode"], "sequence")
 
-    def test_legacy_default_name_receives_new_sprite_default(self):
-        cfg = self._load({"overlay": {"character": {"name": "engram"}}})
+    def test_legacy_default_name_receives_new_icon_default(self):
+        cfg = self._load({"overlay": {"character": {"name": "engram-icon"}}})
 
-        self.assertEqual(cfg["overlay"]["character"]["source_mode"], "sprite_grid")
+        self.assertEqual(cfg["overlay"]["character"]["source_mode"], "native_engram_icon")
 
     def test_explicit_source_mode_is_never_migrated(self):
         cfg = self._load(
@@ -49,6 +49,11 @@ class OverlayConfigLegacyCharacterTests(unittest.TestCase):
         )
 
         self.assertEqual(cfg["overlay"]["character"]["source_mode"], "sequence")
+
+    def test_persisted_bolttagu_selection_overrides_the_new_icon_default(self):
+        cfg = self._load({"overlay": {"character": {"source_mode": "native_bolttagu"}}})
+
+        self.assertEqual(cfg["overlay"]["character"]["source_mode"], "native_bolttagu")
 
 
 if __name__ == "__main__":

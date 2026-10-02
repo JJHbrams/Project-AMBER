@@ -171,7 +171,8 @@ _THOUGHT_DETAIL_VALUE_TO_DISPLAY = {
 }
 
 _CHARACTER_SOURCE_MODE_DISPLAY_TO_VALUE = {
-    "내장 볼따구": "native_bolttagu",
+    "Engram 아이콘": "native_engram_icon",
+    "볼따구-의사": "native_bolttagu",
     "스프라이트 그리드": "sprite_grid",
     "단일 이미지": "static",
     "애니메이션 폴더": "sequence",
@@ -431,6 +432,8 @@ def validate_sprite_grid(
 def validate_character_source(mode: object, character_path: object, grid_values: tuple[object, object, object, object, object, object]) -> tuple[bool, str]:
     """Validate the active character-source mode before a settings write."""
     normalized_mode = str(mode or "").strip()
+    if normalized_mode == "native_engram_icon":
+        return True, "Engram 아이콘 내장 캐릭터"
     if normalized_mode == "native_bolttagu":
         return True, "Engram 내장 볼따구 (외부 설치 불필요)"
     if normalized_mode == "sprite_grid":
@@ -879,6 +882,7 @@ class _SettingsWindow:
         self._char_source_mode_combo.grid(row=0, column=1, sticky="w", **PAD)
         native_box = ttk.Frame(source_box)
         native_box.grid(row=20, column=0, columnspan=4, sticky="ew", padx=8, pady=6)
+        self._bolttagu_native_box = native_box
         self._bolttagu_face_var = tk.BooleanVar(value=True)
         self._bolttagu_floor_var = tk.BooleanVar(value=False)
         self._bolttagu_mapping_var = tk.StringVar(value="")
@@ -887,9 +891,11 @@ class _SettingsWindow:
         ttk.Button(native_box, text="매핑 가져오기…", command=self._import_bolttagu_mapping).pack(side="left", padx=6)
         ttk.Button(native_box, text="기본 매핑", command=lambda: self._bolttagu_mapping_var.set("")).pack(side="left")
         ttk.Button(native_box, text="매핑 편집…", command=self._edit_bolttagu_mapping).pack(side="left", padx=6)
-        ttk.Label(source_box, textvariable=self._bolttagu_mapping_var, wraplength=600).grid(row=21, column=0, columnspan=4, sticky="w", padx=8)
+        self._bolttagu_mapping_label = ttk.Label(source_box, textvariable=self._bolttagu_mapping_var, wraplength=600)
+        self._bolttagu_mapping_label.grid(row=21, column=0, columnspan=4, sticky="w", padx=8)
         self._bolttagu_warning_var = tk.StringVar()
-        ttk.Label(source_box, textvariable=self._bolttagu_warning_var, foreground='#b05b22', wraplength=700).grid(row=22, column=0, columnspan=4, sticky='w', padx=8)
+        self._bolttagu_warning_label = ttk.Label(source_box, textvariable=self._bolttagu_warning_var, foreground='#b05b22', wraplength=700)
+        self._bolttagu_warning_label.grid(row=22, column=0, columnspan=4, sticky='w', padx=8)
         self._char_path_var = tk.StringVar()
         ttk.Label(source_box, text="이미지 / 폴더:").grid(row=1, column=0, sticky="w", **PAD)
         self._char_path_entry = ttk.Entry(source_box, textvariable=self._char_path_var, width=28)
@@ -2518,6 +2524,13 @@ class _SettingsWindow:
         self._char_dir_button.configure(state=sequence_state)
         for widget in self._grid_controls:
             widget.configure(state=grid_state)
+        for widget in (
+            getattr(self, "_bolttagu_native_box", None),
+            getattr(self, "_bolttagu_mapping_label", None),
+            getattr(self, "_bolttagu_warning_label", None),
+        ):
+            if widget is not None:
+                (widget.grid if mode == "native_bolttagu" else widget.grid_remove)()
         if hasattr(self, "_manifest_controls"):
             readonly_controls = (
                 self._manifest_state_combo,

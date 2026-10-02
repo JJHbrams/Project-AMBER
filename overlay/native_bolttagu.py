@@ -31,8 +31,12 @@ class BolttaguAnimator:
         hints: dict[str, str] | None = None,
         categories: dict[str, str] | None = None,
         oneshots: dict[str, str] | None = None,
+        clips: dict[str, object] | None = None,
+        options: dict[str, object] | None = None,
     ) -> None:
-        if intro is not None and intro not in CLIPS:
+        self.clips = clips or CLIPS
+        self.options = options or OPTIONS
+        if intro is not None and intro not in self.clips:
             raise ValueError(f"unknown intro clip: {intro}")
         self.hints = STATE_POSES if hints is None else hints
         self.categories = CATEGORY_POSES if categories is None else categories
@@ -55,12 +59,12 @@ class BolttaguAnimator:
 
     def play_lifecycle(self, clip: str, now_ms: int, *, hold_last: bool = False) -> int:
         """Start a show/hide transition, overriding any hint one-shot in flight."""
-        if clip not in CLIPS:
+        if clip not in self.clips:
             raise ValueError(f"unknown lifecycle clip: {clip}")
         self.oneshot = clip
         self.oneshot_started_ms = now_ms
         self.oneshot_holds = hold_last
-        return CLIPS[clip].total_ms
+        return self.clips[clip].total_ms
 
     def apply_hint(self, hint: str, now_ms: int, category: str | None = None) -> None:
         resolved = hint if hint in self.hints else "idle"
@@ -82,7 +86,7 @@ class BolttaguAnimator:
         shared timeline; only which one is asked for differs.
         """
         if self.oneshot is not None:
-            option = OPTIONS[self.oneshot]
+            option = self.options[self.oneshot]
             elapsed = now_ms - self.oneshot_started_ms
             if not _finished(option, elapsed):
                 return _frames_at(option, elapsed, self.seed)
@@ -90,10 +94,15 @@ class BolttaguAnimator:
                 return _frames_at(option, option.total_ms, self.seed)
             self.oneshot = None
         # A non-looping pose runs out and stands on its last frame.
-        return _frames_at(OPTIONS[self.pose], now_ms - self.state_started_ms, self.seed)
+        return _frames_at(self.options[self.pose], now_ms - self.state_started_ms, self.seed)
 
 
-def load_atlas(asset_dir: Path = ASSET_DIR) -> tuple[dict[str, tuple[Image.Image, ...]], tuple[int, int]]:
+def load_atlas(
+    asset_dir: Path = ASSET_DIR,
+    *,
+    sprite_prefix: str = "bolttagu-",
+    required_options: dict[str, object] | None = None,
+) -> tuple[dict[str, tuple[Image.Image, ...]], tuple[int, int]]:
     """Slice the bundled sheets into per-cell RGBA frames."""
     metadata = json.loads((asset_dir / "atlas.json").read_text(encoding="utf-8"))
     cell_width, cell_height = (int(value) for value in metadata["cell"])
@@ -103,7 +112,7 @@ def load_atlas(asset_dir: Path = ASSET_DIR) -> tuple[dict[str, tuple[Image.Image
         raise ValueError("invalid atlas sheet count")
     sheets: dict[str, tuple[Image.Image, ...]] = {}
     for file_name, frames in metadata["sheets"].items():
-        key = Path(file_name).stem.removeprefix("bolttagu-")
+        key = Path(file_name).stem.removeprefix(sprite_prefix)
         if Path(file_name).name != file_name or not file_name.endswith(".png"):
             raise ValueError("invalid atlas sheet name")
         if not isinstance(frames, list) or not 1 <= len(frames) <= 32:
@@ -117,7 +126,7 @@ def load_atlas(asset_dir: Path = ASSET_DIR) -> tuple[dict[str, tuple[Image.Image
             sheet.crop((index * cell_width, 0, (index + 1) * cell_width, cell_height))
             for index in range(len(frames))
         )
-    for option in OPTIONS.values():
+    for option in (required_options or OPTIONS).values():
         for layer in option.layers:
             if layer.sheet not in sheets or max(layer.cells) >= len(sheets[layer.sheet]):
                 raise ValueError("atlas cannot draw a bundled option")
@@ -138,10 +147,21 @@ class Bolttagu2dView:
         seed: int = 0,
         mapping_path: Path | None = None,
         log: Callable[[str], None] | None = None,
+        asset_dir: Path = ASSET_DIR,
+        sprite_prefix: str = "bolttagu-",
+        required_options: dict[str, object] | None = None,
+        clips: dict[str, object] | None = None,
+        hints: dict[str, str] | None = None,
+        categories: dict[str, str] | None = None,
+        oneshots: dict[str, str] | None = None,
+        lifecycle: dict[str, str] | None = None,
     ) -> None:
-        mapping = load_mapping(mapping_path, log=log)
-        self.mapping = mapping
-        sheets, cell = load_atlas()
+        self.mapping = load_mapping(mapping_path, log=log)
+        sheets, cell = load_atlas(
+            asset_dir,
+            sprite_prefix=sprite_prefix,
+            required_options=required_options,
+        )
         self.cell = cell
         self.scale = scale
         # Resize the finished frame rather than every cell, so memory stays flat
@@ -154,13 +174,22 @@ class Bolttagu2dView:
         self.face_pointer = face_pointer
         # When Engram's launcher owns presentation, the arrival bow belongs to
         # overlay.show rather than to process start.
+        if hints is not None:
+            self.mapping = type(self.mapping)(
+                hints=hints,
+                categories=categories or {},
+                oneshots=oneshots or {},
+                lifecycle=lifecycle or {},
+            )
         self.animator = BolttaguAnimator(
             started_ms=self._now_ms(),
             intro=None if launcher_managed else "enter",
             seed=seed,
-            hints=mapping.hints,
-            categories=mapping.categories,
-            oneshots=mapping.oneshots,
+            hints=self.mapping.hints,
+            categories=self.mapping.categories,
+            oneshots=self.mapping.oneshots,
+            clips=clips,
+            options=required_options,
         )
         self.mirrored = False
         self._pointer_frozen = False

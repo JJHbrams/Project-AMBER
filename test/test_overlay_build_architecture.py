@@ -4,6 +4,7 @@ import unittest
 from unittest.mock import patch
 from pathlib import Path
 
+from core.install import app_payload, overlay_manifest
 from core.install.model_manifest import create_manifest, validate_manifest
 from core.install.overlay_manifest import (
     input_hashes,
@@ -169,6 +170,56 @@ class OverlayBuildArchitectureTests(unittest.TestCase):
             with patch("core.install.overlay_manifest.input_hashes", return_value={}):
                 with self.assertRaisesRegex(ValueError, "without inputs"):
                     make_manifest(root, model_dir / "manifest.json", "rebuild")
+
+    def test_missing_character_data_entry_rejects_reuse_then_fast_patch_repairs_it(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "repo"
+            (root / "VERSION").parent.mkdir(parents=True, exist_ok=True)
+            (root / "VERSION").write_text("1.5.5\n", encoding="utf-8")
+            (root / "overlay").mkdir()
+            (root / "overlay" / "main.py").write_text("VALUE = 1\n", encoding="utf-8")
+            asset = root / "resource" / "character" / "engram-icon" / "alert.png"
+            asset.parent.mkdir(parents=True)
+            asset.write_bytes(b"alert-art")
+            model_dir = root / "resource" / "embedding-model"
+            model_dir.mkdir(parents=True)
+            (model_dir / "config.json").write_text("{}", encoding="utf-8")
+            (model_dir / "model.safetensors").write_bytes(b"weights")
+            model_manifest = model_dir / "manifest.json"
+            model_manifest.write_text(json.dumps(create_manifest(
+                model_dir, model_id="test/model", resolved_revision="local-test",
+            )), encoding="utf-8")
+            artifact = root / "artifact"
+            internal = artifact / "_internal"
+            (internal / "overlay").mkdir(parents=True)
+            (artifact / "engram-overlay.exe").write_bytes(b"exe")
+            (artifact / "engram-dashboard.exe").write_bytes(b"exe")
+            (internal / "overlay" / "main.pyc").write_bytes(b"bytecode")
+            toc = {
+                "schema": app_payload.TOC_SCHEMA,
+                "pure": [{"module": "overlay.main", "source": "overlay/main.py", "dest": "overlay/main.pyc", "package": False}],
+                "datas": [], "bridge_pure": [], "bridge_scripts": [],
+            }
+            toc_path = root / "build" / app_payload.TOC_NAME
+            toc_path.parent.mkdir(parents=True)
+            toc_path.write_text(json.dumps(toc), encoding="utf-8")
+            overlay_manifest.write_manifest(root, artifact, model_manifest, "rebuild")
+
+            valid, reason = validate_build(root, artifact, model_manifest)
+            self.assertFalse(valid)
+            self.assertEqual(reason, "build manifest missing runtime asset entries: resource/character/engram-icon/alert.png")
+
+            plan = overlay_manifest.make_plan(root, artifact, model_manifest)
+            self.assertEqual(plan["build"], "fast")
+            self.assertEqual(plan["copy"], ["resource/character/engram-icon/alert.png"])
+            applied = overlay_manifest.apply_fast(root, artifact, model_manifest)
+            self.assertEqual(applied["applied"]["copied"], ["resource/character/engram-icon/alert.png"])
+            overlay_manifest.write_manifest(root, artifact, model_manifest, "rebuild", "fast-patch")
+            self.assertEqual(validate_build(root, artifact, model_manifest), (True, "valid"))
+            (internal / "resource" / "character" / "engram-icon" / "alert.png").unlink()
+            valid, reason = validate_build(root, artifact, model_manifest)
+            self.assertFalse(valid)
+            self.assertEqual(reason, "artifact missing runtime asset files: resource/character/engram-icon/alert.png")
 
     def test_user_config_does_not_invalidate_frozen_bundle(self):
         with tempfile.TemporaryDirectory() as temporary:

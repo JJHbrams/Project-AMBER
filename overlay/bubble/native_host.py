@@ -284,6 +284,9 @@ class NativeBubbleHost:
 
     def _crashed(self, code):
         self._settle_nudge('ignored')
+        # The fallback needs to know whether the click had opened a composer
+        # before this host clears its private visibility state.
+        self.on_fallback(code)
         # A new WebView starts on its front face.  Clear only native-private
         # guards so a stale speech flip or key activity cannot block its fresh
         # composer; the separate Tk history popup remains authoritative.
@@ -292,7 +295,6 @@ class NativeBubbleHost:
         self._composer_generation+=1;self._composer_idle_armed=False;self._composer_visibility_revision+=1
         self.queue.hold()
         self.notice='말풍선 연결이 종료되었습니다. 대기 요청은 보류했습니다.'
-        self.on_fallback(code)
 
     def provider_stopped(self,session):
         """Called only after the exact detached provider reports verified stop."""

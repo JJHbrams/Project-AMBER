@@ -1,0 +1,21 @@
+{
+  "cell": [270, 302],
+  "feetAnchor": [135, 267],
+  "sheets": {
+    "engram-icon-idle.png": [0, 1, 2],
+    "engram-icon-waiting.png": [0, 1, 2],
+    "engram-icon-listening.png": [0, 1, 2],
+    "engram-icon-speaking.png": [0, 1, 2],
+    "engram-icon-searching.png": [0, 1, 2],
+    "engram-icon-wondering.png": [0, 1, 2],
+    "engram-icon-writing.png": [0, 1, 2],
+    "engram-icon-tool_use.png": [0, 1, 2],
+    "engram-icon-executing.png": [0, 1, 2],
+    "engram-icon-success.png": [0, 1, 2],
+    "engram-icon-error.png": [0, 1, 2],
+    "engram-icon-enter.png": [0, 1, 2],
+    "engram-icon-exit.png": [0, 1, 2],
+    "engram-icon-alert.png": [0],
+    "engram-icon-steam.png": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]
+  }
+}

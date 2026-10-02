@@ -239,19 +239,72 @@ function Clear-StaleOverlayTrash {
     )
 
     try {
-        $target = [IO.Path]::GetFullPath($TargetDir).TrimEnd('')
+        $target = [IO.Path]::GetFullPath($TargetDir).TrimEnd('\')
         $parent = Split-Path -Parent $target
         if (-not $parent -or -not (Test-Path $parent)) { return }
-        $keepFull = @($Keep | Where-Object { $_ } | ForEach-Object { [IO.Path]::GetFullPath($_).TrimEnd('') })
+        $keepFull = @($Keep | Where-Object { $_ } | ForEach-Object { [IO.Path]::GetFullPath($_).TrimEnd('\') })
         foreach ($pattern in @('.engram-overlay-backup-*', '.engram-overlay-stage-*')) {
             foreach ($dir in @(Get-ChildItem -LiteralPath $parent -Directory -Filter $pattern -Force -ErrorAction SilentlyContinue)) {
-                $full = $dir.FullName.TrimEnd('')
+                $full = $dir.FullName.TrimEnd('\')
                 if ($full -eq $target -or $keepFull -contains $full) { continue }
                 Remove-DirectoryDetached $full
             }
         }
     } catch {
         Write-OverlayWarn "Stale overlay trash cleanup failed: $($_.Exception.Message)"
+    }
+}
+
+function Get-OverlayArtifactHashes([string]$Path) {
+    $base = [IO.Path]::GetFullPath($Path).TrimEnd('\')
+    $hashes = @{}
+    foreach ($file in @(Get-ChildItem -LiteralPath $base -File -Recurse -Force | Sort-Object FullName)) {
+        $relative = $file.FullName.Substring($base.Length).TrimStart('\').Replace('\', '/')
+        if ($hashes.ContainsKey($relative)) {
+            throw "Artifact contains duplicate relative path: $relative"
+        }
+        $hashes[$relative] = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash
+    }
+    return $hashes
+}
+
+function Assert-OverlayArtifactCopy {
+    param(
+        [Parameter(Mandatory)][string]$SourceDir,
+        [Parameter(Mandatory)][string]$StageDir
+    )
+
+    $sourceHashes = Get-OverlayArtifactHashes $SourceDir
+    $stageHashes = Get-OverlayArtifactHashes $StageDir
+    $sourcePaths = @($sourceHashes.Keys | Sort-Object)
+    $stagePaths = @($stageHashes.Keys | Sort-Object)
+    if (($sourcePaths -join "`n") -ne ($stagePaths -join "`n")) {
+        throw "Artifact staging copy path mismatch"
+    }
+    foreach ($relative in $sourcePaths) {
+        if ($sourceHashes[$relative] -ne $stageHashes[$relative]) {
+            throw "Artifact staging copy SHA256 mismatch: $relative"
+        }
+    }
+}
+
+function Copy-OverlayArtifactToStage {
+    param(
+        [Parameter(Mandatory)][string]$SourceDir,
+        [Parameter(Mandatory)][string]$StageDir
+    )
+
+    New-Item -ItemType Directory -Path $StageDir -Force | Out-Null
+    & robocopy.exe $SourceDir $StageDir /E /COPY:DAT /DCOPY:DAT /R:2 /W:1 /NFL /NDL /NJH /NJS /NP
+    $copyExit = $LASTEXITCODE
+    if ($copyExit -gt 7) {
+        throw "Artifact staging copy failed (robocopy exit $copyExit)"
+    }
+    Assert-OverlayArtifactCopy -SourceDir $SourceDir -StageDir $StageDir
+    foreach ($name in @('engram-overlay.exe', 'engram-dashboard.exe', 'build-manifest.json')) {
+        if (-not (Test-Path -LiteralPath (Join-Path $StageDir $name))) {
+            throw "Artifact staging copy missing required file: $name"
+        }
     }
 }
 
@@ -273,7 +326,16 @@ function Publish-OverlayArtifact {
     try {
         # The verified artifact is disposable build output. Moving its directory
         # avoids copying 1+ GiB / 20k files before the atomic publish swap.
-        Move-Item -LiteralPath $SourceDir -Destination $stage
+        try {
+            Move-Item -LiteralPath $SourceDir -Destination $stage
+        } catch {
+            $moveFailure = $_.Exception.Message
+            if (Test-Path -LiteralPath $stage) {
+                Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
+            }
+            Write-OverlayWarn "Artifact move to stage failed; using verified copy fallback: $moveFailure"
+            Copy-OverlayArtifactToStage -SourceDir $SourceDir -StageDir $stage
+        }
 
         if (Test-Path $target) {
             Move-Item -Path $target -Destination $backup
@@ -426,9 +488,17 @@ function Write-OverlayPlan($Plan, $Smoke) {
     if (@($Plan.changed_files).Count -gt 15) { Write-Host "      ..." }
     Write-Host ("  Bridge rebuild: {0}   Restamp: {1}" -f [bool]$Plan.bridge_rebuild, [bool]$Plan.restamp)
     $selected = @()
+    $smokeOn = [bool]($Smoke.PSObject.Properties["smoke"] -and $Smoke.smoke)
+    $embeddingInSmoke = [bool]($Smoke.PSObject.Properties["embedding_in_smoke"] -and $Smoke.embedding_in_smoke)
     foreach ($role in @("runtime-contract", "embedding", "smoke", "dashboard")) {
         $p = $Smoke.PSObject.Properties[$role]
-        if ($p -and $p.Value) { $selected += $role }
+        if (-not ($p -and $p.Value)) { continue }
+        # Mirror Invoke-SmokeSelection: smoke-check already computes a real embedding.
+        if ($role -eq "embedding" -and $smokeOn -and $embeddingInSmoke) {
+            $selected += "embedding (covered by smoke)"
+        } else {
+            $selected += $role
+        }
     }
     Write-Host ("  Smoke roles: {0}{1}" -f ($selected -join ", "),
         $(if ($script:ForceFullSmoke) { "   (forced by -FullSmoke)" } else { "" }))

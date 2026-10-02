@@ -30,7 +30,7 @@ def preserve_legacy_character_source_mode(data: dict) -> bool:
         return False
 
     raw_name = str(character.get("name") or "").strip()
-    if not raw_name or raw_name.casefold() == "engram":
+    if not raw_name or raw_name.casefold() in {"engram", "engram-icon"}:
         return False
 
     candidate = Path(raw_name).expanduser()

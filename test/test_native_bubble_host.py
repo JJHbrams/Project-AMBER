@@ -213,6 +213,16 @@ class HostTests(unittest.TestCase):
         h.show();h.set_speech_history_open(True);h._input_activity(True);h._history_open=True;h._crashed(1)
         self.assertFalse(h.composer_visible);self.assertFalse(h._speech_history_open);self.assertFalse(h._composer_input_active);self.assertTrue(h._history_open)
 
+    def test_crash_fallback_observes_open_composer_before_state_is_cleared(self):
+        fallback_visible=[]
+        h=NativeBubbleHost(schedule=lambda delay,fn:self.timers.append((delay,fn)),get_session=lambda:self.provider,
+            get_anchor=lambda:(800,600,100,100),shell_factory=Shell,
+            on_fallback=lambda _code:fallback_visible.append(h.composer_visible),
+            geometry_state_getter=lambda:{},geometry_state_updater=lambda _update:None)
+        h.show();h._crashed('synthetic')
+        self.assertEqual(fallback_visible,[True])
+        self.assertFalse(h.composer_visible)
+
     def test_hide_reopen_invalidates_stale_idle_callback_and_nudge_rolls_back(self):
         events=[];h=NativeBubbleHost(schedule=lambda delay,fn:self.timers.append((delay,fn)),get_session=lambda:self.provider,
             get_anchor=lambda:(800,600,100,100),shell_factory=Shell,cfg={'composer_idle_close_ms':10},

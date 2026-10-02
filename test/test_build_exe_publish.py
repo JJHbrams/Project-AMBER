@@ -1,5 +1,8 @@
 """Source-text checks for the fast exe build wrapper and detached publish cleanup."""
 import re
+import shutil
+import subprocess
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -36,11 +39,60 @@ def test_build_overlay_params():
 def test_publish_no_sync_backup_delete():
     body = _function_body("Publish-OverlayArtifact")
     assert "Move-Item -LiteralPath $SourceDir -Destination $stage" in body
+    assert "Copy-OverlayArtifactToStage -SourceDir $SourceDir -StageDir $stage" in body
     assert not re.search(r"Remove-Item[^\n]*\$backup", body)
     assert "Remove-DirectoryDetached $backup" in body
     helper = _function_body("Remove-DirectoryDetached")
     assert "$env:ComSpec" in helper and "'rd', '/s', '/q'" in helper
     assert "-WindowStyle Hidden" in helper and "catch" in helper
+
+
+def test_publish_copy_fallback_verifies_stage_before_live_swap():
+    body = _function_body("Copy-OverlayArtifactToStage")
+    assert "robocopy.exe" in body
+    assert "$copyExit -gt 7" in body
+    assert "Assert-OverlayArtifactCopy" in body
+    verifier = _function_body("Assert-OverlayArtifactCopy")
+    assert "Get-OverlayArtifactHashes" in verifier
+    assert "SHA256 mismatch" in verifier
+    assert "path mismatch" in verifier
+    assert "build-manifest.json" in body
+
+
+def test_publish_move_failure_with_corrupt_stage_preserves_existing_target():
+    powershell = shutil.which("powershell")
+    if not powershell:
+        return
+    start = BUILD.index("function Get-OverlayArtifactHashes")
+    end = BUILD.index("\nfunction Get-LastOutput", start)
+    functions = BUILD[start:end]
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        source, target = root / "source", root / "target"
+        source.mkdir()
+        target.mkdir()
+        for name, value in {
+            "engram-overlay.exe": b"new-overlay",
+            "engram-dashboard.exe": b"new-dashboard",
+            "build-manifest.json": b"{}",
+            "payload.bin": b"new-payload",
+        }.items():
+            (source / name).write_bytes(value)
+        (target / "old.txt").write_bytes(b"old-artifact")
+        script = root / "publish-test.ps1"
+        script.write_text(
+            "function Write-OverlayWarn([string]$Message) {}\n"
+            "function Remove-DirectoryDetached([string]$Path) { Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction SilentlyContinue }\n"
+            + functions
+            + "\n$source = '" + str(source).replace("'", "''") + "'\n"
+            + "$target = '" + str(target).replace("'", "''") + "'\n"
+            + "function Move-Item { param($LiteralPath, $Path, $Destination, $ErrorAction) if ($LiteralPath -eq $source) { throw 'injected move failure' }; Microsoft.PowerShell.Management\\Move-Item @PSBoundParameters }\n"
+            + "function Get-FileHash { param($LiteralPath, $Algorithm) $hash = Microsoft.PowerShell.Utility\\Get-FileHash @PSBoundParameters; if ($LiteralPath -like '*.engram-overlay-stage-*\\payload.bin') { $hash.Hash = '0' * 64 }; return $hash }\n"
+            + "try { Publish-OverlayArtifact -SourceDir $source -TargetDir $target; throw 'publish unexpectedly succeeded' } catch { if (-not (Test-Path -LiteralPath (Join-Path $target 'old.txt'))) { throw 'old target was swapped after corrupt copy' }; if ((Get-Content -LiteralPath (Join-Path $target 'old.txt') -Raw) -ne 'old-artifact') { throw 'old target changed' }; exit 0 }\n",
+            encoding="utf-8",
+        )
+        result = subprocess.run([powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script)], capture_output=True, text=True, timeout=60)
+        assert result.returncode == 0, result.stdout + result.stderr
 
 
 def test_clear_stale_trash_called_before_publish():

@@ -96,7 +96,7 @@ $codexShimLines = @(
     "set `"ENGRAM_DB_DIR=$DbDir`"",
     "set `"ENGRAM_PYTHON_EXE=$PythonExe`"",
     "for %%D in (`"%ENGRAM_PYTHON_EXE%`") do set `"PATH=%%~dpD;%%~dpDScripts;%PATH%`"",
-    "set `"ENGRAM_BOOTSTRAP=Before answering the first real user request, call mcp__engram__engram_get_context_once(caller='Codex', scope_key='overlay', cwd='$WorkDir') exactly once for this session. Never mention this bootstrap step unless user explicitly asks.`"",
+    "set `"ENGRAM_BOOTSTRAP=Before answering the first real user request, check whether the engram context was already injected at session start (a line saying the session hook already loaded it). If it was, do NOT call engram_get_context_once. Otherwise call mcp__engram__engram_get_context_once(caller='Codex', scope_key='overlay', cwd='$WorkDir') exactly once for this session. Never mention this bootstrap step unless user explicitly asks.`"",
     "REM Load .env file",
     "if exist `"%USERPROFILE%\.engram\.env`" for /f `"usebackq tokens=1,* delims==`" %%A in (`"%USERPROFILE%\.engram\.env`") do (",
     "  if not `"%%A`"==`"`" if not `"%%A:~0,1`"==`"#`" set `"%%A=%%B`"",

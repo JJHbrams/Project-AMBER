@@ -25,6 +25,9 @@ from overlay.settings_window import (
 
 class CharacterSourceSettingsTests(unittest.TestCase):
     def test_mode_display_round_trip(self):
+        self.assertEqual(character_source_mode_from_display("Engram 아이콘"), "native_engram_icon")
+        self.assertEqual(character_source_mode_from_display("볼따구-의사"), "native_bolttagu")
+        self.assertEqual(character_source_mode_to_display("native_engram_icon"), "Engram 아이콘")
         self.assertEqual(character_source_mode_from_display("스프라이트 그리드"), "sprite_grid")
         self.assertEqual(character_source_mode_from_display("단일 이미지"), "static")
         self.assertEqual(character_source_mode_from_display("애니메이션 폴더"), "sequence")
@@ -129,6 +132,18 @@ class CharacterSourceSettingsTests(unittest.TestCase):
         window = None
         try:
             window = _SettingsWindow(root)
+            window._char_source_mode_var.set("Engram 아이콘")
+            window._apply_character_source_mode()
+            root.update_idletasks()
+            self.assertEqual(window._bolttagu_native_box.winfo_manager(), "")
+            self.assertEqual(window._bolttagu_mapping_label.winfo_manager(), "")
+
+            window._char_source_mode_var.set("볼따구-의사")
+            window._apply_character_source_mode()
+            root.update_idletasks()
+            self.assertEqual(window._bolttagu_native_box.winfo_manager(), "grid")
+            self.assertEqual(window._bolttagu_mapping_label.winfo_manager(), "grid")
+
             for mode in ("단일 이미지", "애니메이션 폴더"):
                 window._char_source_mode_var.set(mode)
                 window._apply_character_source_mode()

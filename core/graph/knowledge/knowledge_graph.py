@@ -160,7 +160,7 @@ def _slugify(title: str) -> str:
 # ── 마크다운 파싱 ─────────────────────────────────────────
 
 _FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n", re.DOTALL)
-_WIKILINK_RE = re.compile(r"\[\[([^\]|#]+?)(?:\|[^\]]+)?\]\]")
+_WIKILINK_RE = re.compile(r"\[\[([^\]|#]+?)(?:#[^\]|]*)?(?:\|[^\]]+)?\]\]")
 _HASHTAG_RE = re.compile(r"(?<!\w)#([a-zA-Z가-힣][a-zA-Z0-9가-힣_-]*)")
 _FIRST_PARA_RE = re.compile(r"^#+\s.*?\n+([\s\S]*?)(?:\n\n|\Z)", re.MULTILINE)
 
@@ -210,8 +210,30 @@ def parse_markdown(text: str, filepath: Path | None = None) -> dict:
         "tags": tags,
         "summary": summary,
         "links": list(fm.get("links", [])) + wikilinks,
+        "relations": _parse_relations(fm.get("relations")),
         "frontmatter": fm,
     }
+
+
+# frontmatter relations 로 만든 엣지 표식 — 재sync 때 이것만 지우고 다시 만든다.
+# kg_link_nodes 로 넣은 수동 엣지는 이 표식이 없으므로 보존된다.
+FM_EDGE_MARK = "[fm]"
+
+
+def _parse_relations(raw) -> list[dict]:
+    """frontmatter `relations: [{to, rel, context?}]` → 타입 엣지 명세. links 는 wikilink 경로가 담당."""
+    out = []
+    if not isinstance(raw, list):
+        return out
+    for r in raw:
+        if not isinstance(r, dict):
+            continue
+        to = str(r.get("to") or "").strip()
+        rel = str(r.get("rel") or "").strip()
+        if not to or rel not in EDGE_TYPES or rel == "links":
+            continue
+        out.append({"to": to, "rel": rel, "context": str(r.get("context") or "").strip()})
+    return out
 
 
 def build_frontmatter(title: str, note_type: str, tags: list, links: list, summary: str = "", extra: dict | None = None) -> str:
@@ -553,6 +575,7 @@ class KnowledgeGraph:
             md_files = list(iter_wiki_md_files(vault_path))
 
         parsed_by_from_id: dict[str, dict] = {}
+        source_paths: dict[str, str] = {}
         for f in md_files:
             try:
                 text = f.read_text(encoding="utf-8", errors="ignore")
@@ -562,27 +585,30 @@ class KnowledgeGraph:
             from_id = parsed["id"]
             if from_id:
                 parsed_by_from_id[from_id] = parsed
+                source_paths[from_id] = str(f.relative_to(vault_path))
 
+        auto_edges = f"(rel_type='links' OR context LIKE '{FM_EDGE_MARK}%')"
         conn = get_connection()
         with conn:
             if restrict_to_paths is not None:
                 if parsed_by_from_id:
                     placeholders = ",".join("?" * len(parsed_by_from_id))
                     conn.execute(
-                        f"DELETE FROM kg_edges WHERE rel_type='links' AND from_id IN ({placeholders})",
+                        f"DELETE FROM kg_edges WHERE {auto_edges} AND from_id IN ({placeholders})",
                         tuple(parsed_by_from_id.keys()),
                     )
             else:
-                # 기존 자동 links 엣지 제거 (수동 엣지는 유지).
+                # 자동 엣지(links + frontmatter relations) 제거, 수동 엣지는 유지.
                 # 이 볼트에 속한 노드에서 나가는 것만 — 전체를 지우면 다른 볼트의
                 # 링크가 사라지고, 그쪽을 다시 sync 할 때까지 복구되지 않는다.
                 conn.execute(
-                    """DELETE FROM kg_edges WHERE rel_type='links' AND from_id IN
+                    f"""DELETE FROM kg_edges WHERE {auto_edges} AND from_id IN
                        (SELECT id FROM kg_nodes WHERE vault_path = ?)""",
                     (vault_key(vault_path),),
                 )
         conn.close()
 
+        cache: dict[tuple[str, str], str | None] = {}
         for from_id, parsed in parsed_by_from_id.items():
             # from_id가 DB에 있는지 확인
             conn = get_connection()
@@ -591,10 +617,66 @@ class KnowledgeGraph:
             if not exists:
                 continue
 
+            src = source_paths[from_id]
             for link_title in parsed["links"]:
-                to_node = self.get_node(link_title.strip()) or self.get_node(_slugify(link_title.strip()))
-                if to_node:
-                    self.add_edge(from_id, to_node["id"], "links")
+                to_id = self._resolve_target(str(link_title), src, vault_path, cache)
+                if to_id:
+                    self.add_edge(from_id, to_id, "links")
+            for r in parsed.get("relations", []):
+                to_id = self._resolve_target(r["to"], src, vault_path, cache)
+                if to_id:
+                    ctx = f"{FM_EDGE_MARK} {r['context']}".rstrip()
+                    self.add_edge(from_id, to_id, r["rel"], context=ctx)
+
+    def _resolve_target(self, target: str, source_rel_path: str, vault_path: Path,
+                        cache: dict | None = None) -> str | None:
+        """링크 대상 → 노드 id. id/title 우선, 없으면 Obsidian 식 파일명·경로로 찾는다.
+
+        `[[2026-09-29#^event-iran]]` 처럼 파일명으로 거는 링크는 frontmatter id
+        (`daily-news-2026-09-29`)와 달라 id 조회만으로는 엣지가 생기지 않는다."""
+        target = target.strip()
+        if not target:
+            return None
+        key = (target, str(Path(source_rel_path).parent))
+        if cache is not None and key in cache:
+            return cache[key]
+
+        node = self.get_node(target) or self.get_node(_slugify(target))
+        result = node["id"] if node else self._resolve_by_path(target, source_rel_path, vault_path)
+        if cache is not None:
+            cache[key] = result
+        return result
+
+    def _resolve_by_path(self, target: str, source_rel_path: str, vault_path: Path) -> str | None:
+        norm = target.replace("\\", "/").lstrip("/")
+        if norm.startswith(f"{vault_path.name}/"):
+            norm = norm[len(vault_path.name) + 1:]
+        if norm.lower().endswith(".md"):
+            norm = norm[:-3]
+        stem = norm.rsplit("/", 1)[-1]
+        if not stem:
+            return None
+
+        conn = get_connection()
+        rows = conn.execute(
+            "SELECT id, path FROM kg_nodes WHERE vault_path = ? AND path LIKE ?",
+            (vault_key(vault_path), f"%{stem}.md"),
+        ).fetchall()
+        conn.close()
+        cands = [(r[0], r[1].replace("\\", "/")) for r in rows]
+        cands = [(nid, p) for nid, p in cands if p == f"{stem}.md" or p.endswith(f"/{stem}.md")]
+        if "/" in norm:
+            exact = [nid for nid, p in cands if p == f"{norm}.md"]
+            return exact[0] if exact else None
+        if not cands:
+            return None
+        src_dir = str(Path(source_rel_path).parent).replace("\\", "/")
+        same_dir = [nid for nid, p in cands
+                    if (p.rsplit("/", 1)[0] if "/" in p else ".") == src_dir]
+        if same_dir:
+            return same_dir[0]
+        # Obsidian 은 동명 파일이 여럿이면 가장 짧은 경로를 고른다.
+        return min(cands, key=lambda c: (c[1].count("/"), len(c[1])))[0]
 
     # ── 노트 파일 생성 ────────────────────────────────────
 

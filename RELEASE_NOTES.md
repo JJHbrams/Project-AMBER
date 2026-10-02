@@ -1,5 +1,98 @@
 # Release Notes
 
+## 2026-10-02 - v1.5.24: Codex Persona, Idle-Proof MCP Sessions, Per-Conversation Memory, New Character
+
+### Highlights
+
+- **The persona now holds in Codex.** Codex received the persona only as a
+  tool result, and GPT models treat tool output as data, so they kept a polite
+  default voice. The Codex SessionStart hook now fetches the live Engram
+  context itself and injects it as a developer instruction. The hook prints
+  nothing when Engram MCP is disabled, the overlay is not running, or the
+  identity is still the unnamed default.
+- **Coming back after 30 idle minutes no longer breaks every Engram tool**
+  with `Session terminated` (#12). The server drops idle MCP sessions after 30
+  minutes; the bridge now reconnects and resends the one request the server
+  rejected before dispatch.
+- **Memory stays with its own conversation.** Session lookup was keyed per
+  server process, so one conversation could summarize or close another's
+  session. Lookup is now per Claude/Codex session ID and survives bridge
+  reconnects and overlay restarts.
+- A new default overlay character, `engram-icon`. The previous character can
+  still be selected in settings.
+
+### What Changed
+
+- `core/integrations/engram_bootstrap.py`: the Codex branch of the
+  SessionStart hook is a small PowerShell MCP client (no Python needed). It
+  calls `engram_get_context_once` with the Codex session ID, prints the
+  context as UTF-8 within Codex's hook output budget (identity, persona and
+  rules first), and deletes its MCP session. The Claude branch output is
+  unchanged.
+- `mcp_server.py`: `engram_get_context_once` takes an optional
+  `native_session_id`. `summarize`, `close`, `save_message`, `peek_stm` and
+  transcript scope resolve the caller's session through the native session ID
+  learned from hook events, then a per-connection binding. A no-argument
+  summarize/close uses the session's own scope. An open session in another
+  scope now reports `scope_mismatch` instead of `ended_session`. A
+  conversation change on the same connection fails closed and reloads the
+  persona.
+- `core/integrations/mcp_recovery_bridge.py`: an upstream `Session
+  terminated` error (code 32600, also -32600) drops the transport and
+  reconnects; the triggering request is resent once after reinitialization,
+  otherwise it returns `outcome_unknown`. Other transport losses are still
+  never replayed.
+- `overlay/native_engram_icon.py`, `resource/character/engram-icon/**`,
+  `config/overlay.yaml`: the new character and its validated sprite set.
+- KG: frontmatter `relations: [{to, rel, context}]` become typed edges;
+  `[[file#^block|alias]]` links resolve; an incremental sync re-resolves links
+  whose targets appeared later.
+- `installer/modules/07_shims.ps1`: the Codex shim's first prompt asks for a
+  bootstrap call only when the hook has not already injected the context.
+
+### Impact
+
+- Codex sessions answer in the configured persona voice from the first reply,
+  without an extra bootstrap tool call.
+- Idle sessions recover silently; no `/mcp` reconnect after a break. Bridges
+  already running from 1.5.23 keep the old behavior until the client session
+  is restarted or reconnected.
+- One conversation gets one STM session. Sessions left open by earlier
+  versions are not cleaned up yet (#13).
+- Existing 1.5.23 installs are offered this release through the overlay's
+  **check for update** menu.
+
+### Validation
+
+- Codex CLI 0.159.3, model gpt-6-sol, installed build: with Engram enabled the
+  hook injected one developer message, the model made no
+  `engram_get_context_once` call and replied in the persona voice; with
+  `mcp_servers.engram.enabled=false` the hook printed nothing and the reply
+  was the default polite voice. The hook-created STM session carried the
+  Codex session ID.
+- A/B before the change: the same persona as a tool result gave the polite
+  default voice (one run skipped the tool call entirely); as a developer
+  instruction it gave the persona voice.
+- Installed runtime: after an overlay restart, a no-argument
+  `engram_summarize_session` hit the caller's own session; a fresh Claude
+  session produced exactly one STM session with its native ID.
+- Tests: session rebind (38), Codex hook renderer and runtime against a fake
+  MCP server, native-session binding, and bridge replay suites pass; 160
+  tests across the affected files, no new failures against the 1.5.23
+  baseline. Two independent acceptance audits passed the code.
+- Release build: `build-installer.ps1 -Release` (full build, full smoke).
+- Not yet exercised at runtime: the bridge's resend after a real 30-minute
+  idle expiry (covered by unit tests against the SDK's exact error shape).
+
+### Files
+
+- `core/integrations/engram_bootstrap.py`, `installer/modules/07_shims.ps1`
+- `mcp_server.py`, `core/integrations/mcp_recovery_bridge.py`
+- `overlay/native_engram_icon.py`, `overlay/character.py`, `overlay/config.py`,
+  `overlay/settings_window.py`, `config/overlay.yaml`,
+  `resource/character/engram-icon/**`
+- KG sync modules and tests under `test/`
+
 ## 2026-10-01 - v1.5.23: MCP Auto-Reconnect, UTF-8 Bridge, AMBER Launcher, Faster Builds
 
 ### Highlights

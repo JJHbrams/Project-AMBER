@@ -57,6 +57,7 @@ EXCLUDED_PARTS = {
     "target",
     "gen",
 }
+RUNTIME_ASSET_EXCLUDED_SUFFIXES = {".ppt", ".pptx", ".doc", ".docx", ".xls", ".xlsx"}
 
 
 def _hash_file(path: Path) -> str:
@@ -115,7 +116,7 @@ def input_files(root: Path) -> list[Path]:
 
 def input_hashes(root: Path) -> dict[str, str]:
     return {
-        path.relative_to(root).as_posix(): _hash_file(path)
+        path.relative_to(root).as_posix(): app_payload.hash_source(path)
         for path in input_files(root)
     }
 
@@ -221,6 +222,34 @@ def _diff(baseline: dict[str, str], current: dict[str, str]) -> list[str]:
 def _toc_from_build_dir(root: Path) -> dict[str, Any]:
     path = root / "build" / app_payload.TOC_NAME
     return app_payload.load_toc(path) if path.is_file() else app_payload.empty_toc()
+
+
+def _runtime_asset_sources(root: Path) -> set[str]:
+    directory = Path(root) / "resource" / "character"
+    if not directory.is_dir():
+        return set()
+    return {
+        path.relative_to(root).as_posix()
+        for path in directory.rglob("*")
+        if path.is_file() and _is_allowed(Path(root), path)
+        and not path.name.startswith("~$")
+        and path.suffix.lower() not in RUNTIME_ASSET_EXCLUDED_SUFFIXES
+    }
+
+
+def _missing_runtime_asset_sources(root: Path, toc: dict[str, Any]) -> list[str]:
+    declared = {str(entry.get("source", "")) for entry in toc.get("datas", [])}
+    return sorted(_runtime_asset_sources(root) - declared)
+
+
+def _missing_runtime_asset_files(artifact_dir: Path, toc: dict[str, Any]) -> list[str]:
+    contents = app_payload.internal_dir(Path(artifact_dir))
+    missing = []
+    for entry in toc.get("datas", []):
+        source = str(entry.get("source", ""))
+        if source.startswith("resource/character/") and not (contents / entry["dest"]).is_file():
+            missing.append(source)
+    return sorted(missing)
 
 
 def _pe_versions(artifact_dir: Path) -> dict[str, str]:
@@ -417,6 +446,16 @@ def validate_build(
     if model_section.get("manifest") != _read_json(model_manifest_path):
         return False, "embedded model metadata changed"
     app_section = manifest.get("app") or {}
+    try:
+        toc = app_payload.load_toc(app_section.get("toc"))
+    except ValueError as exc:
+        return False, f"app TOC unusable: {exc}"
+    missing_sources = _missing_runtime_asset_sources(root, toc)
+    if missing_sources:
+        return False, f"build manifest missing runtime asset entries: {missing_sources[0]}"
+    missing_files = _missing_runtime_asset_files(artifact_dir, toc)
+    if missing_files:
+        return False, f"artifact missing runtime asset files: {missing_files[0]}"
     files = app_section.get("payload_files") or []
     recorded = app_section.get("payload_digest") or ""
     if files and recorded:
@@ -496,6 +535,9 @@ def _plan(root: Path, artifact_dir: Path, model_manifest_path: Path) -> dict[str
         reasons.append(f"app TOC unusable: {exc}")
     if not toc["pure"]:
         reasons.append("app TOC missing or empty in build manifest")
+    missing_runtime_files = _missing_runtime_asset_files(artifact_dir, toc)
+    if missing_runtime_files:
+        reasons.append(f"artifact missing runtime asset files: {missing_runtime_files[0]}")
     files = app_payload.payload_files(toc)
     recorded_digest = app_section.get("payload_digest") or ""
     if files and recorded_digest:
@@ -567,7 +609,7 @@ def _plan(root: Path, artifact_dir: Path, model_manifest_path: Path) -> dict[str
     if bridge_rebuild:
         reasons.append("bridge closure or executable changed")
 
-    if not (app_changed or removed or version_changed or restamp or bridge_rebuild):
+    if not (app_changed or added or removed or version_changed or restamp or bridge_rebuild):
         plan["build"] = "reuse"
         plan["reasons"] = ["artifact matches the working tree"]
         plan["smoke"] = app_payload.select_smokes(root, new_toc, [])

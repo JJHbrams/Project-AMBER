@@ -112,7 +112,9 @@ def build_bootstrap_directive(
     if caller == "Codex":
         cwd_arg = f", cwd:'{cwd}'" if cwd else ""
         return (
-            "Before answering the first user message of this session (greetings included), call "
+            "Before answering the first user message of this session (greetings included), check whether "
+            "the engram context was already injected at session start (a line saying the session hook "
+            "already loaded it). If it was, do NOT call engram_get_context_once. Otherwise call "
             f"tools.mcp__engram__engram_get_context_once({{caller:'Codex', scope_key:'{scope_key}'{cwd_arg}}}) "
             "exactly once. Call it directly: Codex has no ToolSearch step. "
             "If the engram tool is not available, skip silently. "
@@ -153,6 +155,170 @@ def bubble_bootstrap_prompt(cwd: str, *, caller: str = "claude-code") -> str:
 
 # ── 전역 SessionStart hook ───────────────────────────────────────────────
 
+# Codex 는 도구 결과(tool result)를 낮은 권위의 데이터로 취급한다 — get_context_once 의 결과로
+# 받은 페르소나는 존댓말 기본값에 눌렸고(gpt-6-sol A/B), 어떤 실행은 도구를 아예 부르지 않았다.
+# hook 출력 채널은 더 높은 권위로 들어가므로, Codex 는 hook 이 직접 컨텍스트를 받아 찍는다.
+# 첫 글자가 '[' 나 '{' 이면 Codex 가 JSON 으로 보고 파싱하다 실패해 출력을 통째로 버린다(실측).
+# Codex 는 hook 출력이 약 2.5k 토큰(UTF-8 바이트/4 로 셈)을 넘으면 가운데를 잘라낸다(실측: 12.6KB →
+# 3119 토큰, 658 토큰 삭제). 한글은 글자당 3바이트라 보수적으로 8800바이트(≈2200 토큰)에 맞춘다.
+CODEX_HOOK_MAX_BYTES = 8800
+CODEX_HOOK_LOADED_LINE = (
+    "Engram session hook: the engram context below was already loaded by the session hook. "
+    "Do NOT call engram_get_context_once in this session; apply the identity, persona and rules "
+    "below from your first reply."
+)
+
+# PowerShell 5.1 호환(ASCII 전용). 실패/비활성/신원 없음은 모두 "아무것도 찍지 않고 exit 0".
+# 파이썬이 없는 설치본에서도 돌아야 해서 MCP streamable-HTTP 를 직접 말한다.
+_CODEX_HOOK_FETCH_PS = r"""    $ErrorActionPreference = 'Stop'
+    try {
+        $sw = [Diagnostics.Stopwatch]::StartNew()
+        $codexHome = $env:CODEX_HOME
+        if ([string]::IsNullOrWhiteSpace($codexHome)) { $codexHome = Join-Path $env:USERPROFILE '.codex' }
+        $cfgPath = Join-Path $codexHome 'config.toml'
+        if (-not (Test-Path -LiteralPath $cfgPath)) { exit 0 }
+        $cfg = [IO.File]::ReadAllText($cfgPath, [Text.Encoding]::UTF8)
+        $sec = [regex]::Match($cfg, '(?ms)^[ \t]*\[mcp_servers\.("?)engram\1\][ \t]*(?:#[^\r\n]*)?\r?\n(?<body>.*?)(?=^[ \t]*\[|\z)')
+        if (-not $sec.Success) { exit 0 }
+        $body = $sec.Groups['body'].Value
+        if ($body -match '(?m)^[ \t]*"?enabled"?[ \t]*=[ \t]*false\b') { exit 0 }
+        # A per-run override (codex -c mcp_servers.engram.enabled=false) is not in config.toml;
+        # it only shows on the codex process command line, so look up the ancestor chain.
+        try {
+            $procs = @{}
+            foreach ($pr in (Get-CimInstance Win32_Process -Property ProcessId,ParentProcessId,CommandLine -OperationTimeoutSec 1)) { $procs[[int]$pr.ProcessId] = $pr }
+            $walk = [int]$PID
+            for ($i = 0; $i -lt 8 -and $procs.ContainsKey($walk); $i++) {
+                $pr = $procs[$walk]
+                if ([string]$pr.CommandLine -match 'mcp_servers\.["'']?engram["'']?\.enabled\s*=\s*["'']?false') { exit 0 }
+                $walk = [int]$pr.ParentProcessId
+            }
+        } catch { }
+        $url = ''
+        $um =[regex]::Match($body, '--upstream-url"?\s*[=,]?\s*"?(?<u>http://[^"\s,\]]+)')
+        if (-not $um.Success) { $um = [regex]::Match($body, '(?m)^[ \t]*"?url"?[ \t]*=[ \t]*"(?<u>[^"]+)"') }
+        if ($um.Success) { $url = $um.Groups['u'].Value } else { $url = 'http://127.0.0.1:17385/mcp' }
+        if ($url -notmatch '^http://(127\.0\.0\.1|localhost|\[::1\]):\d+/mcp/?$') {
+            Write-Output "__CODEX_DIRECTIVE__"
+            exit 0
+        }
+        # Budget 4800 ms; every call but the final DELETE leaves $Reserve ms so the DELETE still fits.
+        function Invoke-Mcp([string]$Method, $Payload, [hashtable]$Headers, [int]$TimeoutMs, [int]$Reserve = 300) {
+            $left = 4800 - $Reserve - [int]$sw.ElapsedMilliseconds
+            if ($left -lt 150) { throw 'budget' }
+            if ($TimeoutMs -gt $left) { $TimeoutMs = $left }
+            $req = [System.Net.HttpWebRequest]::Create($url)
+            $req.Method = $Method
+            $req.Proxy = $null
+            $req.Timeout = $TimeoutMs
+            $req.ReadWriteTimeout = $TimeoutMs
+            $req.KeepAlive = $false
+            $req.ServicePoint.Expect100Continue = $false
+            $req.Accept = 'application/json, text/event-stream'
+            foreach ($k in $Headers.Keys) { $req.Headers[$k] = $Headers[$k] }
+            if ($null -ne $Payload) {
+                $bytes = [Text.Encoding]::UTF8.GetBytes(($Payload | ConvertTo-Json -Depth 6 -Compress))
+                $req.ContentType = 'application/json'
+                $req.ContentLength = $bytes.Length
+                $rs = $req.GetRequestStream(); $rs.Write($bytes, 0, $bytes.Length); $rs.Close()
+            }
+            $resp = $req.GetResponse()
+            try {
+                $sr = New-Object IO.StreamReader($resp.GetResponseStream(), [Text.Encoding]::UTF8)
+                $text = $sr.ReadToEnd()
+                return @{ Text = $text; Session = [string]$resp.Headers['Mcp-Session-Id'] }
+            } finally { $resp.Close() }
+        }
+        function Read-RpcReply([string]$Text) {
+            $t = $Text.Trim()
+            if ($t.StartsWith('{')) { return ($t | ConvertFrom-Json) }
+            $found = $null
+            foreach ($line in ($t -split "\r?\n")) {
+                if ($line.StartsWith('data:')) {
+                    $obj = $line.Substring(5).Trim() | ConvertFrom-Json
+                    if ($null -ne $obj.result -or $null -ne $obj.error) { $found = $obj }
+                }
+            }
+            return $found
+        }
+        function Get-ToolText($Reply) {
+            if ($null -eq $Reply -or $null -ne $Reply.error -or $null -eq $Reply.result) { return $null }
+            if ($Reply.result.isError -eq $true) { return $null }
+            $parts = @()
+            foreach ($c in @($Reply.result.content)) { if ($c.type -eq 'text') { $parts += [string]$c.text } }
+            if ($parts.Count -eq 0) { return $null }
+            return ($parts -join "`n")
+        }
+        # Codex cuts the MIDDLE out of hook output above ~2.5k tokens (it counts bytes/4). Keep the
+        # identity, persona and directives first; drop low-priority sections that do not fit.
+        function Limit-Context([string]$Text, [int]$Budget) {
+            $enc = [Text.Encoding]::UTF8
+            if ($enc.GetByteCount($Text) -le $Budget) { return $Text }
+            $chunks = [regex]::Split($Text, '(?m)^(?=[ \t]*(?:\[(?:STM|examples|themes|persona|\uC5F0\uC18D\uCCB4|\uC9C0\uCE68\|\uAC15\uC81C)\]|<ctx:))')
+            $out = ''
+            $low = @()
+            foreach ($c in $chunks) {
+                if ($c -match '^[ \t]*(\[examples\]|<ctx:)') { $low += $c } else { $out += $c }
+            }
+            $rem = $Budget - $enc.GetByteCount($out)
+            foreach ($c in $low) {
+                $b = $enc.GetByteCount($c)
+                if ($b -le $rem) { $out += $c; $rem -= $b; continue }
+                if ($c -match '^\[examples\]') {
+                    $acc = ''
+                    foreach ($it in ($c -split '(?:\r?\n){2,}')) {
+                        if ($it -match '(?m)^situational_humor:') { $it = ($it -split '(?m)^situational_humor:')[0].TrimEnd() }
+                        if ($it.Length -eq 0) { continue }
+                        $cand = $acc + $it + "`n`n"
+                        if ($enc.GetByteCount($cand) -gt $rem) { break }
+                        $acc = $cand
+                    }
+                    $sh = [regex]::Match($c, '(?m)^situational_humor:[^\r\n]*').Value
+                    if ($sh) { $acc += $sh + "`n" }
+                    if ($acc.Length -gt 0 -and $enc.GetByteCount($acc) -le $rem) { $out += $acc; $rem -= $enc.GetByteCount($acc) }
+                }
+            }
+            return $out
+        }
+        $init = @{ jsonrpc = '2.0'; id = 1; method = 'initialize'; params = @{
+            protocolVersion = '2025-03-26'; capabilities = @{}
+            clientInfo = @{ name = 'engram-sessionstart-hook'; version = '1' } } }
+        $r = Invoke-Mcp 'POST' $init @{} 1500
+        $sid = $r.Session
+        if ([string]::IsNullOrEmpty($sid)) { exit 0 }
+        $hdr = @{ 'Mcp-Session-Id' = $sid }
+        $ver = (Read-RpcReply $r.Text).result.protocolVersion
+        if ($ver) { $hdr['MCP-Protocol-Version'] = [string]$ver }
+        $ctxText = $null
+        try {
+            [void](Invoke-Mcp 'POST' @{ jsonrpc = '2.0'; method = 'notifications/initialized' } $hdr 1000)
+            $args1 = [ordered]@{ caller = 'Codex'; scope_key = 'overlay'; cwd = $dir }
+            $withNative = ($sessionId -match '^[A-Za-z0-9_.:-]{1,128}$')
+            if ($withNative) { $args1['native_session_id'] = $sessionId }
+            $call = @{ jsonrpc = '2.0'; id = 2; method = 'tools/call'; params = @{ name = 'engram_get_context_once'; arguments = $args1 } }
+            # Sent exactly once: a timed-out call may still have run on the server, and a retry would
+            # orphan a second STM session. Servers without native_session_id ignore the extra argument.
+            $ctxText = Get-ToolText (Read-RpcReply (Invoke-Mcp 'POST' $call $hdr 3000).Text)
+        } finally {
+            try { [void](Invoke-Mcp 'DELETE' $null $hdr 500 0) } catch {}
+        }
+        if ([string]::IsNullOrWhiteSpace($ctxText)) { exit 0 }
+        # Empty-DB / default-seed guard: never print a nameless or uninitialized persona.
+        if ($ctxText -match 'IDENTITY_NAME_UNSET|PERSONA_UNINITIALIZED') { exit 0 }
+        if ($ctxText.TrimStart().StartsWith('[engram]') -or $ctxText.Length -lt 200) { exit 0 }
+        $head = "__LOADED_LINE__`n`n"
+        $tail = "`n`n__TITLE_DIRECTIVE__`n"
+        $room = __MAX_BYTES__ - [Text.Encoding]::UTF8.GetByteCount($head + $tail)
+        $out = $head + (Limit-Context $ctxText.TrimEnd() $room) + $tail
+        $bytes = (New-Object Text.UTF8Encoding($false)).GetBytes($out)
+        $stdout = [Console]::OpenStandardOutput()
+        $stdout.Write($bytes, 0, $bytes.Length)
+        $stdout.Flush()
+    } catch { }
+    exit 0
+"""
+
+
 def _render_hook_script() -> str:
     """SessionStart hook 이 실행하는 PowerShell 스크립트 본문.
 
@@ -166,20 +332,34 @@ def _render_hook_script() -> str:
     # transcript_path 로 가린다 — Codex 는 sessions\...\rollout-*.jsonl 이다. 환경변수는
     # 쓰지 않는다: Claude 안에서 띄운 Codex 는 CLAUDECODE 까지 상속받는다.
     claude_directive = build_bootstrap_directive(cwd="$dir")
+    #
+    # Codex 분기는 호출 지시문 대신 hook 이 직접 컨텍스트를 받아 찍는다(CODEX_HOOK_* 참고).
+    # 원격/비루프백 엔드포인트처럼 hook 이 직접 받을 수 없는 구성만 예전 호출 지시문을 낸다.
     codex_directive = build_bootstrap_directive(caller="Codex", cwd="$dir")
+    fetch = (
+        _CODEX_HOOK_FETCH_PS
+        .replace("__CODEX_DIRECTIVE__", codex_directive)
+        .replace("__MAX_BYTES__", str(CODEX_HOOK_MAX_BYTES))
+        .replace("__LOADED_LINE__", CODEX_HOOK_LOADED_LINE.replace('"', "'"))
+        .replace("__TITLE_DIRECTIVE__", session_title_directive().replace('"', "'"))
+    )
     return (
         "# engram SessionStart hook — Engram Overlay 가 자동 생성/관리한다.\n"
         "# 설정 'session.auto_inject' 를 켜면 등록되고, 끄면 제거된다. 직접 편집 금지.\n"
         "$dir = (Get-Location).Path\n"
         "$provider = 'claude'\n"
+        "$sessionId = ''\n"
         "try {\n"
         "    if ([Console]::IsInputRedirected) {\n"
         "        $hook = [Console]::In.ReadToEnd() | ConvertFrom-Json -ErrorAction Stop\n"
-        "        if ([string]$hook.transcript_path -match '[\\\\/]rollout-[^\\\\/]*\\.jsonl$') { $provider = 'codex' }\n"
+        "        if ([string]$hook.transcript_path -match '[\\\\/]rollout-[^\\\\/]*\\.jsonl$') {\n"
+        "            $provider = 'codex'\n"
+        "            $sessionId = [string]$hook.session_id\n"
+        "        }\n"
         "    }\n"
         "} catch {}\n"
         "if ($provider -eq 'codex') {\n"
-        f'    Write-Output "{codex_directive}"\n'
+        f"{fetch}"
         "} else {\n"
         f'    Write-Output "{claude_directive}"\n'
         "}\n"

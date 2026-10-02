@@ -56,7 +56,12 @@ from core.identity import (
 from core.identity.examples import AUTO_MAX_PAIR_CHARS, has_room_for_tag, tag_capacity
 from core.identity.mining import mine_candidates
 from core.memory import save_message, save_memory, search_memories, search_memory_hits, list_memories, upsert_working_memory
-from core.memory.store import set_session_journal_provenance, session_has_external_journal_eligibility
+from core.memory.store import (
+    set_session_journal_provenance,
+    session_has_external_journal_eligibility,
+    resolve_session_id_by_native,
+    _NATIVE_SESSION_LOCK,
+)
 from core.identity import add_curiosity, get_pending_curiosities, address_curiosity, dismiss_curiosity
 from core.tutorial import (
     get_tutorial_status,
@@ -255,6 +260,14 @@ async def engram_report_session_project(project_name: str | None = None, cwd: st
                                    source=3 if project_name is not None else 1)
 
 
+async def _remember_native_off_loop(context, event, agent_id, native_session_id, result) -> None:
+    # 세션 연속성 보조 경로다. 실패가 hook 응답을 막으면 안 된다(원문 id 는 로그에 남기지 않는다).
+    try:
+        await asyncio.to_thread(_remember_connection_native, context, event, agent_id, native_session_id, result)
+    except Exception:
+        pass
+
+
 @engramMCP.tool()
 async def engram_report_claude_event(event: str, turn_id: str | None = None,
                                     agent_id: str | None = None,
@@ -269,9 +282,11 @@ async def engram_report_claude_event(event: str, turn_id: str | None = None,
     Non-root agent events are ignored. Never call this tool to infer work from
     ordinary MCP activity; use Claude's opt-in native mcp_tool hooks.
     """
+    context = engramMCP.get_context()
     result = await asyncio.to_thread(_mcp_presence.report_claude_event,
-                                    engramMCP.get_context(), event, turn_id,
+                                    context, event, turn_id,
                                     agent_id, tool_name, tool_use_id, native_session_id)
+    await _remember_native_off_loop(context, event, agent_id, native_session_id, result)
     # Claude's native hook parser reads text, not our diagnostic structure.
     # Keep text strictly in the documented non-blocking hook JSON shape.
     hook_output = {"suppressOutput": True}
@@ -295,9 +310,11 @@ async def engram_report_codex_event(event: str, turn_id: str,
     hashed for safe title restoration. No prompt, transcript,
     output or tool input. Uses this existing MCP connection only.
     """
+    context = engramMCP.get_context()
     result = await asyncio.to_thread(_mcp_presence.report_codex_event,
-                                    engramMCP.get_context(), event, turn_id,
+                                    context, event, turn_id,
                                     tool_name, tool_use_id, native_session_id, agent_id)
+    await _remember_native_off_loop(context, event, agent_id, native_session_id, result)
     # Codex rejects suppressOutput on PreToolUse. Empty JSON is a successful
     # non-blocking hook; only the documented title context is model-visible.
     output = ({'hookSpecificOutput': result['hookSpecificOutput']}
@@ -330,7 +347,13 @@ _CONTEXT_ONCE_KEYS: "OrderedDict[str, tuple[int | None, float]]" = OrderedDict()
 _CONTEXT_ONCE_MAX = 500
 _CONTEXT_ONCE_TTL_SECONDS = 1800  # 30분: 같은 세션 내 재호출은 dedupe, idle 이후 새 세션은 재초기화
 _CONTEXT_ONCE_LOCK = threading.RLock()
-_FINGERPRINT_TO_SESSION: "dict[str, int]" = {}  # fingerprint → session_id (MCP 연결 단위 자동 resolve용)
+# 이름은 옛 process fingerprint 시절 그대로지만 키는 이제 MCP 연결 키("conn:<id>")다.
+# 프로세스 단위 키로 두면 마지막에 bootstrap 한 대화가 모든 연결의 세션이 된다(교차 오염).
+_FINGERPRINT_TO_SESSION: "OrderedDict[str, int]" = OrderedDict()  # 연결 키 → bootstrap 이 만든 session_id
+# 연결 키 → Claude/Codex native session id. hook 이 같은 MCP 연결로 보고할 때만 채운다.
+# 원문 id 이므로 로그·응답에 절대 내지 않는다. 재연결/재시작 후엔 비고, 다음 hook 이벤트가 다시 채운다.
+_CONN_TO_NATIVE: "OrderedDict[str, str]" = OrderedDict()
+_CONNECTION_MAP_MAX = 1000
 _TUTORIAL_NOTICE_KEYS: "OrderedDict[str, None]" = OrderedDict()
 _TUTORIAL_NOTICE_MAX = 1000
 _TUTORIAL_NOTICE_LOCK = threading.Lock()
@@ -686,14 +709,179 @@ def _invalidate_session_bindings(session_id: int) -> None:
     clear_situational_humor_state(session_id)
 
 
+def _bind_connection_session(connection_key: str, session_id: int) -> None:
+    """연결 키에 bootstrap 세션을 묶는다(크기 제한)."""
+    if not connection_key or not session_id:
+        return
+    with _CONTEXT_ONCE_LOCK:
+        _FINGERPRINT_TO_SESSION[connection_key] = int(session_id)
+        _FINGERPRINT_TO_SESSION.move_to_end(connection_key)
+        while len(_FINGERPRINT_TO_SESSION) > _CONNECTION_MAP_MAX:
+            _FINGERPRINT_TO_SESSION.popitem(last=False)
+
+
+def _open_session_for_native(native_session_id: str) -> int:
+    """native id 를 가진 열린 세션 id. 조회 전용 — 세션을 만들지 않는다."""
+    native = str(native_session_id or "").strip()
+    if not native:
+        return 0
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            "SELECT id FROM sessions WHERE native_session_id=? AND ended_at IS NULL "
+            "ORDER BY started_at DESC, id DESC LIMIT 1",
+            (native,),
+        ).fetchone()
+    finally:
+        conn.close()
+    return int(row["id"]) if row else 0
+
+
+def _session_native_id(session_id: int) -> str:
+    conn = get_connection()
+    try:
+        row = conn.execute("SELECT native_session_id FROM sessions WHERE id=?", (session_id,)).fetchone()
+    finally:
+        conn.close()
+    return str(row["native_session_id"] or "") if row else ""
+
+
+def _attach_native_to_session(session_id: int, native_session_id: str) -> bool:
+    """세션의 native_session_id 가 비어 있고 다른 열린 세션이 그 id 를 갖지 않을 때만 채운다."""
+    native = str(native_session_id or "").strip()
+    if not native or not session_id:
+        return False
+    with _NATIVE_SESSION_LOCK:
+        conn = get_connection()
+        try:
+            row = conn.execute(
+                "SELECT native_session_id, ended_at FROM sessions WHERE id=?", (session_id,)
+            ).fetchone()
+            if not row or row["ended_at"]:
+                return False
+            if row["native_session_id"]:
+                return row["native_session_id"] == native
+            owner = conn.execute(
+                "SELECT 1 FROM sessions WHERE native_session_id=? AND ended_at IS NULL AND id<>? LIMIT 1",
+                (native, session_id),
+            ).fetchone()
+            if owner:
+                return False
+            with conn:
+                conn.execute("UPDATE sessions SET native_session_id=? WHERE id=?", (native, session_id))
+            return True
+        finally:
+            conn.close()
+
+
+def _resolve_connection_session(
+    ctx: Context | None,
+    explicit_id: int = 0,
+    *,
+    create_by_native: bool = False,
+    scope_key: str = "",
+) -> tuple[int, str]:
+    """이 호출이 가리키는 세션 id 와 출처를 돌려준다. 못 찾으면 (0, "").
+
+    순서: (a) 명시 session_id -> (b) 연결의 native id 로 연 세션 조회 ->
+    (c) 이 연결의 bootstrap 바인딩. 프로세스 공용 키는 보지 않는다.
+    (d) scope 기반 fallback 은 호출부가 각자 이어간다.
+    create_by_native 는 쓰기 도구(save_message)만 켠다 — 조회 도구가 세션을 만들면 안 된다.
+    """
+    if explicit_id:
+        return int(explicit_id), "explicit"
+    connection_key = _context_once_connection_key(ctx)
+    if not connection_key:
+        return 0, ""
+    with _CONTEXT_ONCE_LOCK:
+        native = _CONN_TO_NATIVE.get(connection_key, "")
+        bound = int(_FINGERPRINT_TO_SESSION.get(connection_key, 0) or 0)
+    if native:
+        session_id = _open_session_for_native(native)
+        if session_id:
+            return session_id, "native"
+    if bound:
+        # 바인딩 세션이 다른 대화의 native id 를 갖고 있으면(/clear, 새 대화) 쓰지 않는다 - fail closed.
+        bound_native = _session_native_id(bound)
+        if not bound_native or bound_native == native:
+            return bound, "binding"
+    if native and create_by_native:
+        if not scope_key and bound:
+            scope_key = _adopt_implicit_scope(bound, "binding", "", "")
+        session_id = resolve_session_id_by_native(native, scope_key or None)
+        if session_id:
+            return int(session_id), "native_created"
+    return 0, ""
+
+
+def _remember_connection_native(
+    ctx: Context | None, event: str, agent_id: str | None,
+    native_session_id: str | None, result: dict,
+) -> None:
+    """root hook 이벤트가 받아들여졌을 때만 연결 -> native id 를 기억한다."""
+    native = str(native_session_id or "").strip()
+    if not native or agent_id not in (None, "") or str(event or "").startswith("Subagent"):
+        return
+    if isinstance(result, dict) and result.get("reason") == "native_identity_conflict":
+        # presence 는 transport 를 첫 native 에 고정한다. 같은 연결에서 id 가 바뀌었다면(/clear, 새 대화)
+        # 이전 대화의 매핑을 믿으면 안 된다 - 이 연결의 기억을 버려 fail closed.
+        connection_key = _context_once_connection_key(ctx)
+        with _CONTEXT_ONCE_LOCK:
+            if connection_key and _CONN_TO_NATIVE.get(connection_key, native) != native:
+                _CONN_TO_NATIVE.pop(connection_key, None)
+                _FINGERPRINT_TO_SESSION.pop(connection_key, None)
+                # context-once 캐시 키 끝에 |conn:<id> 가 붙는다. 남기면 새 대화가 "already initialized" 를 맞는다.
+                for cache_key in [k for k in _CONTEXT_ONCE_KEYS if k.endswith("|" + connection_key)]:
+                    _CONTEXT_ONCE_KEYS.pop(cache_key, None)
+        return
+    # 'overlay_unavailable' 은 native 바인딩 검사를 통과한 뒤의 전달 실패라 신원은 유효하다.
+    if not isinstance(result, dict) or not (result.get("accepted") or result.get("reason") == "overlay_unavailable"):
+        return
+    connection_key = _context_once_connection_key(ctx)
+    if not connection_key:
+        return
+    with _CONTEXT_ONCE_LOCK:
+        previous = _CONN_TO_NATIVE.get(connection_key)
+        _CONN_TO_NATIVE[connection_key] = native
+        _CONN_TO_NATIVE.move_to_end(connection_key)
+        while len(_CONN_TO_NATIVE) > _CONNECTION_MAP_MAX:
+            _CONN_TO_NATIVE.popitem(last=False)
+        bound = int(_FINGERPRINT_TO_SESSION.get(connection_key, 0) or 0)
+    if previous != native and bound:
+        # bootstrap 이 native id 를 모르던 연결: 첫 보고에서 그 세션에 id 를 물린다.
+        _attach_native_to_session(bound, native)
+
+
+def _valid_explicit_native(native_session_id: str) -> str:
+    """호출자가 직접 넘긴 native id. presence 와 같은 검증을 통과하지 못하면 빈 문자열."""
+    native = str(native_session_id or "").strip()
+    if not native:
+        return ""
+    from core.integrations.session_title_cache import valid_identity
+
+    return native if valid_identity(native) else ""
+
+
+def _attach_connection_native(connection_key: str, session_id: int, explicit_native: str = "") -> None:
+    """연결(또는 호출자가 명시한) native id 를 새로 만든 세션에 물린다(비어 있을 때만).
+
+    연결이 이미 아는 native id 가 있으면 그것이 우선이다 — 명시값은 증명되지 않은 입력이다.
+    """
+    if not session_id:
+        return
+    native = ""
+    if connection_key:
+        with _CONTEXT_ONCE_LOCK:
+            native = _CONN_TO_NATIVE.get(connection_key, "")
+    native = native or explicit_native
+    if native:
+        _attach_native_to_session(int(session_id), native)
+
+
 def _resolved_context_session_key(ctx: Context | None) -> int | None:
     """Use a stateful key only when the caller is already bound unambiguously."""
-    fingerprint = _context_session_fingerprint(ctx)
-    if not fingerprint:
-        return None
-    with _CONTEXT_ONCE_LOCK:
-        session_id = _FINGERPRINT_TO_SESSION.get(fingerprint)
-    if session_id is not None and _session_is_open(session_id):
+    session_id, _source = _resolve_connection_session(ctx)
+    if session_id and _session_is_open(session_id):
         return session_id
     return None
 
@@ -764,7 +952,9 @@ def _session_is_ended(session_id: int, scope_key: str = "") -> bool:
 
 
 def _rebind_continuation(fingerprint: str, session_id: int, scope_key: str, cache_key: str = "") -> int:
-    """Replace a stale implicit client binding with an explicitly linked session."""
+    """Replace a stale implicit connection binding with an explicitly linked session.
+
+    ``fingerprint`` 인자는 이제 연결 키("conn:<id>")다."""
     with _CONTEXT_ONCE_LOCK:
         # A concurrent writer may have already rebound this fingerprint while
         # this caller was checking the old ended session.
@@ -773,7 +963,7 @@ def _rebind_continuation(fingerprint: str, session_id: int, scope_key: str, cach
             return existing
         session = memory_bus.start_session(scope_key=scope_key, continued_from_session_id=session_id)
         if fingerprint:
-            _FINGERPRINT_TO_SESSION[fingerprint] = session.session_id
+            _bind_connection_session(fingerprint, session.session_id)
         if cache_key:
             _CONTEXT_ONCE_KEYS[cache_key] = (session.session_id, time.time())
     return session.session_id
@@ -1060,8 +1250,13 @@ async def engram_get_context_once(
     ctx: Context | None = None,
     client_token: str = "",
     project_name: str | None = None,
+    native_session_id: str = "",
 ) -> str:
     """세션 단위 컨텍스트 초기화를 1회만 수행합니다.
+
+    native_session_id 는 호스트 CLI 의 대화 id(예: SessionStart hook 의 session_id)다. 주면
+    그 대화의 열린 세션을 재사용하고, 없으면 새 세션에 그 id 를 기록해 나중에 같은 대화의
+    MCP 연결이 같은 STM 세션으로 합류하게 한다. 이미 다른 id 가 있으면 덮어쓰지 않는다.
 
     같은 caller/scope/project/cwd 조합에서 재호출되면 짧은 상태 문자열만 반환하여
     반복 토큰 소모를 줄입니다. 강제 새로고침이 필요하면 engram_get_context를 직접 호출하세요.
@@ -1096,6 +1291,7 @@ async def engram_get_context_once(
     connection_key = _context_once_connection_key(ctx)
     if connection_key:
         cache_key = f"{cache_key}|{connection_key}"
+    explicit_native = _valid_explicit_native(native_session_id)
     # 같은 대화의 재호출임을 증명할 수 없으면 "already" 로 컨텍스트를 생략하지 않는다.
     # 컨텍스트는 대화마다 들어가야 하고, 중복 주입보다 누락이 훨씬 비싸다.
     same_conversation_proven = bool(client_token or connection_key)
@@ -1123,12 +1319,8 @@ async def engram_get_context_once(
                     effective_scope = scope_key or os.environ.get("ENGRAM_SCOPE_KEY") or ""
                     # 프로세스 공용 fingerprint 로 이으면 마지막에 bootstrap 한 다른 대화의
                     # 열린 세션을 넘겨받는다 — 연결 단위로 묶는다.
-                    rebind_fingerprint = (
-                        f"{session_fingerprint}|{connection_key}" if connection_key else session_fingerprint
-                    )
-                    session_id = _rebind_continuation(rebind_fingerprint, cached_sid, effective_scope, cache_key)
-                    if session_fingerprint and rebind_fingerprint != session_fingerprint:
-                        _FINGERPRINT_TO_SESSION[session_fingerprint] = session_id
+                    session_id = _rebind_continuation(connection_key, cached_sid, effective_scope, cache_key)
+                    _attach_connection_native(connection_key, session_id, explicit_native)
                     if client_token and not _bind_root_client_token(session_id, client_token):
                         return "[engram] invalid root client token."
                     _mark_trusted_root_bootstrap(session_id, caller, client_token)
@@ -1150,25 +1342,35 @@ async def engram_get_context_once(
     if reused_session_id is None:
         try:
             effective_scope = scope_key or os.environ.get("ENGRAM_SCOPE_KEY") or None
-            sess_result = _stm_post(
-                "/stm/session/start",
-                {"scope_key": effective_scope or "", "project_key": project_key or ""},
-            )
-            if sess_result and "session_id" in sess_result:
-                session_id = int(sess_result["session_id"])
+            # 이 연결이 이미 native id 를 보고했고 그 대화의 열린 세션이 있으면 새로 만들지 않는다.
+            # hook 의 transcript 캡처가 같은 대화에 이미 세션을 만들어 둔 경우 둘로 갈라지는 걸 막는다.
+            with _CONTEXT_ONCE_LOCK:
+                known_native = _CONN_TO_NATIVE.get(connection_key, "") if connection_key else ""
+            known_native = known_native or explicit_native
+            native_session = _open_session_for_native(known_native)
+            if native_session:
+                session_id = native_session
             else:
-                _parsed_keys = [project_key.strip()] if project_key.strip() else []
-                _sess = memory_bus.start_session(scope_key=effective_scope, project_keys=_parsed_keys or None)
-                session_id = _sess.session_id
+                sess_result = _stm_post(
+                    "/stm/session/start",
+                    {"scope_key": effective_scope or "", "project_key": project_key or ""},
+                )
+                if sess_result and "session_id" in sess_result:
+                    session_id = int(sess_result["session_id"])
+                else:
+                    _parsed_keys = [project_key.strip()] if project_key.strip() else []
+                    _sess = memory_bus.start_session(scope_key=effective_scope, project_keys=_parsed_keys or None)
+                    session_id = _sess.session_id
+                _attach_connection_native(connection_key, session_id, explicit_native)
             with _CONTEXT_ONCE_LOCK:
                 _CONTEXT_ONCE_KEYS[cache_key] = (session_id, now)
             if session_id and client_token and not _bind_root_client_token(session_id, client_token):
                 return "[engram] invalid root client token."
             if session_id:
                 _mark_trusted_root_bootstrap(session_id, caller, client_token)
-            # fingerprint → session_id 저장 (save_message 자동 resolve용)
-            if session_id is not None and session_fingerprint:
-                _FINGERPRINT_TO_SESSION[session_fingerprint] = session_id
+            # 연결 키 → session_id 저장 (save_message 자동 resolve용). 프로세스 공용 키로는 묶지 않는다.
+            if session_id is not None and connection_key:
+                _bind_connection_session(connection_key, session_id)
         except Exception as _e:
             import logging as _logging
 
@@ -2834,11 +3036,9 @@ async def engram_summarize_session(
     effective_cwd = cwd or os.getcwd()
     resolved_scope = resolve_scope_key(scope_key or None, cwd=effective_cwd)
     explicit = int(session_id or 0)
-    fingerprint = _context_session_fingerprint(ctx)
-    bound = int(_FINGERPRINT_TO_SESSION.get(fingerprint, 0) or 0) if fingerprint else 0
-    if explicit or bound:
-        target = explicit or bound
-    else:
+    target, _source = _resolve_connection_session(ctx, explicit)
+    resolved_scope = _adopt_implicit_scope(target, _source, scope_key, resolved_scope)
+    if not target:
         unique, ambiguous = _unique_open_session_id(resolved_scope)
         if ambiguous:
             return {"status": "ambiguous_open_session", "scope_key": resolved_scope}
@@ -2851,8 +3051,13 @@ async def engram_summarize_session(
         row = conn.execute("SELECT ended_at, scope_key FROM sessions WHERE id=?", (target,)).fetchone()
     finally:
         conn.close()
-    if not row or row["ended_at"] or row["scope_key"] != resolved_scope:
-        return {"status": "no_open_session" if not explicit else "ended_session"}
+    if not row:
+        return {"status": "unknown_session" if explicit else "no_open_session"}
+    if row["ended_at"]:
+        return {"status": "ended_session" if explicit else "no_open_session"}
+    if row["scope_key"] != resolved_scope:
+        # 열려 있지만 scope 가 다르다 — 끝난 세션이라고 말하면 거짓이다.
+        return {"status": "scope_mismatch", "session_scope_key": row["scope_key"], "scope_key": resolved_scope}
     broker = _stm_post("/stm/session/summarize", {
         "session_id": target, "scope_key": resolved_scope, "summary": summary,
         "open_intents": open_intents, "progress": progress, "cwd": effective_cwd,
@@ -2865,6 +3070,37 @@ async def engram_summarize_session(
         external_daily_dir=(str(get_cfg_value("memory.auto_checkpoint.external_daily_dir", "") or "")
                             if session_has_external_journal_eligibility(int(target)) else ""),
     )
+
+
+def _adopt_implicit_scope(target: int, source: str, scope_key: str, resolved_scope: str) -> str:
+    """연결에서 찾은 세션(native/binding)은 호출자가 scope 를 안 줬으면 그 세션의 scope 를 따른다.
+
+    cwd 에서 유도한 project:* 와 세션의 overlay 가 어긋나는 건 호출자의 실수가 아니다.
+    명시 session_id 나 명시 scope_key 는 그대로 두고 scope_mismatch 로 알린다."""
+    if not target or scope_key or source not in ("native", "binding"):
+        return resolved_scope
+    conn = get_connection()
+    try:
+        row = conn.execute("SELECT scope_key FROM sessions WHERE id=?", (target,)).fetchone()
+    finally:
+        conn.close()
+    return str(row["scope_key"]) if row and row["scope_key"] else resolved_scope
+
+
+def _close_target_failure(session_id: int) -> tuple[str, dict]:
+    """열린 세션 + scope 일치 검사에 실패한 대상이 왜 실패했는지 가른다.
+
+    열려 있는데 scope 만 다른 세션을 ended_session 이라 부르면 거짓이다."""
+    conn = get_connection()
+    try:
+        row = conn.execute("SELECT ended_at, scope_key FROM sessions WHERE id=?", (session_id,)).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        return "unknown_session", {}
+    if row["ended_at"]:
+        return "ended_session", {}
+    return "scope_mismatch", {"session_scope_key": row["scope_key"]}
 
 
 @engramMCP.tool()
@@ -2915,16 +3151,17 @@ async def engram_close_session(
     project_key = resolve_project_key(cwd=effective_cwd)
     project_label = os.path.basename(os.path.normpath(effective_cwd)) or ""
     kg_node_id = resolve_kg_node_id(project_key) if project_key else None
-    fingerprint = _context_session_fingerprint(ctx)
     explicit_id = int(session_id or 0)
-    bound_id = int(_FINGERPRINT_TO_SESSION.get(fingerprint, 0) or 0) if fingerprint else 0
+    resolved_id, _source = _resolve_connection_session(ctx, explicit_id)
+    bound_id = 0 if explicit_id else resolved_id
+    resolved_scope = _adopt_implicit_scope(resolved_id, _source, scope_key, resolved_scope)
     # 세션 행을 찾기 전에 적용한다 — 찾기에 실패해도 내용은 남아야 한다.
     applied = _apply_close_payload(
         new_narrative, persona_observations,
         example_prompt_text, example_response_text, example_prompt_kind, example_tag,
     )
 
-    def _bail(status: str) -> dict:
+    def _bail(status: str, **extra) -> dict:
         return {
             "status": status,
             "scope_key": resolved_scope,
@@ -2932,6 +3169,7 @@ async def engram_close_session(
             "salvaged_working_memory": _salvage_working_memory(
                 resolved_scope, summary, open_intents
             ),
+            **extra,
             **applied,
         }
 
@@ -2946,7 +3184,8 @@ async def engram_close_session(
         closed_session_id = unique
     if not _session_is_open(int(closed_session_id or 0), resolved_scope):
         if explicit_id or bound_id:
-            return _bail("ended_session")
+            _status, _extra = _close_target_failure(int(closed_session_id or 0))
+            return _bail(_status, **_extra)
         closed_session_id = ""
     if not closed_session_id:
         return _bail("no_open_session")
@@ -3002,12 +3241,12 @@ def engram_save_message(
     request_id를 제공하면 중복 저장이 방지됩니다 (overlay 브로커 모드)."""
     resolved_id = session_id
     resolved_from_fingerprint = False
-    # 1순위: MCP 연결 fingerprint로 자동 resolve (가장 정확)
+    fingerprint = ""
+    # 1순위: 이 MCP 연결(native id -> bootstrap 바인딩)으로 자동 resolve (가장 정확)
     if not resolved_id:
-        fingerprint = _context_session_fingerprint(ctx)
-        if fingerprint:
-            resolved_id = _FINGERPRINT_TO_SESSION.get(fingerprint, 0)
-            resolved_from_fingerprint = bool(resolved_id)
+        resolved_id, source = _resolve_connection_session(ctx, 0, create_by_native=True, scope_key=scope_key)
+        resolved_from_fingerprint = source == "binding"
+        fingerprint = _context_once_connection_key(ctx) if resolved_from_fingerprint else ""
     # 2순위: scope_key로 DB 조회 (fallback)
     if not resolved_id and scope_key:
         from core.memory import resolve_session_id_by_scope
@@ -3027,6 +3266,7 @@ def engram_save_message(
             return {"status": "error", "detail": "ended session_id"}
         if resolved_from_fingerprint and fingerprint and row:
             resolved_id = _rebind_continuation(fingerprint, int(resolved_id), str(row["scope_key"]))
+            _attach_connection_native(fingerprint, resolved_id)
         else:
             return {"status": "error", "detail": "활성 세션을 찾을 수 없습니다."}
     # Broker and direct paths receive the exact validated/rebound ID.
@@ -3061,8 +3301,7 @@ def engram_peek_stm(
     limit: 최대 메시지 수 (기본 20, 최대 50). within_minutes: 조회 시간창 (기본 120분, 최대 7일)."""
     resolved_scope = scope_key.strip()
     if not resolved_scope:
-        fingerprint = _context_session_fingerprint(ctx)
-        session_id = _FINGERPRINT_TO_SESSION.get(fingerprint, 0) if fingerprint else 0
+        session_id, _source = _resolve_connection_session(ctx)
         if session_id:
             conn = get_connection()
             row = conn.execute("SELECT scope_key FROM sessions WHERE id = ?", (session_id,)).fetchone()
@@ -3090,8 +3329,7 @@ _TRANSCRIPT_RESULT_CHARS = 64_000
 def _transcript_scope(scope_key: str, cwd: str, ctx: Context | None) -> str:
     resolved = scope_key.strip()
     if not resolved:
-        fingerprint = _context_session_fingerprint(ctx)
-        session_id = _FINGERPRINT_TO_SESSION.get(fingerprint, 0) if fingerprint else 0
+        session_id, _source = _resolve_connection_session(ctx)
         if session_id:
             conn = get_connection()
             try:
@@ -3607,6 +3845,7 @@ def _kg_sync_impl(verbose: bool = False) -> dict:
     synced = 0
     skipped = 0
     unchanged = 0
+    added_new = False
     changed_paths: set[str] = set()
     for f in iter_wiki_md_files(docs_dir):
         rel_path = str(f.relative_to(docs_dir))
@@ -3623,10 +3862,13 @@ def _kg_sync_impl(verbose: bool = False) -> dict:
         if nid:
             synced += 1
             changed_paths.add(rel_path)
+            added_new = added_new or rel_path not in existing_mtimes
         else:
             skipped += 1
 
-    kg.resolve_links(docs_dir, restrict_to_paths=changed_paths)
+    # 새 노드가 생기면 그 노드를 가리키던 기존 파일의 링크가 이제야 풀린다.
+    # 바뀐 파일만 재해석하면 대상보다 먼저 sync 된 링크는 영영 엣지가 되지 않는다.
+    kg.resolve_links(docs_dir, restrict_to_paths=None if added_new else changed_paths)
     pruned = kg.prune_missing(docs_dir)
 
     # 시맨틱 레이어도 동기화 (자체적으로 content_hash 기반 증분 재임베딩)

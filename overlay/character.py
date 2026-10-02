@@ -16,6 +16,7 @@ import yaml
 
 from overlay.bubble import geometry as bubble_geometry
 from overlay.native_bolttagu import Bolttagu2dView
+from overlay.native_engram_icon import EngramIconView
 from overlay.bolttagu_mapping import STATE_POSES
 
 from overlay.character_assets import (
@@ -474,9 +475,9 @@ class _CharacterProfile:
         stored_source_mode = str(character_cfg.get("source_mode") or "").strip().lower()
         legacy_sequence = Path(self.name).is_dir() or resolve_bundled_character_source(self.name, "sequence") is not None
         self.source_mode = stored_source_mode or ("sequence" if legacy_sequence else "static")
-        if self.source_mode not in {"static", "sequence", "sprite_grid", "native_bolttagu"}:
+        if self.source_mode not in {"static", "sequence", "sprite_grid", "native_bolttagu", "native_engram_icon"}:
             self.source_mode = "static"
-        self.native_enabled = self.source_mode == "native_bolttagu"
+        self.native_enabled = self.source_mode in {"native_bolttagu", "native_engram_icon"}
         self.set_resolution = resolve_character_set(self.set_id)
         reactions_cfg = character_cfg.get("reactions", {})
         reactions_cfg = reactions_cfg if isinstance(reactions_cfg, dict) else {}
@@ -751,7 +752,20 @@ class CharacterOverlay:
     def _create_native_view(cfg: dict, profile: _CharacterProfile) -> Bolttagu2dView | None:
         if not profile.native_enabled:
             return None
-        options = cfg.get("overlay", {}).get("character", {}).get("bolttagu", {})
+        character_cfg = cfg.get("overlay", {}).get("character", {})
+        if getattr(profile, "source_mode", "native_bolttagu") == "native_engram_icon":
+            try:
+                return EngramIconView(
+                    launcher_managed=True,
+                    face_pointer=True,
+                    show_floor=False,
+                    seed=random.randrange(233280),
+                )
+            except Exception:
+                log.warning("[overlay] native Engram icon unavailable; using retained legacy artwork", exc_info=True)
+                profile.native_enabled = False
+                return None
+        options = character_cfg.get("bolttagu", {})
         try:
             mapping = options.get("mapping_path")
             warned = False

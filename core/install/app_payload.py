@@ -34,6 +34,8 @@ VERSION_SNAPSHOT_REL = "build/engram-version.json"
 APP_SEARCH_DIRS = ("", "scripts/kg")
 BRIDGE_ENTRY = "scripts/engram_mcp_bridge.py"
 _NON_APP_PARTS = {"site-packages", "__pycache__", ".venv", ".git", "node_modules"}
+_RUNTIME_DATA_PREFIXES = ("resource/character/",)
+_RUNTIME_DATA_EXCLUDED_SUFFIXES = {".ppt", ".pptx", ".doc", ".docx", ".xls", ".xlsx"}
 
 # Closure seeds: a change inside the forward import closure of a seed requires
 # the matching frozen smoke role.  Patterns are repo-relative globs.
@@ -486,18 +488,28 @@ def resolve_toc(
             )
     data_sources = {entry["source"] for entry in new["datas"]}
     inputs: set[Path] | None = None
-    for rel in sorted(set(changed)):
+    runtime_data = {
+        path.relative_to(root).as_posix()
+        for prefix in _RUNTIME_DATA_PREFIXES
+        for path in (root / prefix).rglob("*")
+        if path.is_file() and not path.name.startswith("~$")
+        and path.suffix.lower() not in _RUNTIME_DATA_EXCLUDED_SUFFIXES
+    }
+    for rel in sorted(set(changed) | runtime_data):
         if rel in data_sources or rel.endswith(".py") or not (root / rel).is_file():
             continue
         parent = str(Path(rel).parent).replace("\\", "/")
-        if parent not in data_dirs:
+        if rel.startswith(_RUNTIME_DATA_PREFIXES):
+            dest = rel
+        elif parent in data_dirs:
+            dest = f"{data_dirs[parent]}/{Path(rel).name}"
+        else:
             continue
-        if inputs is None:
+        if inputs is None and not rel.startswith(_RUNTIME_DATA_PREFIXES):
             from core.install.overlay_manifest import input_files
 
             inputs = set(input_files(root))
-        if (root / rel) in inputs:
-            dest = f"{data_dirs[parent]}/{Path(rel).name}"
+        if rel.startswith(_RUNTIME_DATA_PREFIXES) or (root / rel) in inputs:
             new["datas"].append({"dest": dest, "source": rel})
             data_sources.add(rel)
             added.append(rel)
@@ -516,7 +528,7 @@ def bridge_closure(root: Path, toc: Mapping[str, Any]) -> dict[str, str]:
     files = graph.closure(seeds)
     files.update(entry["source"] for entry in toc.get("bridge_pure", []))
     files.update(seeds)
-    return {rel: _hash_file(root / rel) for rel in sorted(files) if (root / rel).is_file()}
+    return {rel: hash_source(root / rel) for rel in sorted(files) if (root / rel).is_file()}
 
 
 def bridge_closure_hash(closure: Mapping[str, str]) -> str:
@@ -575,6 +587,11 @@ class _ArtifactIndex:
         return f"{rel}.pyc" in zipped or f"{rel}/__init__.pyc" in zipped
 
 
+# Imported lazily by build helpers (pe_version/app_payload) that run only in the
+# build interpreter; the frozen runtime never loads them.
+BUILD_ONLY_IMPORT_ROOTS = frozenset({"PyInstaller", "pefile"})
+
+
 def unresolved_imports(artifact: Path, imports: Iterable[str]) -> list[str]:
     """External dotted imports resolvable in the build env but absent from ``artifact``.
 
@@ -584,7 +601,9 @@ def unresolved_imports(artifact: Path, imports: Iterable[str]) -> list[str]:
     return [
         name
         for name in sorted(set(imports))
-        if _env_resolvable(name) and not index.has(name)
+        if name.split(".")[0] not in BUILD_ONLY_IMPORT_ROOTS
+        and _env_resolvable(name)
+        and not index.has(name)
     ]
 
 
@@ -621,6 +640,24 @@ def _hash_file(path: Path) -> str:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+_TEXT_SOURCE_SUFFIXES = {
+    ".py", ".pyw", ".ps1", ".psm1", ".cmd", ".bat", ".spec", ".iss", ".pin",
+    ".txt", ".md", ".yml", ".yaml", ".json", ".toml", ".cfg", ".ini", ".tcl", ".css", ".html",
+}
+
+
+def hash_source(path: Path) -> str:
+    """Content hash of a build input that ignores CRLF/LF differences.
+
+    git (core.autocrlf) rewrites text files' line endings on checkout, which
+    must not look like a source change.  Binary inputs are hashed verbatim.
+    """
+    path = Path(path)
+    if path.suffix.lower() not in _TEXT_SOURCE_SUFFIXES and path.name != "VERSION":
+        return _hash_file(path)
+    return hashlib.sha256(path.read_bytes().replace(b"\r\n", b"\n")).hexdigest()
 
 
 def _replace_atomic(temp: Path, target: Path) -> None:

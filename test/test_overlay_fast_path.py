@@ -556,3 +556,20 @@ def test_noarchive_toc_recovers_app_modules_from_pyc_datas(tmp_path):
         "core.entrypoint": ("core/entrypoint.py", "core/entrypoint.pyc", False),
         "kg_watcher": ("scripts/kg/kg_watcher.py", "kg_watcher.pyc", False),
     }
+
+
+def test_source_hash_ignores_line_endings_but_not_content(tmp_path):
+    lf, crlf, other = tmp_path / "a.py", tmp_path / "b.py", tmp_path / "c.py"
+    lf.write_bytes(b"x = 1\ny = 2\n")
+    crlf.write_bytes(b"x = 1\r\ny = 2\r\n")
+    other.write_bytes(b"x = 1\ny = 3\n")
+    assert app_payload.hash_source(lf) == app_payload.hash_source(crlf)
+    assert app_payload.hash_source(lf) != app_payload.hash_source(other)
+    icon = tmp_path / "icon.ico"
+    icon.write_bytes(b"\x00\r\n\x01")
+    assert app_payload.hash_source(icon) == app_payload._hash_file(icon)
+
+
+def test_build_only_imports_never_force_a_full_build(tmp_path):
+    (tmp_path / "_internal").mkdir()
+    assert app_payload.unresolved_imports(tmp_path, ["PyInstaller.utils.win32.versioninfo", "pefile"]) == []

@@ -69,10 +69,10 @@ class DirectContextSessionTests(unittest.TestCase):
         mcp_server._FINGERPRINT_TO_SESSION.clear()
 
     def test_direct_context_recalculates_with_only_a_resolved_session_key(self):
-        mcp_server._FINGERPRINT_TO_SESSION["client:known"] = 77
+        mcp_server._FINGERPRINT_TO_SESSION["conn:known"] = 77  # 키는 프로세스 fingerprint 가 아니라 연결 키
         compose = AsyncMock(return_value="context")
         with patch.object(mcp_server, "ensure_repo_policy", return_value={}), patch.object(
-            mcp_server, "_context_session_fingerprint", return_value="client:known"
+            mcp_server, "_context_once_connection_key", return_value="conn:known"
         ), patch.object(mcp_server, "_session_is_open", return_value=True), patch.object(
             mcp_server.memory_bus, "compose_prompt_context", compose
         ), patch.object(mcp_server, "get_identity", return_value={"name": "name"}), patch.object(
@@ -86,7 +86,7 @@ class DirectContextSessionTests(unittest.TestCase):
     def test_unknown_direct_context_is_stateless(self):
         compose = AsyncMock(return_value="context")
         with patch.object(mcp_server, "ensure_repo_policy", return_value={}), patch.object(
-            mcp_server, "_context_session_fingerprint", return_value="client:unknown"
+            mcp_server, "_context_once_connection_key", return_value="conn:unknown"
         ), patch.object(mcp_server.memory_bus, "compose_prompt_context", compose), patch.object(
             mcp_server, "get_identity", return_value={"name": "name"}
         ), patch.object(mcp_server, "get_persona_status", return_value={"initialized": True}), patch.object(

@@ -706,8 +706,17 @@ def load_cfg(*, strict: bool = False, create_user_config: bool = True, migrate_n
         _USER_CONFIG_PATH.write_text(_USER_TEMPLATE, encoding="utf-8")
 
     from core.install.native_bolttagu import migrate_file, migrated_config, pending_mapping_warning
-    native_default = (cfg.get('overlay', {}).get('character', {}).get('source_mode') == 'native_bolttagu')
     original_user = _safe_load_yaml(_USER_CONFIG_PATH, strict=strict)
+    user_overlay = original_user.get('overlay', {}) if isinstance(original_user, dict) else {}
+    user_character = user_overlay.get('character', {}) if isinstance(user_overlay, dict) else {}
+    user_renderer = user_overlay.get('external_renderer', {}) if isinstance(user_overlay, dict) else {}
+    legacy_bolttagu_selection = (
+        isinstance(user_character, dict) and user_character.get('source_mode') == 'native_bolttagu'
+    ) or (
+        isinstance(user_renderer, dict)
+        and user_renderer.get('selected_renderer_id') == 'engram.bolttagu-2d'
+    )
+    native_default = legacy_bolttagu_selection
     warning = pending_mapping_warning(_USER_CONFIG_PATH, original_user) if native_default else ''
     if warning and migrate_native:
         import logging
