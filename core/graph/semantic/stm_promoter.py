@@ -352,8 +352,8 @@ def _compute_novelty(msgs: list[dict]) -> float:
     try:
         text = " ".join(m["content"][:150] for m in msgs[-8:])
         sg = get_semantic_graph()
-        conv_vec = run_sg_coro(sg.compute_query_embedding(text))
         if sg.enabled:
+            conv_vec = run_sg_coro(sg.compute_query_embedding(text))
             results = run_sg_coro(sg.episode_semantic_search(query_vec=conv_vec, top_k=3))
             if results:
                 max_sim = max(r.get("score", 0.0) for r in results)

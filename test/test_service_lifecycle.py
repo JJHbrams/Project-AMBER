@@ -110,6 +110,39 @@ class ServiceHandoverTests(unittest.TestCase):
             service_lifecycle.prepare_service_handover(cfg, ROOT, 'C:/Python/python.exe')
             self.assertEqual(request.call_args.args[0].method, 'POST')
 
+    def test_old_host_exiting_during_kill_attempt_is_not_a_failure(self):
+        # 기다림이 끝난 순간엔 살아 있었고, 강제 종료를 확인하는 사이에 스스로 끝났다.
+        cfg = {'overlay': {'stm_server_port': 29001}, 'mcp': {'http_port': 29002}, 'dashboard': {'enabled': False}}
+        with patch.object(service_lifecycle, 'listener_pid', side_effect=[777, None, 777, None, None]), \
+             patch.object(service_lifecycle, 'health', return_value={'pid': 777, 'role': 'overlay-stm'}), \
+             patch.object(process_identity, 'get_process_identity', return_value=self.identity()), \
+             patch.object(process_identity, 'list_candidate_processes', return_value=[]), \
+             patch.object(service_lifecycle, '_still_same', side_effect=[True, True, True, True, False]), \
+             patch.object(service_lifecycle.time, 'monotonic', side_effect=[0.0, 0.0, 999.0]), \
+             patch.object(service_lifecycle.time, 'sleep'), \
+             patch.object(process_identity, 'terminate_identity_exact', return_value=False) as terminate, \
+             patch.object(service_lifecycle.urllib.request, 'urlopen'):
+            # 순서: preflight · 대기 2회 · 기한 후 확인(살아있음) → kill 실패 → 재확인(이미 종료)
+            service_lifecycle.prepare_service_handover(cfg, ROOT, 'C:/Python/python.exe')
+            terminate.assert_called_once()
+
+    def test_old_host_still_alive_after_failed_kill_is_refused(self):
+        cfg = {'overlay': {'stm_server_port': 29001}, 'mcp': {'http_port': 29002}, 'dashboard': {'enabled': False}}
+        with patch.object(service_lifecycle, 'listener_pid', side_effect=[777, None, 777]), \
+             patch.object(service_lifecycle, 'health', return_value={'pid': 777, 'role': 'overlay-stm'}), \
+             patch.object(process_identity, 'get_process_identity', return_value=self.identity()), \
+             patch.object(process_identity, 'list_candidate_processes', return_value=[]), \
+             patch.object(service_lifecycle, '_still_same', return_value=True), \
+             patch.object(service_lifecycle.time, 'monotonic', side_effect=[0.0, 999.0]), \
+             patch.object(process_identity, 'terminate_identity_exact', return_value=False), \
+             patch.object(service_lifecycle.urllib.request, 'urlopen'):
+            with self.assertRaisesRegex(RuntimeError, 'did not exit'):
+                service_lifecycle.prepare_service_handover(cfg, ROOT, 'C:/Python/python.exe')
+
+    def test_handover_waits_longer_than_old_host_quit_budget(self):
+        # quit(): bubble 5 s + STM promote 15 s + tunnels/children — 20 s 로는 정상 종료도 못 기다렸다.
+        self.assertGreaterEqual(service_lifecycle.HANDOVER_TIMEOUT_SEC, 40)
+
     def test_live_parent_mcp_not_adopted_or_killed(self):
         child = dict(self.identity(), CommandLine=f'"C:/Python/python.exe" "{ROOT / "mcp_server.py"}"')
         with patch.object(service_lifecycle, 'listener_pid', return_value=777), \
@@ -130,3 +163,45 @@ class ServiceHandoverTests(unittest.TestCase):
              patch.object(process_identity, 'terminate_identity_exact', return_value=True) as terminate:
             service_lifecycle._clear_proven_orphan_mcp(cfg, ROOT)
             self.assertEqual([call.args[0]['ProcessId'] for call in terminate.call_args_list], [777, 778])
+
+
+class OrphanDashboardTests(unittest.TestCase):
+    EXE = 'C:/App/engram-overlay.exe'
+    CFG = {'mcp': {'http_port': 29002}, 'dashboard': {'enabled': True, 'port': 29003}}
+
+    def dash(self, path='C:/App/engram-dashboard.exe'):
+        return {'ProcessId': 900, 'ParentProcessId': 5, 'ExecutablePath': path,
+                'CommandLine': f'"{path}"', 'CreationDate': '2026-09-09T00:00:00Z'}
+
+    def run_clear(self, child, parent, listeners=(None, 900, 900, None)):
+        # listener_pid: mcp port, dashboard (outer check), dashboard (inner), dashboard after kill
+        feed = iter(listeners)
+        with patch.object(service_lifecycle, 'listener_pid', side_effect=lambda port: next(feed)), \
+             patch.object(process_identity, 'get_process_identity', side_effect=[child, parent]), \
+             patch.object(service_lifecycle, '_still_same', return_value=True), \
+             patch.object(service_lifecycle, '_exited_or_terminated', return_value=True) as stop:
+            try:
+                service_lifecycle._clear_proven_orphan_mcp(self.CFG, ROOT, self.EXE)
+            finally:
+                self.stop = stop
+
+    def test_verified_orphan_dashboard_terminated(self):
+        self.run_clear(self.dash(), None, listeners=(None, 900, 900, 900, None))
+        self.stop.assert_called_once()
+        self.assertEqual(self.stop.call_args.args[0]['ProcessId'], 900)
+
+    def test_live_parent_raises(self):
+        with self.assertRaises(RuntimeError):
+            self.run_clear(self.dash(), {'ProcessId': 5}, listeners=(None, 900, 900, 900))
+        self.stop.assert_not_called()
+
+    def test_foreign_exe_raises(self):
+        with self.assertRaises(RuntimeError):
+            self.run_clear(self.dash('C:/Other/engram-dashboard.exe'), None, listeners=(None, 900, 900, 900))
+        self.stop.assert_not_called()
+
+    def test_both_ports_free_returns(self):
+        with patch.object(service_lifecycle, 'listener_pid', return_value=None), \
+             patch.object(service_lifecycle, '_exited_or_terminated') as stop:
+            service_lifecycle._clear_proven_orphan_mcp(self.CFG, ROOT, self.EXE)
+            stop.assert_not_called()

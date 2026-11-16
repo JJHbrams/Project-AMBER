@@ -323,6 +323,14 @@ def get_db_root_dir() -> str:
     smoke_override = os.environ.get("ENGRAM_SMOKE_DB_DIR", "").strip()
     if smoke_override:
         return smoke_override
+    # The headless service must select its data directory before mcp_server
+    # imports this module (initialize_db runs at import time).  This is
+    # deliberately separate from ENGRAM_SMOKE_DB_DIR: service launches are a
+    # supported runtime, not a test-only escape hatch, and must not inherit an
+    # installed user's user.config.yaml database path.
+    service_override = os.environ.get("ENGRAM_SERVICE_DATA_DIR", "").strip()
+    if service_override:
+        return service_override
     for path in (_USER_CONFIG_PATH, _LEGACY_USER_CONFIG_PATH):
         loaded = _read_yaml(path)
         if not isinstance(loaded, dict):

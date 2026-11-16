@@ -1,0 +1,106 @@
+{
+  "cell": [
+    270,
+    302
+  ],
+  "feetAnchor": [
+    135,
+    270
+  ],
+  "sheets": {
+    "mnema-idle.png": [
+      0,
+      1,
+      2
+    ],
+    "mnema-waiting.png": [
+      0,
+      1,
+      2
+    ],
+    "mnema-listening.png": [
+      0,
+      1,
+      2
+    ],
+    "mnema-speaking.png": [
+      0,
+      1,
+      2
+    ],
+    "mnema-searching.png": [
+      0,
+      1,
+      2
+    ],
+    "mnema-wondering.png": [
+      0,
+      1,
+      2
+    ],
+    "mnema-writing.png": [
+      0,
+      1,
+      2
+    ],
+    "mnema-tool_use.png": [
+      0,
+      1,
+      2
+    ],
+    "mnema-executing.png": [
+      0,
+      1,
+      2
+    ],
+    "mnema-success.png": [
+      0,
+      1,
+      2
+    ],
+    "mnema-error.png": [
+      0,
+      1,
+      2
+    ],
+    "mnema-enter.png": [
+      0,
+      1,
+      2
+    ],
+    "mnema-exit.png": [
+      0,
+      1,
+      2
+    ],
+    "mnema-alert.png": [
+      0
+    ],
+    "mnema-steam.png": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19,
+      20,
+      21,
+      22,
+      23
+    ]
+  }
+}

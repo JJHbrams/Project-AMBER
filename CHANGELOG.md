@@ -4,6 +4,46 @@ All notable changes to this project are documented in this file.
 
 ## Unreleased
 
+## [1.5.25] — 2026-11-16
+
+### Added
+
+- **Mnema native character** with editable sprite mappings. The default
+  character stays `engram-icon`.
+- **Headless MCP service** (`engram_service.py`, `Dockerfile.service`): an
+  authenticated direct-ingress MCP server that runs without the overlay
+  (`docs/headless-service.md`). It is groundwork for the server/client split;
+  this release still ships only the Standalone installer.
+
+### Fixed
+
+- **The overlay died without a shutdown record.** Promotion scoring loaded the
+  embedding model (sentence-transformers, pandas, pyarrow) inside the overlay
+  process, and quitting with it loaded crashed in `arrow.dll`. Every shutdown
+  death since September happened on a quit with the model loaded. The overlay
+  role no longer computes embeddings, and the encoder refuses calls there
+  before importing anything. The start log records the host PID and the quit
+  log records whether pyarrow/pandas/torch are loaded.
+- **Orphaned MCP server, kg-watcher and dashboard blocked the next start**
+  after the overlay died. The three services are now tied to the overlay's
+  lifetime with a Windows Job Object, so they exit with it however it ends.
+  A host started by restart is not tied to the old one. A verified orphan
+  dashboard is cleared at startup.
+- **`kg_update_node` corrupted frontmatter** when the summary contained
+  `: `, backslashes, a leading `#` or newlines (broken YAML, a lost value, or
+  the DB and the file out of sync). The summary is now written through YAML
+  serialization.
+- Tool descriptions steer "what did we do last session" questions to
+  `engram_search_memories` before raw transcripts.
+- Overlay restarts that left nothing running, and a process that lingered
+  ~30 s after quit cleanup.
+- kg-watcher sync storms that held the wiki DB write lock, wiki files sharing
+  a node id being reprocessed on every sync, and duplicate-id ownership across
+  vaults.
+- MCP: expired-session rebind delay, listener recovery, connecting configured
+  MCP independently of overlay state, bounded STM handler start/stop.
+- `engram-icon` blink timing.
+
 ## [1.5.24] — 2026-10-02
 
 ### Added

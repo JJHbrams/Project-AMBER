@@ -171,6 +171,7 @@ _THOUGHT_DETAIL_VALUE_TO_DISPLAY = {
 }
 
 _CHARACTER_SOURCE_MODE_DISPLAY_TO_VALUE = {
+    "므네마": "native_mnema",
     "Engram 아이콘": "native_engram_icon",
     "볼따구-의사": "native_bolttagu",
     "스프라이트 그리드": "sprite_grid",
@@ -432,6 +433,8 @@ def validate_sprite_grid(
 def validate_character_source(mode: object, character_path: object, grid_values: tuple[object, object, object, object, object, object]) -> tuple[bool, str]:
     """Validate the active character-source mode before a settings write."""
     normalized_mode = str(mode or "").strip()
+    if normalized_mode == "native_mnema":
+        return True, "므네마 내장 캐릭터"
     if normalized_mode == "native_engram_icon":
         return True, "Engram 아이콘 내장 캐릭터"
     if normalized_mode == "native_bolttagu":
@@ -893,6 +896,15 @@ class _SettingsWindow:
         ttk.Button(native_box, text="매핑 편집…", command=self._edit_bolttagu_mapping).pack(side="left", padx=6)
         self._bolttagu_mapping_label = ttk.Label(source_box, textvariable=self._bolttagu_mapping_var, wraplength=600)
         self._bolttagu_mapping_label.grid(row=21, column=0, columnspan=4, sticky="w", padx=8)
+        mnema_box = ttk.Frame(source_box)
+        mnema_box.grid(row=23, column=0, columnspan=4, sticky="ew", padx=8, pady=6)
+        self._mnema_native_box = mnema_box
+        self._mnema_mapping_var = tk.StringVar(value="")
+        ttk.Button(mnema_box, text="매핑 가져오기…", command=self._import_mnema_mapping).pack(side="left", padx=6)
+        ttk.Button(mnema_box, text="기본 매핑", command=lambda: self._mnema_mapping_var.set("")).pack(side="left")
+        ttk.Button(mnema_box, text="매핑 편집…", command=self._edit_mnema_mapping).pack(side="left", padx=6)
+        self._mnema_mapping_label = ttk.Label(source_box, textvariable=self._mnema_mapping_var, wraplength=600)
+        self._mnema_mapping_label.grid(row=24, column=0, columnspan=4, sticky="w", padx=8)
         self._bolttagu_warning_var = tk.StringVar()
         self._bolttagu_warning_label = ttk.Label(source_box, textvariable=self._bolttagu_warning_var, foreground='#b05b22', wraplength=700)
         self._bolttagu_warning_label.grid(row=22, column=0, columnspan=4, sticky='w', padx=8)
@@ -2211,6 +2223,7 @@ class _SettingsWindow:
         self._bolttagu_face_var.set(_nested_get(cfg, ["overlay", "character", "bolttagu", "face_pointer"], True))
         self._bolttagu_floor_var.set(_nested_get(cfg, ["overlay", "character", "bolttagu", "show_floor"], False))
         self._bolttagu_mapping_var.set(_nested_get(cfg, ["overlay", "character", "bolttagu", "mapping_path"], ""))
+        self._mnema_mapping_var.set(_nested_get(cfg, ["overlay", "character", "mnema", "mapping_path"], ""))
         self._bolttagu_warning_var.set(_nested_get(cfg, ['overlay', 'native_bolttagu_warning'], ''))
         grid = _nested_get(cfg, ["overlay", "character", "reactions", "grid"], {}) or {}
         self._grid_path_var.set(str(_nested_get(cfg, ["overlay", "character", "reactions", "sprite_sheet"], "")))
@@ -2508,6 +2521,32 @@ class _SettingsWindow:
         except (OSError, ValueError) as exc:
             messagebox.showerror('매핑 편집 실패', str(exc), parent=self.window)
 
+    def _import_mnema_mapping(self) -> None:
+        from overlay.mnema_mapping import validate_mapping_document, validate_mapping_file
+        selected = filedialog.askopenfilename(parent=self.window, title="므네마 매핑 JSON 선택", filetypes=[("JSON", "*.json")])
+        if not selected:
+            return
+        try:
+            validate_mapping_file(Path(selected))
+            from core.install.native_bolttagu import import_mapping
+            target = import_mapping(Path(selected), _USER_CONFIG_PATH.parent / 'native-mnema' / 'mappings', validator=validate_mapping_document)
+            self._mnema_mapping_var.set(str(target))
+        except (OSError, ValueError) as exc:
+            messagebox.showerror('가져오기 실패', str(exc), parent=self.window)
+
+    def _edit_mnema_mapping(self) -> None:
+        from overlay.bolttagu_editor import BolttaguMappingEditor
+        from overlay.mnema_mapping import sprite_map, validate_mapping_document
+        try:
+            path = self._mnema_mapping_var.get()
+            self._mnema_editor = BolttaguMappingEditor(
+                self.window, Path(path) if path else None,
+                _USER_CONFIG_PATH.parent / 'native-mnema' / 'mappings', self._mnema_mapping_var.set,
+                schema=sprite_map(), validator=validate_mapping_document, title='므네마 · 이벤트와 포즈 매핑',
+            )
+        except (OSError, ValueError) as exc:
+            messagebox.showerror('매핑 편집 실패', str(exc), parent=self.window)
+
     def _on_character_source_mode_changed(self, _event=None) -> None:
         self._apply_character_source_mode()
         if character_source_mode_from_display(self._char_source_mode_var.get()) == "sprite_grid":
@@ -2531,6 +2570,9 @@ class _SettingsWindow:
         ):
             if widget is not None:
                 (widget.grid if mode == "native_bolttagu" else widget.grid_remove)()
+        for widget in (getattr(self, "_mnema_native_box", None), getattr(self, "_mnema_mapping_label", None)):
+            if widget is not None:
+                (widget.grid if mode == "native_mnema" else widget.grid_remove)()
         if hasattr(self, "_manifest_controls"):
             readonly_controls = (
                 self._manifest_state_combo,
@@ -2982,6 +3024,12 @@ class _SettingsWindow:
                 "show_floor": bool(self._bolttagu_floor_var.get()),
                 "mapping_path": mapping_path,
             })
+        if hasattr(self, '_mnema_mapping_var'):
+            mapping_path = self._mnema_mapping_var.get()
+            if mapping_path:
+                from overlay.mnema_mapping import validate_mapping_file
+                validate_mapping_file(Path(mapping_path))
+            _nested_set(user, ["overlay", "character", "mnema"], {"mapping_path": mapping_path})
         legacy_body_motion = bool(self._legacy_body_motion_var.get())
         _nested_set(user, ["overlay", "character", "effects", "legacy_body_motion"], True if legacy_body_motion else None)
         if mode == "sprite_grid":

@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import secrets
+import os
 from pathlib import Path
 from typing import Any
 
@@ -84,27 +85,40 @@ class RemotePrincipal:
         return f"RemotePrincipal(name={self.name!r}, deny={len(self.deny)}, scope={self.scope!r})"
 
 
-def ensure_tokens_file(remote_port: int) -> Path:
+def selected_tokens_path(tokens_path: str | Path | None = None) -> Path:
+    """Resolve an explicitly mounted secret path without exposing its content."""
+    configured = str(tokens_path or os.environ.get("ENGRAM_REMOTE_TOKENS_FILE", "")).strip()
+    return Path(configured).expanduser() if configured else TOKENS_PATH
+
+
+def ensure_tokens_file(remote_port: int, tokens_path: str | Path | None = None) -> Path:
     """토큰 파일이 없으면 임의 토큰으로 생성한다. 경로만 반환(값은 노출하지 않음)."""
-    if TOKENS_PATH.exists():
-        return TOKENS_PATH
-    TOKENS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    TOKENS_PATH.write_text(
+    path = selected_tokens_path(tokens_path)
+    if path.exists():
+        return path
+    # An explicit service secret is expected to be mounted by the deployer.
+    # Generating into a typo or read-only mount would silently change the
+    # credential contract, so leave the listener fail-closed instead.
+    if tokens_path or os.environ.get("ENGRAM_REMOTE_TOKENS_FILE", "").strip():
+        raise FileNotFoundError(f"remote token file does not exist: {path}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
         _TEMPLATE.format(port=remote_port, token=secrets.token_urlsafe(32)),
         encoding="utf-8",
     )
-    return TOKENS_PATH
+    return path
 
 
-def load_principals() -> dict[str, RemotePrincipal]:
+def load_principals(tokens_path: str | Path | None = None) -> dict[str, RemotePrincipal]:
     """토큰 문자열 → RemotePrincipal 매핑.
 
     파일이 없거나 형식이 깨졌으면 빈 dict — 즉 원격 접근이 전부 거부된다(fail closed).
     """
-    if yaml is None or not TOKENS_PATH.exists():
+    path = selected_tokens_path(tokens_path)
+    if yaml is None or not path.exists():
         return {}
     try:
-        raw: Any = yaml.safe_load(TOKENS_PATH.read_text(encoding="utf-8"))
+        raw: Any = yaml.safe_load(path.read_text(encoding="utf-8"))
     except Exception:
         return {}
     if not isinstance(raw, dict):

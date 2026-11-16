@@ -18,6 +18,8 @@ overlay:
       face_pointer: true
       show_floor: false
       mapping_path: ""
+      mnema:
+        mapping_path: ""
     # 유효한 manifest set은 name이 비어 있거나 set과 같을 때 base/VFX 우선 후보가 된다.
     set: "engram"
     name: "engram-icon"
@@ -289,7 +291,7 @@ mcp:
   # python_exe: ""  # overlay.exe(동결) 모드에서 자동 감지 안 되면 직접 지정
   # python_exe: "C:/Users/yourname/miniconda3/envs/intel_engram/python.exe"
   #
-  # 원격(SSH 리버스 터널) 전용 인증 리스너.
+  # 원격 직접 접속(또는 기존 SSH 리버스 터널)용 인증 리스너.
   # http_port 는 loopback 무인증을 유지한다 — 로컬 호출자는 이미 로컬 실행 권한이
   # 있으므로 인증을 걸어도 얻는 게 없다. 터널 너머는 그 전제가 깨지므로,
   # 터널은 반드시 remote_port 에만 연결하고 bearer 토큰으로 인증한다.
@@ -297,3 +299,6 @@ mcp:
   #   감사 로그: ~/.engram/logs/remote-audit.jsonl
   remote_enabled: false
   remote_port: 17386
+  # remote_host: "127.0.0.1"  # 외부 직접 접속은 명시적으로 "0.0.0.0" 또는 사설 IP
+  # remote_token_file: ""      # 컨테이너/서버의 read-only bearer token YAML 경로
+  # remote_allowed_hosts: []   # TLS proxy Host 예: ["engram.example:443"]

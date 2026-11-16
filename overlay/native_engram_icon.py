@@ -5,7 +5,6 @@ from pathlib import Path
 
 from .bolttagu_mapping import (
     BLINK_INTERVAL_MS,
-    BLINK_SEQUENCE,
     CATEGORY_POSES,
     ENTER_DURATIONS_MS,
     EVENT_DURATIONS_MS,
@@ -28,6 +27,9 @@ from .native_bolttagu import Bolttagu2dView
 
 ASSET_DIR = Path(__file__).resolve().parents[1] / "resource" / "character" / "engram-icon"
 SPRITE_PREFIX = "engram-icon-"
+# The icon's blink cells are whole redrawn frames, not eye-only swaps, so the
+# bolttagu timing (50/90/70 ms) reads as a glitch. Hold each frame longer.
+BLINK_SEQUENCE = (("half", 120), ("closed", 200), ("half", 120))
 
 ENGRAM_ICON_STATE_STRIPS = (
     "idle", "waiting", "listening", "speaking", "searching", "wondering", "writing",

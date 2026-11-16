@@ -168,19 +168,23 @@ class SemanticGraphConcurrencyTests(unittest.IsolatedAsyncioTestCase):
     # ── 8. sync_from_kg 동시 실행 가드 ───────────────────────────────────────
 
     async def test_sync_from_kg_concurrent_guard(self):
-        conn = sqlite3.connect(":memory:")
+        db = str(Path(self._tmpdir.name) / "kg.db")
+        conn = sqlite3.connect(db)
         conn.execute("CREATE TABLE kg_nodes (id TEXT, title TEXT, type TEXT, tags TEXT, summary TEXT)")
         conn.execute("CREATE TABLE kg_edges (from_id TEXT, to_id TEXT, rel_type TEXT, weight REAL)")
         conn.execute("INSERT INTO kg_nodes VALUES ('a', 'A', 'concept', '[]', 'summary a')")
         conn.commit()
+        conn.close()
 
-        with patch("core.storage.db.get_connection", return_value=conn):
+        # get_connection 은 호출마다 새 연결을 준다 — 재실행 회차도 자기 연결을 연다.
+        with patch("core.storage.db.get_connection", side_effect=lambda: sqlite3.connect(db)):
             results = await asyncio.gather(
                 self.sg.sync_from_kg(),
                 self.sg.sync_from_kg(),
             )
         statuses = sorted(r["status"] for r in results)
         self.assertEqual(statuses, ["ok", "skipped"])
+        self.assertFalse(self.sg._sync_pending)  # 밀린 요청은 실행 중이던 쪽이 소화했다
 
     # ── 9. 이벤트 루프 없는 스레드에서 run_sg_coro ──────────────────────────
 

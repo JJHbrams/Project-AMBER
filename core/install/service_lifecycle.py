@@ -6,6 +6,7 @@ checks the actual TCP listener and OS process identity including creation time.
 from __future__ import annotations
 
 import json
+import logging
 import ctypes
 import socket
 import hashlib
@@ -16,6 +17,8 @@ import urllib.request
 from pathlib import Path
 
 from core.install import process_identity as identity
+
+log = logging.getLogger(__name__)
 
 
 def repository_identity(root: Path) -> Path | None:
@@ -142,7 +145,28 @@ def _still_same(process: dict) -> bool:
     return current is not None and identity._same_process(process, current)
 
 
-def prepare_service_handover(cfg: dict, source_root: Path, executable: str, *, timeout: float = 20) -> None:
+def _exited_or_terminated(process: dict, predicate) -> bool:
+    """Stop a verified process, treating "it exited on its own meanwhile" as success.
+
+    terminate_identity_exact() also returns False when the process is already
+    gone. Each identity check spawns PowerShell (~1 s), so an old host that
+    finishes its own shutdown during that window was reported as "did not
+    exit" and the new host refused to start, leaving nothing running.
+    """
+    if not _still_same(process):
+        return True
+    if identity.terminate_identity_exact(process, predicate):
+        return True
+    return not _still_same(process)
+
+
+# The old host's quit() can legitimately spend ~5 s stopping the bubble session,
+# up to 15 s on STM promotion, then tunnels and child processes. 20 s was shorter
+# than that, so normal restarts fell through to the kill path.
+HANDOVER_TIMEOUT_SEC = 45
+
+
+def prepare_service_handover(cfg: dict, source_root: Path, executable: str, *, timeout: float = HANDOVER_TIMEOUT_SEC) -> None:
     port = int(cfg['overlay']['stm_server_port'])
     owner = listener_pid(port)
     if owner is None:
@@ -187,14 +211,56 @@ def prepare_service_handover(cfg: dict, source_root: Path, executable: str, *, t
     deadline = time.monotonic() + timeout
     while _still_same(old) and time.monotonic() < deadline:
         time.sleep(0.2)
-    if _still_same(old) and not identity.terminate_identity_exact(old, lambda p: is_project_host(p, source_root, executable)):
+    if not _exited_or_terminated(old, lambda p: is_project_host(p, source_root, executable)):
         raise RuntimeError('Verified old overlay did not exit; refusing to start another host')
     for child in children:
-        if _still_same(child) and not identity.terminate_identity_exact(child, child_owned):
+        if not _exited_or_terminated(child, child_owned):
             raise RuntimeError('Verified old overlay child did not exit; refusing stale-service adoption')
     if listener_pid(port) is not None:
         raise RuntimeError('STM port is still occupied after handover')
     _clear_proven_orphan_mcp(cfg, source_root, executable)
+
+
+def _clear_proven_orphan_dashboard(port: int, source_root: Path, executable: str) -> None:
+    """Stop a dashboard left behind by a host that died, only if provably ours.
+
+    The MCP port is free but the dashboard port is held. Terminate the listener
+    only when it is our dashboard (frozen engram-dashboard.exe next to the host
+    executable, or a same-project source dashboard), its parent no longer exists
+    and it is still the same process. Anything else keeps the fail-closed error.
+    """
+    refuse = 'Dashboard port belongs to an unverified family; nothing stopped'
+    owner = listener_pid(port)
+    if owner is None:
+        return
+    child = identity.get_process_identity(owner, strict=True)
+    if child is None or not child.get('CreationDate'):
+        raise RuntimeError(refuse)
+    tokens = identity._tokens(str(child.get('CommandLine') or ''))
+    path = str(child.get('ExecutablePath') or '')
+
+    def owned(candidate: dict) -> bool:
+        cand_tokens = identity._tokens(str(candidate.get('CommandLine') or ''))
+        cand_path = str(candidate.get('ExecutablePath') or '')
+        if executable and identity.same_path(cand_path, Path(executable).with_name('engram-dashboard.exe')):
+            return bool(cand_tokens) and identity.same_path(cand_tokens[0], cand_path) and '--role' not in cand_tokens
+        for token in cand_tokens[1:]:
+            if Path(token).name == 'engram_dashboard.py':
+                root = Path(token).resolve().parent.parent
+                return (identity.is_same_checkout_source_child(candidate, root)
+                        and same_project_origin(root, source_root, executable))
+        return False
+
+    if not tokens or not owned(child):
+        raise RuntimeError(refuse)
+    parent = identity.get_process_identity(int(child.get('ParentProcessId') or 0), strict=True)
+    if parent is not None or listener_pid(port) != owner or not _still_same(child):
+        raise RuntimeError(refuse)
+    if not _exited_or_terminated(child, owned):
+        raise RuntimeError('Orphan dashboard failed to exit')
+    if listener_pid(port) is not None:
+        raise RuntimeError('Orphan dashboard listener did not exit; refusing start')
+    log.info('[service] stopped orphan dashboard pid=%s path=%s', owner, path)
 
 
 def _clear_proven_orphan_mcp(cfg: dict, source_root: Path, executable: str = '') -> None:
@@ -203,7 +269,7 @@ def _clear_proven_orphan_mcp(cfg: dict, source_root: Path, executable: str = '')
     if owner is None:
         dashboard = cfg.get('dashboard') or {}
         if dashboard.get('enabled', True) and listener_pid(int(dashboard.get('port', 8501))) is not None:
-            raise RuntimeError('Dashboard port belongs to an unverified family; nothing stopped')
+            _clear_proven_orphan_dashboard(int(dashboard.get('port', 8501)), source_root, executable)
         return
     child = identity.get_process_identity(owner, strict=True)
     if child is None or not child.get('CreationDate'):

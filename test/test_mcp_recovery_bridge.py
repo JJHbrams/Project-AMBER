@@ -1,5 +1,5 @@
 import asyncio
-from core.integrations.mcp_recovery_bridge import BridgeConfig, StdioRecoveryBridge, UNKNOWN
+from core.integrations.mcp_recovery_bridge import BridgeConfig, StdioRecoveryBridge, UNKNOWN, UNAVAILABLE
 
 class Writer:
     def __init__(self): self.messages=[]
@@ -87,6 +87,9 @@ def _fake_upstream(monkeypatch, behaviours):
                     log['calls'] += 1
                     if mode == 'terminated':
                         reply = {'jsonrpc': '2.0', 'id': msg['id'], 'error': {'code': 32600, 'message': 'Session terminated'}}
+                    elif mode == 'lost':
+                        await queue.put(ConnectionError('test transport lost'))
+                        return
                     else:
                         reply = {'jsonrpc': '2.0', 'id': msg['id'], 'result': {'ok': True}}
                 else:
@@ -112,8 +115,9 @@ async def _until(cond, what):
     raise AssertionError('timeout: ' + what)
 
 
-async def _start(b):
-    b.snapshot = STATE
+async def _start(b, state=STATE):
+    if state is not None:
+        b.snapshot = state
     await b.frontend_message(INIT)
     manage = asyncio.create_task(b.manage())
     b.changed.set()
@@ -130,8 +134,8 @@ def _stop(b, manage):
         b.transport.cancel()
     if b.init_deadline_task:
         b.init_deadline_task.cancel()
-    if b.replay:
-        b.replay['timer'].cancel()
+    if b.expiry_timer:
+        b.expiry_timer.cancel()
 
 
 CALL = {'jsonrpc': '2.0', 'id': 7, 'method': 'tools/call', 'params': {'name': 'x'}}
@@ -145,18 +149,49 @@ def test_session_terminated_request_is_replayed_once_after_reinitialize(monkeypa
         manage = await _start(b)
         # 만료된 세션이 핸들러 앞에서 거절한 요청: 에러 없이 보류됐다가 재연결 후 한 번 재전송된다
         await b.frontend_message(CALL)
-        await _until(lambda: b.resubscribe.is_set(), 'resubscribe')
-        assert b.output.empty() and b.replay is not None and b.pending == {}
-        b.changed.set()
         reply = await asyncio.wait_for(b.output.get(), 2)
         assert reply == {'jsonrpc': '2.0', 'id': 7, 'result': {'ok': True}}  # 원래 frontend id
-        assert log['calls'] == 2 and log['initializes'] == 2 and b.replay is None
+        assert log['calls'] == 2 and log['initializes'] == 2 and not b.replays
         # 후속 요청은 한 번만 호출된다
         await b.frontend_message({**CALL, 'id': 8})
         assert (await asyncio.wait_for(b.output.get(), 2)) == {'jsonrpc': '2.0', 'id': 8, 'result': {'ok': True}}
         assert log['calls'] == 3
         _stop(b, manage)
     asyncio.run(run())
+
+
+def test_confirmed_expiry_rebinds_ready_snapshot_without_waiting_for_sse(monkeypatch):
+    # A single rejected request leaves no other request response to drain.  A
+    # deliberately large bound proves the reconnect comes from manage.changed,
+    # not a later SSE state event or the drain timeout.
+    from core.integrations import mcp_recovery_bridge as mod
+    monkeypatch.setattr(mod, 'EXPIRY_DRAIN_WINDOW', 5.0)
+    log = _fake_upstream(monkeypatch, ['terminated', 'ok'])
+
+    async def run():
+        b = bridge()
+        manage = await _start(b)
+        await b.frontend_message(CALL)
+        reply = await asyncio.wait_for(b.output.get(), 0.5)
+        assert reply == {'jsonrpc': '2.0', 'id': 7, 'result': {'ok': True}}
+        assert log['connections'] == 2 and log['calls'] == 2
+        _stop(b, manage)
+    asyncio.run(run())
+
+
+def test_confirmed_expiry_rebind_rejects_changed_or_unready_snapshot_and_old_epoch():
+    b = bridge()
+    b.snapshot = dict(STATE)
+    expected = b.state_key(b.snapshot)
+    b.epoch = 3
+    b.request_confirmed_expiry_rebind(2, expected)
+    assert not b.changed.is_set()
+    b.snapshot = dict(STATE, ready=False)
+    b.request_confirmed_expiry_rebind(3, expected)
+    assert not b.changed.is_set()
+    b.snapshot = dict(STATE, generation=2)
+    b.request_confirmed_expiry_rebind(3, expected)
+    assert not b.changed.is_set()
 
 
 def test_replay_that_fails_again_reports_outcome_unknown_without_third_send(monkeypatch):
@@ -166,13 +201,110 @@ def test_replay_that_fails_again_reports_outcome_unknown_without_third_send(monk
         b = bridge()
         manage = await _start(b)
         await b.frontend_message(CALL)
-        await _until(lambda: b.resubscribe.is_set(), 'resubscribe')
-        b.changed.set()
         reply = await asyncio.wait_for(b.output.get(), 2)
         assert reply['id'] == 7 and reply['error']['code'] == UNKNOWN and 'result' not in reply
-        assert log['calls'] == 2 and b.replay is None and b.pending == {}
+        assert log['calls'] == 2 and not b.replays and b.pending == {}
         assert b.output.empty()
         _stop(b, manage)
+    asyncio.run(run())
+
+
+def test_concurrent_expiry_rejections_each_replay_once_after_one_reconnect(monkeypatch):
+    # Both requests have their own explicit pre-dispatch rejection.  The first
+    # reply must not cancel the reader before it can classify the second.
+    log = _fake_upstream(monkeypatch, ['terminated', 'ok'])
+
+    async def run():
+        b = bridge()
+        manage = await _start(b)
+        await b.frontend_message(CALL)
+        await b.frontend_message({**CALL, 'id': 8})
+        # Fast rebind can empty the internal stash before the test observes it.
+        # Assert only the stable user-visible outcome and one replay per call.
+        replies = { (await asyncio.wait_for(b.output.get(), 2))['id'] for _ in range(2) }
+        assert replies == {7, 8}
+        assert log['calls'] == 4 and not b.replays
+        _stop(b, manage)
+    asyncio.run(run())
+
+
+def test_unconfirmed_mutation_is_unknown_and_never_replayed_during_expiry_recovery():
+    async def run():
+        b = bridge(); first = Writer(); b.writer = first; b.available = True
+        mutation = {**CALL, 'id': 11, 'params': {'name': 'mutate'}}
+        confirmed = {**CALL, 'id': 12}
+        await b.frontend_message(mutation)
+        await b.frontend_message(confirmed)
+        mutation_upstream, confirmed_upstream = [m['id'] for m in first.messages]
+        b.stash_for_replay(confirmed_upstream)  # only this request has explicit Session terminated proof
+        await b.fail_transport()
+        assert (await b.output.get())['id'] == 11
+        assert b.replays == {12: b.replays[12]}
+        second = Writer(); b.writer = second; b.available = True
+        await b.replay_stashed()
+        assert len(second.messages) == 1 and second.messages[0]['id'] != mutation_upstream
+        assert second.messages[0]['params']['name'] == 'x'
+    asyncio.run(run())
+
+
+def test_cancelling_deferred_request_removes_it_without_sending():
+    async def run():
+        b = bridge(); b.expiry_recovering = True
+        b.replays[7] = {'id': 7, 'message': CALL, 'epoch': 0}
+        deferred = {**CALL, 'id': 8}
+        b.deferred.append(deferred)
+        await b.frontend_message({'jsonrpc': '2.0', 'method': 'notifications/cancelled',
+                                  'params': {'requestId': 8}})
+        assert b.deferred == [] and b.replays
+    asyncio.run(run())
+
+
+def test_last_replay_cancellation_keeps_deferred_until_the_recovered_transport_is_ready():
+    async def run():
+        b = bridge(); b.expiry_recovering = True
+        b.expiry_timer = asyncio.create_task(asyncio.sleep(60))
+        b.replays[7] = {'id': 7, 'message': CALL, 'epoch': 0}
+        b.deferred.append({**CALL, 'id': 8})
+        await b.frontend_message({'jsonrpc': '2.0', 'method': 'notifications/cancelled',
+                                  'params': {'requestId': 7}})
+        assert b.output.empty() and b.expiry_recovering and not b.replays and len(b.deferred) == 1
+        writer = Writer(); b.writer = writer; b.available = True
+        await b.replay_stashed()
+        assert writer.messages[-1]['id'] != 8 and writer.messages[-1]['method'] == 'tools/call'
+        assert not b.expiry_recovering and not b.deferred and b.expiry_timer is None
+    asyncio.run(run())
+
+
+def test_partial_replay_send_preserves_remaining_stashes_for_explicit_failure():
+    class FailingWriter:
+        def __init__(self): self.sent = 0
+        async def send(self, _value):
+            self.sent += 1
+            if self.sent == 2:
+                raise ConnectionError('write failed')
+
+    async def run():
+        b = bridge(); b.writer = FailingWriter(); b.available = True
+        b.expiry_recovering = True; b.expiry_epoch = 0
+        b.replays = {
+            7: {'id': 7, 'message': CALL, 'epoch': 0},
+            8: {'id': 8, 'message': {**CALL, 'id': 8}, 'epoch': 0},
+            9: {'id': 9, 'message': {**CALL, 'id': 9}, 'epoch': 0},
+        }
+        try:
+            await b.replay_stashed()
+        except ConnectionError:
+            pass
+        else:
+            raise AssertionError('expected second replay send to fail')
+        # First and attempted second requests are pending; untouched third is
+        # retained until the failure finalizer emits an explicit outcome.
+        assert len(b.pending) == 2 and set(b.replays) == {9}
+        await b.fail_transport()
+        await b.flush_expiry_recovery()
+        replies = [await b.output.get() for _ in range(3)]
+        assert {reply['id'] for reply in replies} == {7, 8, 9}
+        assert all(reply['error']['code'] == UNKNOWN for reply in replies)
     asyncio.run(run())
 
 
@@ -183,11 +315,9 @@ def test_session_terminated_with_unrecoverable_transport_reports_outcome_unknown
         b = bridge()
         manage = await _start(b)
         await b.frontend_message(CALL)
-        await _until(lambda: b.resubscribe.is_set(), 'resubscribe')
-        b.changed.set()
         reply = await asyncio.wait_for(b.output.get(), 2)
         assert reply['id'] == 7 and reply['error']['code'] == UNKNOWN
-        assert log['calls'] == 1 and b.replay is None  # 재전송 시도 자체가 없었다
+        assert log['calls'] == 1 and not b.replays  # 재전송 시도 자체가 없었다
         _stop(b, manage)
     asyncio.run(run())
 
@@ -200,9 +330,12 @@ def test_replay_window_expiry_reports_outcome_unknown(monkeypatch):
     async def run():
         b = bridge()
         manage = await _start(b)
+        # This test exercises expiry-timer cleanup, so make the cached state
+        # ineligible for the separate exact404 fast-rebind path.
+        b.snapshot = dict(STATE, ready=False)
         await b.frontend_message(CALL)  # 재연결 신호가 오지 않는다
         reply = await asyncio.wait_for(b.output.get(), 2)
-        assert reply['id'] == 7 and reply['error']['code'] == UNKNOWN and b.replay is None
+        assert reply['id'] == 7 and reply['error']['code'] == UNKNOWN and not b.replays
         _stop(b, manage)
     asyncio.run(run())
 
@@ -213,11 +346,15 @@ def test_client_cancel_while_stashed_means_no_reply_and_no_replay(monkeypatch):
     async def run():
         b = bridge()
         manage = await _start(b)
+        # Keep this cancellation test in its explicit stashed state; the
+        # separate fast-rebind tests cover automatic recovery.
+        b.snapshot = dict(STATE, ready=False)
         await b.frontend_message(CALL)
-        await _until(lambda: b.replay is not None and b.resubscribe.is_set(), 'stashed')
+        await _until(lambda: b.replays and b.resubscribe.is_set(), 'stashed')
         await b.frontend_message({'jsonrpc': '2.0', 'method': 'notifications/cancelled',
                                   'params': {'requestId': 7}})
-        assert b.replay is None
+        assert not b.replays
+        b.snapshot = dict(STATE)
         b.changed.set()
         await _until(lambda: log['connections'] == 2 and b.available, 'reconnect')
         await asyncio.sleep(0.1)
@@ -235,6 +372,106 @@ def test_session_terminated_detection_accepts_both_error_code_signs():
     assert not session_terminated({'error': {'code': -32603, 'message': 'Session terminated'}})
 
 
+def test_configured_endpoint_is_ready_before_control_plane_arrives():
+    b = bridge()
+    assert b.snapshot['ready'] is True
+    assert b.snapshot['endpoint'] == b.config.upstream_url
+    assert b.control_snapshot is None
+
+
+def test_initializes_configured_endpoint_without_control_metadata(monkeypatch):
+    _fake_upstream(monkeypatch, ['ok'])
+
+    async def run():
+        b = bridge()
+        await b.frontend_message(INIT)
+        manage = asyncio.create_task(b.manage())
+        b.changed.set()
+        await _until(lambda: b.initialize_result is not None, 'configured initialize')
+        assert (await b.output.get())['id'] == 1
+        await b.frontend_message({'jsonrpc': '2.0', 'method': 'notifications/initialized'})
+        await _until(lambda: b.available, 'configured available')
+        assert b.control_snapshot is None
+        _stop(b, manage)
+    asyncio.run(run())
+
+
+def test_transport_failure_retry_is_bounded_and_does_not_need_control_metadata():
+    async def run():
+        b = bridge()
+        b.epoch = 3
+        b.retry_delay = .01
+        b.schedule_transport_retry(3, b.state_key(b.snapshot))
+        await _until(b.changed.is_set, 'transport retry')
+        assert b.retry_delay <= 2.0
+        b.changed.clear()
+        b.schedule_transport_retry(2, b.state_key(b.snapshot))
+        await asyncio.sleep(.03)
+        assert not b.changed.is_set()
+    asyncio.run(run())
+
+
+def test_successful_first_initialize_resets_transport_backoff():
+    async def run():
+        b = bridge()
+        b.retry_delay = 2.0
+        b.pending['init'] = {'kind': 'initialize', 'id': 1}
+        await b.backend_message({'jsonrpc': '2.0', 'id': 'init', 'result': {}}, b.epoch)
+        assert b.retry_delay == .1
+    asyncio.run(run())
+
+
+def test_new_transport_replaces_stale_retry_timer(monkeypatch):
+    _fake_upstream(monkeypatch, ['ok'])
+
+    async def run():
+        b = bridge()
+        old_timer = asyncio.get_running_loop().call_later(60, lambda: None)
+        b.retry_handle = old_timer
+        manage = asyncio.create_task(b.manage())
+        b.changed.set()
+        await _until(lambda: b.transport is not None, 'configured transport')
+        assert old_timer.cancelled()
+        assert b.retry_handle is None
+        _stop(b, manage)
+    asyncio.run(run())
+
+
+def test_transport_loss_retries_configured_endpoint_without_control_metadata(monkeypatch):
+    log = _fake_upstream(monkeypatch, ['lost', 'ok'])
+
+    async def run():
+        b = bridge()
+        b.retry_delay = .01
+        manage = await _start(b, state=None)
+        await b.frontend_message(CALL)
+        reply = await b.output.get()
+        assert reply['id'] == CALL['id']
+        assert reply['error']['code'] == UNKNOWN
+        await _until(lambda: log['connections'] == 2 and b.available, 'configured reconnect')
+        await b.frontend_message({**CALL, 'id': 8})
+        reply = await b.output.get()
+        assert reply == {'jsonrpc': '2.0', 'id': 8, 'result': {'ok': True}}
+        assert log['calls'] == 2
+        assert b.control_snapshot is None
+        _stop(b, manage)
+    asyncio.run(run())
+
+
+def test_stale_or_foreign_control_metadata_cannot_withdraw_configured_endpoint():
+    b = bridge()
+    authority = dict(b.snapshot)
+    b.note_control_state({'instance_id': 'stale', 'generation': 9, 'ready': False,
+                          'endpoint': 'http://127.0.0.1:29999/mcp'})
+    assert b.snapshot == authority and not b.changed.is_set()
+    b.note_control_state({'instance_id': 'foreign', 'generation': 10, 'ready': True,
+                          'endpoint': 'http://127.0.0.1:29999/mcp'})
+    assert b.snapshot == authority and not b.changed.is_set()
+    b.note_control_state({'instance_id': 'same', 'generation': 11, 'ready': True,
+                          'endpoint': b.config.upstream_url})
+    assert b.snapshot == authority and b.changed.is_set()
+
+
 def test_non_session_terminated_loss_is_never_replayed():
     async def run():
         b = bridge(); w = Writer(); b.writer = w; b.available = True
@@ -242,7 +479,7 @@ def test_non_session_terminated_loss_is_never_replayed():
         await b.fail_transport()
         reply = await b.output.get()
         assert reply['id'] == 7 and reply['error']['code'] == UNKNOWN
-        assert b.replay is None and len(w.messages) == 1
+        assert not b.replays and len(w.messages) == 1
         b.writer = Writer(); await b.replay_stashed()
         assert b.writer.messages == []
     asyncio.run(run())

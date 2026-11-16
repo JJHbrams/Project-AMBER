@@ -9,7 +9,7 @@ from tkinter import filedialog, messagebox, ttk
 
 from PIL import Image, ImageTk
 
-from overlay.bolttagu_mapping import OPTIONS, SpriteMap, frames_at, sprite_map, validate_mapping_document
+from overlay.bolttagu_mapping import SpriteMap, frames_at
 from overlay.native_bolttagu import load_atlas
 from core.install.native_bolttagu import store_mapping
 
@@ -38,6 +38,8 @@ def sparse_mapping_document(
     they must survive a visible-pose edit rather than being accidentally reset.
     """
     result = {"version": 1}
+    if schema.overlay_id != "bolttagu-2d":
+        result["overlay_id"] = schema.overlay_id
     for section in schema.sections:
         supplied = document.get(section.key, {})
         for row in section.rows:
@@ -52,13 +54,15 @@ def sparse_mapping_document(
             default = _choice_value(row.default)
             if value != default:
                 result.setdefault(section.key, {})[row.key] = value
-    validate_mapping_document(result)
     return result
 
 
-def compose_preview_frame(sheets: dict, option: str, elapsed_ms: int) -> Image.Image:
+def compose_preview_frame(sheets: dict, option: str, elapsed_ms: int, options: dict | None = None) -> Image.Image:
     """Compose exactly the recipe the native renderer draws for an option."""
-    recipe = frames_at(OPTIONS[option], elapsed_ms)
+    if options is None:
+        from overlay.bolttagu_mapping import OPTIONS
+        options = OPTIONS
+    recipe = frames_at(options[option], elapsed_ms)
     image = sheets[recipe[0][0]][recipe[0][1]].copy()
     for sheet, cell in recipe[1:]:
         image = Image.alpha_composite(image, sheets[sheet][cell])
@@ -66,18 +70,21 @@ def compose_preview_frame(sheets: dict, option: str, elapsed_ms: int) -> Image.I
 
 
 class BolttaguMappingEditor:
-    def __init__(self, parent, path: Path | None, directory: Path, on_save):
+    def __init__(self, parent, path: Path | None, directory: Path, on_save, *, schema=None, validator=None, title=None):
         self.directory, self.on_save = directory, on_save
-        self.schema = sprite_map()
+        if schema is None:
+            from overlay.bolttagu_mapping import sprite_map, validate_mapping_document
+            schema, validator = sprite_map(), validate_mapping_document
+        self.schema, self.validator = schema, validator
         self.document = {'version': 1}
         if path:
             if path.stat().st_size > 65536:
                 raise ValueError('64 KiB 이하 파일만 지원합니다.')
             self.document = json.loads(path.read_text(encoding='utf-8-sig'))
-            validate_mapping_document(self.document)
+            self.validator(self.document)
         # All asset/schema/file validation precedes creating any native window.
         self.window = tk.Toplevel(parent)
-        self.window.title('볼따구 · 이벤트와 포즈 매핑')
+        self.window.title(title or f'{self.schema.name} · 이벤트와 포즈 매핑')
         geometry, minimum = editor_geometry(self.window.winfo_screenwidth(), self.window.winfo_screenheight())
         self.window.minsize(*minimum)
         self.window.geometry(geometry)
@@ -86,7 +93,11 @@ class BolttaguMappingEditor:
         self._preview_started_ms = int(time.monotonic() * 1000)
         self._preview_option: str | None = None
         self._preview_photo: ImageTk.PhotoImage | None = None
-        self._preview_sheets, self._preview_cell = load_atlas()
+        self._preview_sheets, self._preview_cell = load_atlas(
+            self.schema.asset_dir,
+            sprite_prefix=self.schema.overlay_id.replace('-2d', '') + '-',
+            required_options=self.schema.options,
+        )
         notebook = ttk.Notebook(self.window)
         for section in self.schema.sections:
             if section.hidden:
@@ -179,7 +190,7 @@ class BolttaguMappingEditor:
             self._preview_canvas.itemconfigure(self._preview_image_id, image='')
         else:
             elapsed = int(time.monotonic() * 1000) - self._preview_started_ms
-            image = compose_preview_frame(self._preview_sheets, self._preview_option, elapsed)
+            image = compose_preview_frame(self._preview_sheets, self._preview_option, elapsed, self.schema.options)
             self._preview_photo = ImageTk.PhotoImage(image, master=self._preview_canvas)
             self._preview_canvas.itemconfigure(self._preview_image_id, image=self._preview_photo)
         self._preview_after_id = self.window.after(50, self._render_preview)
@@ -201,7 +212,7 @@ class BolttaguMappingEditor:
             if Path(path).stat().st_size > 65536:
                 raise ValueError('64 KiB 이하 파일만 지원합니다.')
             document = json.loads(Path(path).read_text(encoding='utf-8-sig'))
-            validate_mapping_document(document)
+            self.validator(document)
             self.document = document
             self._load()
         except (OSError, ValueError) as exc:
@@ -211,13 +222,16 @@ class BolttaguMappingEditor:
         path = filedialog.asksaveasfilename(parent=self.window, defaultextension='.json', filetypes=[('JSON', '*.json')])
         if path:
             try:
-                Path(path).write_text(json.dumps(self._collect(), ensure_ascii=False, indent=2), encoding='utf-8')
+                document = self._collect()
+                self.validator(document)
+                Path(path).write_text(json.dumps(document, ensure_ascii=False, indent=2), encoding='utf-8')
             except (OSError, ValueError) as exc:
                 messagebox.showerror('내보내기 실패', str(exc), parent=self.window)
 
     def _save(self):
         try:
-            path = store_mapping(self._collect(), self.directory)
+            document = self._collect()
+            path = store_mapping(document, self.directory, validator=self.validator)
             self.on_save(str(path))
             self.window.destroy()
         except (OSError, ValueError) as exc:

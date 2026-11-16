@@ -96,6 +96,7 @@ class OverlayTunnelOrchestrationTests(unittest.TestCase):
         app._terminate_managed_process = Mock()
         app._initiative = Mock()
         app._apply_tunnels = Mock()
+        app._overlay_events = Mock()
         cfg = {"overlay": {}, "terminal": {}}
         with patch("overlay.main.load_cfg", return_value=cfg), patch(
             "overlay.main.get_cli_provider", return_value="claude-code"

@@ -10,6 +10,64 @@ import mcp_server
 
 
 class RemoteProvisionProofTests(unittest.IsolatedAsyncioTestCase):
+    async def test_local_listener_rejects_remote_host_exception(self):
+        forwarded = False
+        sent = []
+
+        async def receive():
+            return {"type": "http.request", "body": b"", "more_body": False}
+
+        async def send(message):
+            sent.append(message)
+
+        async def downstream(_scope, _receive, _send):
+            nonlocal forwarded
+            forwarded = True
+
+        middleware = mcp_server.LocalHostGuardMiddleware(
+            downstream, local_port=17385, allowed_hosts=("127.0.0.1:*", "localhost:*")
+        )
+        await middleware(
+            {
+                "type": "http", "method": "POST", "path": "/mcp",
+                "server": ("127.0.0.1", 17385),
+                "headers": [(b"host", b"engram.example:443")],
+            },
+            receive,
+            send,
+        )
+
+        self.assertFalse(forwarded)
+        self.assertEqual(sent[0]["status"], 421)
+
+    async def test_local_listener_keeps_loopback_host(self):
+        forwarded = False
+
+        async def receive():
+            return {"type": "http.request", "body": b"", "more_body": False}
+
+        async def send(_message):
+            return None
+
+        async def downstream(_scope, _receive, _send):
+            nonlocal forwarded
+            forwarded = True
+
+        middleware = mcp_server.LocalHostGuardMiddleware(
+            downstream, local_port=17385, allowed_hosts=("127.0.0.1:*", "localhost:*")
+        )
+        await middleware(
+            {
+                "type": "http", "method": "POST", "path": "/mcp",
+                "server": ("127.0.0.1", 17385),
+                "headers": [(b"host", b"127.0.0.1:17385")],
+            },
+            receive,
+            send,
+        )
+
+        self.assertTrue(forwarded)
+
     async def test_valid_nonce_is_attached_to_exact_tools_list_audit_event(self):
         body = json.dumps(
             {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}

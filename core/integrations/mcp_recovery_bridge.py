@@ -1,8 +1,8 @@
 """Persistent provider-facing stdio; event-driven upstream MCP replacement.
 
-Only successful protocol initialization is replayed, with one exception: a
-request the upstream rejected with "Session terminated" never reached a handler
-(the dead Mcp-Session-Id is refused before dispatch), so that single triggering
+Only successful protocol initialization is replayed, with one exception:
+requests the upstream explicitly rejects with "Session terminated" never reach
+a handler (the dead Mcp-Session-Id is refused before dispatch), so each proven
 request is re-sent once after the transport is re-initialized. Every other
 transport loss keeps the no-replay rule: requests in flight are reported as
 outcome_unknown and notifications are never queued or replayed.
@@ -28,6 +28,7 @@ MAX_INFLIGHT = 128
 UNKNOWN = -32071
 UNAVAILABLE = -32070
 REPLAY_WINDOW = 30.0  # seconds a session-terminated request waits for the transport to recover
+EXPIRY_DRAIN_WINDOW = 0.25  # let concurrently rejected requests prove pre-dispatch expiry
 
 
 @dataclass(frozen=True)
@@ -74,7 +75,14 @@ class StdioRecoveryBridge:
         self.changed = asyncio.Event()
         self.resubscribe = asyncio.Event()
         self.finished = asyncio.Event()
-        self.snapshot = None
+        # The configured loopback MCP endpoint is the data-plane authority.
+        # Overlay state is optional control metadata; it must never withdraw a
+        # working configured connection merely because the overlay is stale.
+        self.snapshot = {
+            'instance_id': 'configured-endpoint', 'generation': 0,
+            'ready': True, 'endpoint': config.upstream_url,
+        }
+        self.control_snapshot = None
         self.transport = None
         self.transport_key = None
         self.writer = None
@@ -88,11 +96,59 @@ class StdioRecoveryBridge:
         self.initialize_result = None
         self.frontend_initialized = False
         self.init_deadline_task = None
-        self.replay = None  # {'id', 'message', 'epoch', 'timer'}: the one request safe to re-send
+        # Only explicit Session terminated replies prove a request never reached
+        # a handler.  Keep those requests separate from ordinary in-flight work.
+        self.replays = {}
+        self.expiry_recovering = False
+        self.expiry_epoch = None
+        self.expiry_timer = None
+        self.deferred = []  # frontend requests not yet sent during explicit expiry recovery
+        self.retry_delay = .1
+        self.retry_handle = None
 
     def next_id(self, prefix):
         self.serial += 1
         return f'engram-{prefix}-{self.epoch}-{self.serial}'
+
+    @staticmethod
+    def state_key(state):
+        if not isinstance(state, dict):
+            return None
+        return (state.get('instance_id'), state.get('generation'), state.get('ready'), state.get('endpoint'))
+
+    def request_confirmed_expiry_rebind(self, failed_epoch, expected_key):
+        """Reopen only the same verified ready endpoint after a pre-dispatch rejection."""
+        if failed_epoch != self.epoch:
+            return
+        if expected_key is None or expected_key != self.state_key(self.snapshot) or not expected_key[2]:
+            return
+        # This callback runs after the failing connection task has returned.
+        # Never overlap an old live transport if event-loop scheduling changes.
+        if self.transport is not None and not self.transport.done():
+            return
+        self.changed.set()
+
+    def schedule_transport_retry(self, failed_epoch, expected_key):
+        """Retry a failed configured transport without polling its health."""
+        if self.retry_handle is not None and not self.retry_handle.cancelled():
+            return
+        delay = self.retry_delay
+        self.retry_delay = min(self.retry_delay * 2, 2.0)
+
+        def retry():
+            self.retry_handle = None
+            if (failed_epoch == self.epoch and expected_key == self.state_key(self.snapshot)
+                    and expected_key is not None and expected_key[2]
+                    and (self.transport is None or self.transport.done())):
+                self.changed.set()
+
+        self.retry_handle = asyncio.get_running_loop().call_later(delay, retry)
+
+    def note_control_state(self, state):
+        """Accept compatible control hints without granting endpoint authority."""
+        self.control_snapshot = state
+        if state.get('ready') and state.get('endpoint') == self.config.upstream_url:
+            self.changed.set()
 
     async def emit(self, message):
         await self.output.put(message)
@@ -107,43 +163,66 @@ class StdioRecoveryBridge:
         self.stdout.write(wire)
         self.stdout.flush()
 
-    async def flush_replay(self):
-        """The stashed request could not be re-sent: report it like any lost request."""
-        stash, self.replay = self.replay, None
-        if stash is None:
-            return
-        timer = stash.get('timer')
+    async def flush_expiry_recovery(self):
+        """Expire only pre-dispatch-proven replays; unsent requests were never executed."""
+        replays, self.replays = self.replays, {}
+        deferred, self.deferred = self.deferred, []
+        self.expiry_recovering = False
+        self.expiry_epoch = None
+        timer, self.expiry_timer = self.expiry_timer, None
         if timer is not None and timer is not asyncio.current_task():
             timer.cancel()
-        await self.emit(error(stash['id'], UNKNOWN, 'outcome_unknown: backend transport lost'))
+        for stash in replays.values():
+            await self.emit(error(stash['id'], UNKNOWN, 'outcome_unknown: backend transport lost'))
+        for message in deferred:
+            await self.emit(error(message['id'], UNAVAILABLE, 'backend_unavailable'))
 
-    async def replay_expired(self, stash):
+    async def replay_expired(self):
         await asyncio.sleep(REPLAY_WINDOW)
-        if self.replay is stash:
-            await self.flush_replay()
+        if self.expiry_recovering:
+            await self.flush_expiry_recovery()
 
     def stash_for_replay(self, upstream_id):
         """Keep the request that got 'Session terminated' (pre-dispatch rejection) for one re-send."""
         item = self.pending.get(upstream_id)
         if (item is None or item['kind'] != 'request' or item.get('replayed')
-                or item.get('message') is None or self.replay is not None):
-            return
+                or item.get('message') is None):
+            return False
         del self.pending[upstream_id]
-        stash = {'id': item['id'], 'message': item['message'], 'epoch': self.epoch, 'timer': None}
-        stash['timer'] = asyncio.create_task(self.replay_expired(stash))
-        self.replay = stash
+        self.replays[item['id']] = {'id': item['id'], 'message': item['message'], 'epoch': self.epoch}
+        if not self.expiry_recovering:
+            self.expiry_recovering = True
+            self.expiry_epoch = self.epoch
+            self.expiry_timer = asyncio.create_task(self.replay_expired())
+        return True
 
     async def replay_stashed(self):
-        stash = self.replay
-        if stash is None or not self.available:
+        if not self.expiry_recovering or not self.available:
             return
-        self.replay = None
-        stash['timer'].cancel()
-        upstream_id = self.next_id('request')
-        # Registered before sending so a second loss reports it instead of replaying again.
-        self.pending[upstream_id] = {'kind': 'request', 'id': stash['id'],
-                                     'message': stash['message'], 'replayed': True}
-        await self.send({**stash['message'], 'id': upstream_id})
+        # Pop only immediately before registering each attempt.  If a later
+        # send fails, untouched stashes remain for the connection finalizer to
+        # report explicitly rather than being silently lost.
+        while self.replays:
+            frontend_id, stash = next(iter(self.replays.items()))
+            self.replays.pop(frontend_id)
+            upstream_id = self.next_id('request')
+            # Registered before sending so a second loss reports it instead of replaying again.
+            self.pending[upstream_id] = {'kind': 'request', 'id': stash['id'],
+                                         'message': stash['message'], 'replayed': True}
+            await self.send({**stash['message'], 'id': upstream_id})
+        # Keep the expiry gate while releasing deferred requests.  Calling
+        # frontend_message here would requeue them, so send each unsent request
+        # directly and retain the remaining collection if a write fails.
+        while self.deferred:
+            message = self.deferred.pop(0)
+            upstream_id = self.next_id('request')
+            self.pending[upstream_id] = {'kind': 'request', 'id': message['id'], 'message': message}
+            await self.send({**message, 'id': upstream_id})
+        self.expiry_recovering = False
+        self.expiry_epoch = None
+        if self.expiry_timer is not None:
+            self.expiry_timer.cancel()
+            self.expiry_timer = None
 
     async def send(self, message):
         writer = self.writer
@@ -228,9 +307,12 @@ class StdioRecoveryBridge:
             return
         if method == 'notifications/cancelled':
             original_id = value.get('params', {}).get('requestId')
-            if self.replay is not None and self.replay['id'] == original_id:
-                self.replay['timer'].cancel()
-                self.replay = None  # the client no longer wants it; nothing to re-send
+            if original_id in self.replays:
+                self.replays.pop(original_id, None)  # the client no longer wants it; nothing to re-send
+                return
+            deferred = next((item for item in self.deferred if item.get('id') == original_id), None)
+            if deferred is not None:
+                self.deferred.remove(deferred)
                 return
             match = next((key for key, item in self.pending.items()
                           if item.get('id') == original_id and item['kind'] == 'request'), None)
@@ -239,6 +321,12 @@ class StdioRecoveryBridge:
                 await self.send({**value, 'params': {**value['params'], 'requestId': match}})
             return
         request = 'id' in value
+        if request and self.expiry_recovering:
+            if len(self.pending) + len(self.replays) + len(self.deferred) >= MAX_INFLIGHT:
+                await self.emit(error(value['id'], UNAVAILABLE, 'bridge_backpressure'))
+            else:
+                self.deferred.append(value)
+            return
         if not self.available:
             if request:
                 await self.emit(error(value['id'], UNAVAILABLE, 'backend_unavailable'))
@@ -310,6 +398,10 @@ class StdioRecoveryBridge:
         if pending['kind'] == 'initialize':
             if 'result' in message:
                 self.initialize_result = message['result']
+                # A successful first handshake proves the configured endpoint
+                # is back.  Do not carry a prior outage's capped delay into
+                # the next, unrelated transport failure.
+                self.retry_delay = .1
             self.first_initialize = None
             if self.init_deadline_task:
                 self.init_deadline_task.cancel()
@@ -318,6 +410,7 @@ class StdioRecoveryBridge:
     async def connection(self, endpoint, epoch):
         read_task = None
         failed = False
+        confirmed_expiry_key = None
         try:
             async with httpx.AsyncClient(trust_env=False, follow_redirects=False,
                     timeout=httpx.Timeout(self.config.connect_timeout, read=None)) as http:
@@ -331,6 +424,7 @@ class StdioRecoveryBridge:
                                 pending['future'].set_exception(ConnectionError('backend unavailable'))
 
                     async def read_upstream():
+                        nonlocal confirmed_expiry_key
                         async for item in reader:
                             if isinstance(item, Exception):
                                 fail_reinitialize()
@@ -341,8 +435,29 @@ class StdioRecoveryBridge:
                                 # Mcp-Session-Id를 계속 쓴다. 세션 검증에서 거절돼 핸들러에 닿지 않은
                                 # 요청이므로 그 한 건만 재연결 후 한 번 다시 보낸다(이미 한 번 재전송했으면
                                 # pending 에 남겨 outcome_unknown 처리).
-                                if epoch == self.epoch:
-                                    self.stash_for_replay(message.get('id'))
+                                if epoch == self.epoch and self.stash_for_replay(message.get('id')):
+                                    key = self.state_key(self.snapshot)
+                                    if key is not None and key[2]:
+                                        confirmed_expiry_key = key
+                                # Other already-sent requests may independently carry the
+                                # same pre-dispatch proof.  Drain only briefly; all others
+                                # retain the normal UNKNOWN outcome when fail_transport runs.
+                                deadline = asyncio.get_running_loop().time() + EXPIRY_DRAIN_WINDOW
+                                while any(p['kind'] == 'request' for p in self.pending.values()):
+                                    remaining = deadline - asyncio.get_running_loop().time()
+                                    if remaining <= 0:
+                                        break
+                                    try:
+                                        extra = await asyncio.wait_for(reader.__anext__(), remaining)
+                                    except (asyncio.TimeoutError, StopAsyncIteration):
+                                        break
+                                    if isinstance(extra, Exception):
+                                        break
+                                    extra_message = extra.message.model_dump(mode='json', by_alias=True, exclude_none=True)
+                                    if session_terminated(extra_message) and epoch == self.epoch:
+                                        self.stash_for_replay(extra_message.get('id'))
+                                    else:
+                                        await self.backend_message(extra_message, epoch)
                                 fail_reinitialize()
                                 raise ConnectionError('upstream session terminated')
                             await self.backend_message(message, epoch)
@@ -366,6 +481,7 @@ class StdioRecoveryBridge:
                                     raise ConnectionError('backend capabilities changed')
                             await self.send({'jsonrpc': '2.0', 'method': 'notifications/initialized'})
                             self.available = self.frontend_initialized
+                            self.retry_delay = .1
                             await self.replay_stashed()
                         else:
                             await self.send_first_initialize()
@@ -383,12 +499,22 @@ class StdioRecoveryBridge:
         finally:
             if epoch == self.epoch:
                 await self.fail_transport()
-            if failed and self.replay is not None and epoch != self.replay['epoch']:
-                await self.flush_replay()  # the recovery attempt itself failed
+            if (failed and self.expiry_recovering and (self.replays or self.deferred)
+                    and epoch != self.expiry_epoch):
+                await self.flush_expiry_recovery()  # the recovery attempt itself failed
             if failed:
                 # Reconcile only after this task becomes done; otherwise a fresh
                 # snapshot could race with manage() and be mistaken for a live pipe.
                 asyncio.get_running_loop().call_soon(self.resubscribe.set)
+                if confirmed_expiry_key is not None:
+                    asyncio.get_running_loop().call_soon(
+                        self.request_confirmed_expiry_rebind, epoch, confirmed_expiry_key
+                    )
+                else:
+                    key = self.state_key(self.snapshot)
+                    asyncio.get_running_loop().call_soon(
+                        self.schedule_transport_retry, epoch, key
+                    )
 
     async def manage(self):
         while True:
@@ -397,7 +523,7 @@ class StdioRecoveryBridge:
             state = self.snapshot
             if state is None:
                 continue
-            key = (state['instance_id'], state['generation'], state['ready'], state.get('endpoint'))
+            key = self.state_key(state)
             if self.transport is not None and not self.transport.done() and self.transport_key == key:
                 continue
             await self.fail_transport()
@@ -406,6 +532,12 @@ class StdioRecoveryBridge:
                 with contextlib.suppress(asyncio.CancelledError, Exception):
                     await self.transport
                 self.transport = None
+            # A control hint may have requested this replacement before an
+            # older failed transport's timer fires.  That timer is keyed to
+            # the old epoch and cannot recover a failure of the new one.
+            if self.retry_handle is not None:
+                self.retry_handle.cancel()
+                self.retry_handle = None
             self.epoch += 1
             self.transport_key = key
             if state['ready']:
@@ -443,10 +575,9 @@ class StdioRecoveryBridge:
                             or type(state.get('generation')) is not int
                             or not isinstance(state.get('instance_id'), str)):
                         raise ValueError('invalid readiness metadata')
-                    if state['ready']:
-                        checked_url(state.get('endpoint', ''), '/mcp')
-                    self.snapshot = state
-                    self.changed.set()
+                    # Metadata can prompt an already-dead configured transport
+                    # to retry, but never supplies an endpoint or revokes one.
+                    self.note_control_state(state)
 
     async def events_loop(self):
         delay = .1
@@ -473,6 +604,9 @@ class StdioRecoveryBridge:
     async def run(self):
         tasks = [asyncio.create_task(method()) for method in
                  (self.output_loop, self.frontend_loop, self.events_loop, self.manage)]
+        # Bootstrap the configured MCP endpoint without waiting for overlay
+        # discovery or the control-plane SSE stream.
+        self.changed.set()
         try:
             await self.finished.wait()
         finally:
@@ -482,6 +616,10 @@ class StdioRecoveryBridge:
                     await self.transport
             if self.init_deadline_task:
                 self.init_deadline_task.cancel()
+            if self.expiry_timer:
+                self.expiry_timer.cancel()
+            if self.retry_handle:
+                self.retry_handle.cancel()
             for task in tasks:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)

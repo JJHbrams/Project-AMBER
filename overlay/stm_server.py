@@ -16,7 +16,9 @@ import json
 import errno
 import logging
 import os
+import queue
 import socket
+import _thread
 import threading
 import time
 from pathlib import Path
@@ -44,6 +46,45 @@ _SEEN_LOCK = threading.Lock()
 _MAX_SEEN = 1000
 _shutdown_callback: "Optional[callable]" = None
 _new_session_callback: "Optional[callable]" = None
+
+
+def _start_thread_bounded(thread: threading.Thread, gate: threading.Event,
+                          cancelled: threading.Event, timeout: float, label: str) -> None:
+    """Keep a platform-stalled ``Thread.start`` out of the caller's thread.
+
+    The raw bootstrap is intentionally disposable.  If Thread.start returns
+    after the deadline, its wrapped target sees ``cancelled`` before entering
+    application code.  CPython exposes no cancellation API for Thread.start.
+    """
+    acknowledged = threading.Event()
+    failure: list[BaseException] = []
+
+    def bootstrap() -> None:
+        try:
+            thread.start()
+        except BaseException as exc:  # propagate the startup failure to caller
+            failure.append(exc)
+        finally:
+            acknowledged.set()
+
+    _thread.start_new_thread(bootstrap, ())
+    if not acknowledged.wait(timeout):
+        cancelled.set()
+        gate.set()
+        raise RuntimeError(f"{label} Thread.start did not return before deadline")
+    if failure:
+        cancelled.set()
+        gate.set()
+        raise RuntimeError(f"{label} Thread.start failed") from failure[0]
+    gate.set()
+
+
+def _join_started_thread(thread: Optional[threading.Thread], timeout: float) -> bool:
+    """Join only a thread that reached CPython's started state."""
+    if thread is None or thread.ident is None:
+        return True
+    thread.join(timeout=timeout)
+    return not thread.is_alive()
 
 
 def _resolve_open_session_id(session_id: object, scope_key: Optional[str]) -> Optional[int]:
@@ -484,7 +525,191 @@ class _STMHandler(BaseHTTPRequestHandler):
 
 
 class _ExclusiveHTTPServer(ThreadingHTTPServer):
+    """HTTP server whose accept loop is insulated from handler-thread startup.
+
+    ``ThreadingMixIn.process_request`` starts a handler synchronously.  A
+    platform-level stall in ``Thread.start`` therefore used to stall the sole
+    accept thread and, in turn, made ``BaseServer.shutdown`` wait forever.
+    A single, bounded launcher owns that synchronous operation instead.  It is
+    deliberately sacrificial: if it stalls, the accept loop remains able to
+    reject new sockets and shutdown can still close the listening socket.
+    """
+
     allow_reuse_address = False
+    daemon_threads = True
+    block_on_close = False
+    request_queue_size = 64
+    # State/title/presence updates often arrive in a short burst.  Keep enough
+    # bounded headroom for those normal local clients while retaining a hard
+    # limit if a launcher becomes stuck.
+    _LAUNCH_QUEUE_SIZE = 64
+    _STARTUP_TIMEOUT = 1.0
+    _STALL_TIMEOUT = 1.0
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._closing = threading.Event()
+        self._launcher_ready = threading.Event()
+        self._launcher_stop = threading.Event()
+        self._launcher_start_gate = threading.Event()
+        self._launcher_start_cancelled = threading.Event()
+        self._launch_queue: queue.Queue[tuple[socket.socket, object]] = queue.Queue(
+            maxsize=self._LAUNCH_QUEUE_SIZE
+        )
+        self._launch_started_at: Optional[float] = None
+        self._launch_lock = threading.RLock()
+        self._current_request: Optional[socket.socket] = None
+        self._owned_requests: set[socket.socket] = set()
+        self._accept_failed = False
+        self._launcher = threading.Thread(
+            target=self._launcher_entry, daemon=True, name="stm-handler-launcher"
+        )
+
+    def start_launcher(self, timeout: float = _STARTUP_TIMEOUT) -> None:
+        """Start the only blocking handler-launch path and wait only boundedly."""
+        _start_thread_bounded(self._launcher, self._launcher_start_gate,
+                              self._launcher_start_cancelled, timeout, "STM handler launcher")
+        if not self._launcher_ready.wait(timeout):
+            self._closing.set()
+            self._launcher_stop.set()
+            self.server_close()
+            raise RuntimeError("STM handler launcher did not become ready")
+
+    def _launcher_entry(self) -> None:
+        self._launcher_start_gate.wait()
+        if not self._launcher_start_cancelled.is_set():
+            self._run_launcher()
+
+    def _run_launcher(self) -> None:
+        self._launcher_ready.set()
+        while not self._launcher_stop.is_set():
+            try:
+                request, client_address = self._launch_queue.get(timeout=.05)
+            except queue.Empty:
+                continue
+            if self._closing.is_set():
+                self._close_request(request)
+                continue
+            with self._launch_lock:
+                self._launch_started_at = time.monotonic()
+                self._current_request = request
+            try:
+                # Call ThreadingMixIn's original lifecycle from this isolated
+                # daemon.  This is the only operation allowed to block in
+                # Thread.start().
+                super().process_request(request, client_address)
+            except Exception:
+                logger.exception("STM handler launch failed")
+                self._close_request(request)
+            finally:
+                with self._launch_lock:
+                    self._launch_started_at = None
+                    self._current_request = None
+
+    def process_request(self, request, client_address):
+        """Queue an accepted socket or promptly reject it when the gate is full."""
+        try:
+            # Bound incomplete request headers/bodies without disrupting the
+            # existing 20-second SSE heartbeat.
+            request.settimeout(30.0)
+        except OSError:
+            self._close_request(request)
+            return
+        rejected = False
+        with self._launch_lock:
+            if self._closing.is_set() or self._launcher_stalled():
+                rejected = True
+            else:
+                self._owned_requests.add(request)
+                try:
+                    self._launch_queue.put_nowait((request, client_address))
+                except queue.Full:
+                    self._owned_requests.discard(request)
+                    rejected = True
+        if rejected:
+            self._close_request(request)
+
+    def process_request_thread(self, request, client_address):
+        # A delayed Thread.start may return after stop.  It belongs to this old
+        # server generation and must never enter a handler against closed or
+        # replacement state.
+        if self._closing.is_set():
+            self._close_request(request)
+            return
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._forget_request(request)
+
+    def handle_error(self, request, client_address):
+        if self._closing.is_set():
+            logger.debug("STM handler ended while server was stopping")
+            return
+        super().handle_error(request, client_address)
+
+    def request_shutdown(self) -> None:
+        """Request serve_forever exit without BaseServer.shutdown's unbounded wait."""
+        self._closing.set()
+        self._launcher_stop.set()
+        self._launcher_start_cancelled.set()
+        self._launcher_start_gate.set()
+        # BaseServer.shutdown waits for this event; setting its request flag is
+        # sufficient for serve_forever's bounded poll loop and never waits here.
+        setattr(self, "_BaseServer__shutdown_request", True)
+        with self._launch_lock:
+            owned_requests = tuple(self._owned_requests)
+        for request in owned_requests:
+            self._close_request(request)
+        self._close_queued_requests()
+        self.server_close()
+
+    def record_accept_failure(self) -> None:
+        self._accept_failed = True
+        self.request_shutdown()
+
+    def _close_queued_requests(self) -> None:
+        while True:
+            try:
+                request, _ = self._launch_queue.get_nowait()
+            except queue.Empty:
+                return
+            self._close_request(request)
+
+    def _close_request(self, request) -> None:
+        self._forget_request(request)
+        try:
+            self.shutdown_request(request)
+        except OSError:
+            pass
+
+    def _forget_request(self, request) -> None:
+        with self._launch_lock:
+            self._owned_requests.discard(request)
+
+    def _launcher_stalled(self) -> bool:
+        with self._launch_lock:
+            started = self._launch_started_at
+        return started is not None and time.monotonic() - started >= self._STALL_TIMEOUT
+
+    @property
+    def health_reason(self) -> Optional[str]:
+        if self._accept_failed:
+            return "accept_loop_failed"
+        if self._closing.is_set():
+            return "stopping"
+        if not self._launcher.is_alive():
+            return "launcher_not_alive"
+        if not self._launcher_ready.is_set():
+            return "launcher_not_ready"
+        if self._launcher_stalled():
+            return "handler_launch_stalled"
+        if self._launch_queue.full():
+            return "handler_launch_queue_full"
+        return None
+
+    @property
+    def healthy(self) -> bool:
+        return self.health_reason is None
 
     def server_bind(self):
         if os.name == 'nt':
@@ -495,14 +720,18 @@ class _ExclusiveHTTPServer(ThreadingHTTPServer):
 class STMServer:
     """overlay.exe 내 상주 STM HTTP 서버."""
 
+    _STARTUP_TIMEOUT = 1.0
+    _STOP_TIMEOUT = 1.0
+
     def __init__(self, port: Optional[int] = None, shutdown_callback: "Optional[callable]" = None,
                  new_session_callback: "Optional[callable]" = None, *,
                  state_registry: Optional[SessionStateRegistry] = None,
                  state_discovery_path: Optional[Path] = None):
         global _shutdown_callback, _new_session_callback
         self._port = _get_port() if port is None else port
-        self._server: Optional[ThreadingHTTPServer] = None
+        self._server: Optional[_ExclusiveHTTPServer] = None
         self._thread: Optional[threading.Thread] = None
+        self._retired_threads: list[tuple[_ExclusiveHTTPServer, threading.Thread]] = []
         self._state_registry = state_registry or SessionStateRegistry()
         self._state_discovery_path = state_discovery_path or state_discovery_file()
         self._state_instance_id, self._state_token = new_credentials()
@@ -518,22 +747,54 @@ class STMServer:
             self._server.state_discovery_path = self._state_discovery_path
             self._server.mcp_recovery_events = McpRecoveryEvents(self._state_instance_id)
             actual_port = self._server.server_address[1]
-            publish_discovery(self._state_discovery_path, port=actual_port,
-                              instance_id=self._state_instance_id, token=self._state_token)
-            self._port = actual_port
+            self._server.start_launcher(self._STARTUP_TIMEOUT)
+            server = self._server
+            serve_ready = threading.Event()
+            serve_gate = threading.Event()
+            serve_cancelled = threading.Event()
+
+            def serve() -> None:
+                serve_gate.wait()
+                if serve_cancelled.is_set():
+                    return
+                serve_ready.set()
+                try:
+                    server.serve_forever()
+                except OSError:
+                    # Closing the listening socket can wake the Windows select
+                    # path as WinError 10038.  That expected shutdown must not
+                    # escape into the overlay's global crash reporting.
+                    if not server._closing.is_set():
+                        logger.exception("STM accept loop failed")
+                        server.record_accept_failure()
+
             self._thread = threading.Thread(
-                target=self._server.serve_forever,
+                target=serve,
                 daemon=True,
                 name="stm-http-server",
             )
-            self._thread.start()
+            _start_thread_bounded(self._thread, serve_gate, serve_cancelled,
+                                  self._STARTUP_TIMEOUT, "STM HTTP server")
+            if not serve_ready.wait(self._STARTUP_TIMEOUT):
+                serve_cancelled.set()
+                serve_gate.set()
+                raise RuntimeError("STM HTTP server did not become ready")
+            publish_discovery(self._state_discovery_path, port=actual_port,
+                              instance_id=self._state_instance_id, token=self._state_token)
+            self._port = actual_port
             logger.info("STM HTTP 서버 시작: port=%d", self._port)
         except OSError as e:
             # A listener that bound successfully but could not publish its private
             # discovery record must not remain reachable without discoverable auth.
             if self._server is not None:
-                self._server.server_close()
+                server = self._server
+                thread = self._thread
+                server.request_shutdown()
                 self._server = None
+                self._thread = None
+                if thread is not None:
+                    if not _join_started_thread(thread, self._STOP_TIMEOUT):
+                        self._retired_threads.append((server, thread))
                 raise
             # The bounded bind loop already checked ownership. Do not add a
             # second blocking probe after its one-second handoff deadline.
@@ -549,6 +810,18 @@ class STMServer:
             else:
                 logger.error("STM 포트 %d 점유 주체 불명 (health 응답 없음) — STM 비활성화: %s",
                              self._port, e)
+        except Exception:
+            server = self._server
+            thread = self._thread
+            self._server = None
+            self._thread = None
+            if server is not None:
+                server.request_shutdown()
+            if thread is not None:
+                if not _join_started_thread(thread, self._STOP_TIMEOUT) and server is not None:
+                    self._retired_threads.append((server, thread))
+            remove_discovery_if_owner(self._state_discovery_path, self._state_instance_id)
+            raise
 
     def _bind_listener(self):
         """Allow a departing owner's close to finish without taking its port."""
@@ -589,20 +862,45 @@ class STMServer:
             return None
 
     def stop(self):
-        if self._server:
-            self._server.mcp_recovery_events.close()
-            self._server.shutdown()
-            self._server.server_close()
-            self._server = None
-        if self._thread:
-            self._thread.join(timeout=5)
-            self._thread = None
+        server = self._server
+        thread = self._thread
+        # Detach the stopped generation first.  A launcher blocked inside
+        # Thread.start can outlive this bounded stop, but cannot be reused by a
+        # future listener and process_request_thread will reject after closing.
+        self._server = None
+        self._thread = None
+        if server:
+            events = getattr(server, "mcp_recovery_events", None)
+            if events is not None:
+                events.close()
+            server.request_shutdown()
+        if thread:
+            if not _join_started_thread(thread, self._STOP_TIMEOUT) and server is not None:
+                self._retired_threads.append((server, thread))
         remove_discovery_if_owner(self._state_discovery_path, self._state_instance_id)
-        logger.info("STM HTTP 서버 종료")
+        stopped = thread is None or thread.ident is None or not thread.is_alive()
+        if stopped:
+            logger.info("STM HTTP 서버 종료")
+        else:
+            logger.warning("STM HTTP 서버 종료 요청 완료, accept thread deadline 초과")
+        return stopped
 
     @property
     def listening(self) -> bool:
-        return self._server is not None and self._thread is not None and self._thread.is_alive()
+        return (
+            self._server is not None
+            and self._thread is not None
+            and self._thread.is_alive()
+            and self._server.healthy
+        )
+
+    @property
+    def health_reason(self) -> Optional[str]:
+        if self._server is None:
+            return "not_started"
+        if self._thread is None or not self._thread.is_alive():
+            return "accept_thread_not_alive"
+        return self._server.health_reason
 
     @property
     def port(self) -> int:

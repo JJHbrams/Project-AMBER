@@ -17,6 +17,7 @@ import yaml
 from overlay.bubble import geometry as bubble_geometry
 from overlay.native_bolttagu import Bolttagu2dView
 from overlay.native_engram_icon import EngramIconView
+from overlay.native_mnema import MnemaView
 from overlay.bolttagu_mapping import STATE_POSES
 
 from overlay.character_assets import (
@@ -475,9 +476,9 @@ class _CharacterProfile:
         stored_source_mode = str(character_cfg.get("source_mode") or "").strip().lower()
         legacy_sequence = Path(self.name).is_dir() or resolve_bundled_character_source(self.name, "sequence") is not None
         self.source_mode = stored_source_mode or ("sequence" if legacy_sequence else "static")
-        if self.source_mode not in {"static", "sequence", "sprite_grid", "native_bolttagu", "native_engram_icon"}:
+        if self.source_mode not in {"static", "sequence", "sprite_grid", "native_bolttagu", "native_engram_icon", "native_mnema"}:
             self.source_mode = "static"
-        self.native_enabled = self.source_mode in {"native_bolttagu", "native_engram_icon"}
+        self.native_enabled = self.source_mode in {"native_bolttagu", "native_engram_icon", "native_mnema"}
         self.set_resolution = resolve_character_set(self.set_id)
         reactions_cfg = character_cfg.get("reactions", {})
         reactions_cfg = reactions_cfg if isinstance(reactions_cfg, dict) else {}
@@ -750,9 +751,27 @@ class CharacterOverlay:
 
     @staticmethod
     def _create_native_view(cfg: dict, profile: _CharacterProfile) -> Bolttagu2dView | None:
-        if not profile.native_enabled:
+        if not getattr(profile, "native_enabled", False):
             return None
         character_cfg = cfg.get("overlay", {}).get("character", {})
+        if getattr(profile, "source_mode", "native_bolttagu") == "native_mnema":
+            try:
+                options = character_cfg.get("mnema", {})
+                mapping = options.get("mapping_path")
+                if mapping:
+                    from overlay.mnema_mapping import validate_mapping_file
+                    validate_mapping_file(Path(mapping))
+                return MnemaView(
+                    launcher_managed=True,
+                    face_pointer=True,
+                    show_floor=False,
+                    seed=random.randrange(233280),
+                    mapping_path=Path(mapping) if mapping else None,
+                )
+            except Exception:
+                log.warning("[overlay] native Mnema unavailable; using retained legacy artwork", exc_info=True)
+                profile.native_enabled = False
+                return None
         if getattr(profile, "source_mode", "native_bolttagu") == "native_engram_icon":
             try:
                 return EngramIconView(
@@ -823,6 +842,10 @@ class CharacterOverlay:
 
     def _character_watch_paths_for(self, profile: _CharacterProfile) -> set[Path]:
         paths = {resolve_editable_overlay_path("config/overlay.yaml"), _USER_CONFIG_PATH}
+        if getattr(profile, "source_mode", "") == "native_mnema":
+            mapping = self._cfg.get("overlay", {}).get("character", {}).get("mnema", {}).get("mapping_path")
+            if mapping:
+                paths.add(Path(mapping))
         # Keep the configured user-pack candidates in the watch set even when
         # their manifest is currently missing or invalid and resolution fell
         # back to the bundled pack.  Creating/fixing that manifest must trigger
@@ -915,6 +938,11 @@ class CharacterOverlay:
             # manifest from silently falling back to a bundled pack.
             self._validate_yaml_mappings(self._character_watch_paths())
             self._validate_yaml_mappings(self._character_watch_paths_for(profile))
+            if getattr(profile, "source_mode", "") == "native_mnema":
+                mapping = cfg.get("overlay", {}).get("character", {}).get("mnema", {}).get("mapping_path")
+                if mapping:
+                    from overlay.mnema_mapping import validate_mapping_file
+                    validate_mapping_file(Path(mapping))
             reactions = cfg.get("overlay", {}).get("character", {}).get("reactions", {})
             if (
                 str(cfg.get("overlay", {}).get("character", {}).get("source_mode", "")).lower() == "sprite_grid"
@@ -933,7 +961,7 @@ class CharacterOverlay:
 
         old_model = self._sprite_model
         now_ms = time.monotonic() * 1000
-        model = SpriteStateMachine(set(STATE_POSES) if profile.native_enabled else set(profile.reaction_pack.states or {}), started_ms=old_model.started_ms)
+        model = SpriteStateMachine(set(STATE_POSES) if getattr(profile, "native_enabled", False) else set(profile.reaction_pack.states or {}), started_ms=old_model.started_ms)
         model.hovered = old_model.hovered
         model.input_active = old_model.input_active
         model.work_state = model._available(old_model.work_state)

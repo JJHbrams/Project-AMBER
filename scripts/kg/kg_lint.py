@@ -8,6 +8,7 @@ kg_lint.py — Wiki 품질 점검 도구
   4. 고립 노드 — 인바운드·아웃바운드 엣지 없고 [[링크]]도 없는 노트
   5. 빈/너무 짧은 노트 (본문 200자 미만)
   6. 제목 중복 노드
+  7. id 중복 파일 — 같은 frontmatter id 를 선언한 파일 중 하나만 노드가 된다
 
 Usage:
     python scripts/kg_lint.py [--fix-summary] [-v]
@@ -171,6 +172,25 @@ def check_missing_summary(fix: bool = False) -> list[dict]:
     return issues
 
 
+def check_duplicate_ids(docs: Path) -> list[dict]:
+    """같은 id 를 선언한 파일은 sync 에서 하나만 노드가 되고 나머지는 건너뛴다."""
+    from core.graph.knowledge.knowledge_graph import iter_wiki_md_files, parse_markdown
+
+    seen: dict[str, list[str]] = {}
+    for md in iter_wiki_md_files(docs):
+        try:
+            parsed = parse_markdown(md.read_text(encoding="utf-8", errors="ignore"), md)
+        except OSError:
+            continue
+        if parsed["title"] and parsed["id"]:
+            seen.setdefault(parsed["id"], []).append(str(md.relative_to(docs)))
+    return [
+        {"file": ", ".join(paths), "issue": "id 중복", "detail": f"'{nid}' — {len(paths)}개 파일 중 하나만 노드"}
+        for nid, paths in seen.items()
+        if len(paths) > 1
+    ]
+
+
 def check_duplicate_titles() -> list[dict]:
     kg = get_kg()
     all_nodes = kg.list_nodes(limit=500)
@@ -227,6 +247,7 @@ def run_lint(vault: Path, fix_summary: bool = False, verbose: bool = False) -> d
         ("isolated_nodes", lambda: check_isolated_nodes(docs)),
         ("missing_summary", lambda: check_missing_summary(fix=fix_summary)),
         ("duplicate_titles", lambda: check_duplicate_titles()),
+        ("duplicate_ids", lambda: check_duplicate_ids(docs)),
         ("project_root_files", lambda: check_project_root_files(docs)),
     ]
 
@@ -243,6 +264,7 @@ def run_lint(vault: Path, fix_summary: bool = False, verbose: bool = False) -> d
                 "isolated_nodes": "고립 노드",
                 "missing_summary": "summary 없음",
                 "duplicate_titles": "제목 중복",
+                "duplicate_ids": "id 중복",
                 "project_root_files": "projects 루트 직접 저장",
             }[name]
             status = "✅" if not issues else "⚠️ "
@@ -270,6 +292,7 @@ def format_lint_report(results: dict) -> str:
         "isolated_nodes": "고립 노드 (링크 없음)",
         "missing_summary": "summary 없는 노드",
         "duplicate_titles": "제목 중복 노드",
+        "duplicate_ids": "id 중복 파일 (하나만 노드)",
         "project_root_files": "projects 루트 직접 저장",
     }
     for key, issues in results.items():

@@ -131,67 +131,95 @@ def _acquire_singleton_lock(lock_path: Path) -> bool:
 _MCP_BASE_URL = "http://127.0.0.1:17385"
 
 
-def _try_semantic_sync_via_mcp() -> bool:
-    """MCP 서버가 살아있으면 /kg_sync 엔드포인트로 sync 위임.
-    성공하면 True, 서버 없거나 실패하면 False 반환.
-    KuzuDB single-writer 제약 회피용.
+_MCP_SYNC_TIMEOUT = 300
+
+
+def _sync_via_mcp() -> bool | None:
+    """MCP 서버의 /kg_sync 로 SQLite+시맨틱 싱크 전체를 위임한다.
+
+    True: 완료. False: 서버에 연결할 수 없음(직접 처리해야 함).
+    None: 서버는 받았지만 응답이 늦거나 실패 — 서버 쪽 sync 가 계속 돌고 있을 수 있으니
+    여기서 직접 처리하면 같은 DB 에 쓰기가 겹친다. 다음 변경 때 다시 맡긴다.
     """
+    import json
+    import socket
+    import urllib.error
+
+    req = urllib.request.Request(
+        f"{_MCP_BASE_URL}/kg_sync",
+        data=b"{}",
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
     try:
-        import json
-        req = urllib.request.Request(
-            f"{_MCP_BASE_URL}/kg_sync",
-            data=b"{}",
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=10) as resp:
+        with urllib.request.urlopen(req, timeout=_MCP_SYNC_TIMEOUT) as resp:
             result = json.loads(resp.read())
-            sem = result.get("semantic", {})
-            logger.info(
-                "MCP kg_sync 완료 — KGNode=%s reembedded=%s",
-                sem.get("nodes", "?"),
-                sem.get("reembedded", "?"),
-            )
-            return True
-    except Exception as exc:
-        logger.debug("MCP 서버 경유 실패 (%s) — 직접 처리로 폴백", exc)
+    except urllib.error.URLError as exc:
+        # 요청이 아예 못 나간 경우만 "서버 없음"이다. 리셋·끊김은 서버가 요청을 받은 뒤일 수
+        # 있다 — 과부하 서버도 WinError 10054 로 끊는다.
+        if isinstance(exc.reason, (ConnectionRefusedError, socket.gaierror)):
+            logger.debug("MCP 서버 연결 불가 (%s) — 직접 처리로 폴백", exc)
+            return False
+        logger.warning("MCP kg_sync 실패 (%s) — 직접 처리하지 않음", exc)
+        return None
+    except ConnectionRefusedError as exc:
+        logger.debug("MCP 서버 연결 불가 (%s) — 직접 처리로 폴백", exc)
         return False
+    except Exception as exc:
+        logger.warning("MCP kg_sync 응답 없음 (%s) — 직접 처리하지 않음", exc)
+        return None
+
+    if result.get("busy"):
+        # 앞선 sync 가 락을 쥐고 있어 이번 변경은 반영되지 않았다 — 나중에 다시 맡긴다.
+        logger.info("MCP kg_sync busy — 잠시 뒤 재시도")
+        return None
+
+    sem = result.get("semantic", {})
+    logger.info(
+        "MCP kg_sync 완료 — 동기화 %s, 변경없음 %s, KGNode=%s reembedded=%s",
+        result.get("synced", "?"),
+        result.get("unchanged", "?"),
+        sem.get("nodes", "?"),
+        sem.get("reembedded", "?"),
+    )
+    return True
 
 
 # ── Vault 싱크 ────────────────────────────────────────────
 
 
-def _do_sync(vault_path: Path) -> None:
-    """Vault 전체 싱크 — SQLite + KuzuDB (MCP 서버 경유 우선)"""
+def _do_sync(vault_path: Path) -> bool:
+    """Vault 증분 싱크 — MCP 서버에 위임하고, 서버가 없을 때만 직접 처리한다.
+
+    직접 쓰기와 서버 쓰기가 같은 SQLite 를 동시에 잡지 않도록 한쪽만 쓴다.
+    서버가 받았지만 반영을 확인 못 했으면 True(재시도 필요)를 돌려준다."""
     try:
-        from core.graph.knowledge import get_kg, iter_wiki_md_files
+        delegated = _sync_via_mcp()
+        if delegated is None:
+            return True
+        if delegated:
+            return False
 
-        docs_dir = vault_path / "docs"
-        kg = get_kg()
-        synced = skipped = 0
-        for f in iter_wiki_md_files(docs_dir):
-            nid = kg.sync_file(f, docs_dir)
-            if nid:
-                synced += 1
-            else:
-                skipped += 1
-        kg.resolve_links(docs_dir)
-        pruned = kg.prune_missing(docs_dir)
-        logger.info("SQLite KG 싱크 완료 — %d개 동기화, %d개 건너뜀, %d개 고아 정리", synced, skipped, len(pruned))
+        from core.graph.knowledge import get_kg
 
-        # 시맨틱 싱크: MCP 서버가 살아있으면 위임, 아니면 직접 처리
-        if not _try_semantic_sync_via_mcp():
-            from core.graph.semantic import get_semantic_graph, run_sg_coro
-            sg = get_semantic_graph()
-            sem = run_sg_coro(sg.sync_from_kg())
-            logger.info(
-                "직접 시맨틱 싱크 완료 — 노드 %d개 (재임베딩 %d개), 엣지 %d개",
-                sem.get("nodes", 0),
-                sem.get("reembedded", 0),
-                sem.get("edges", 0),
-            )
+        res = get_kg().sync_vault(vault_path / "docs")
+        logger.info(
+            "SQLite KG 싱크 완료 — %d개 동기화, %d개 변경없음, %d개 건너뜀, %d개 고아 정리",
+            res["synced"], res["unchanged"], res["skipped"], len(res["pruned"]),
+        )
+
+        from core.graph.semantic import get_semantic_graph, run_sg_coro
+        sg = get_semantic_graph()
+        sem = run_sg_coro(sg.sync_from_kg())
+        logger.info(
+            "직접 시맨틱 싱크 완료 — 노드 %d개 (재임베딩 %d개), 엣지 %d개",
+            sem.get("nodes", 0),
+            sem.get("reembedded", 0),
+            sem.get("edges", 0),
+        )
     except Exception as exc:
         logger.error("싱크 실패: %s", exc, exc_info=True)
+    return False
 
 
 # ── 프로젝트 파일 처리 ────────────────────────────────────
@@ -231,7 +259,10 @@ def _inject_or_update_frontmatter(text: str, src_path: Path, project_name: str) 
 
 
 def _sync_project_file(src_path: Path, project_name: str, vault_path: Path) -> bool:
-    """프로젝트 파일 한 개를 wiki docs/projects/<name>/ 로 복사 + KG 싱크."""
+    """프로젝트 파일 한 개를 wiki docs/projects/<name>/ 로 복사한다.
+
+    KG 반영은 직접 하지 않는다 — 복사본이 docs/ 아래에 생기면 vault 감시가 잡아
+    _DebounceSync 한 경로로만 싱크한다(쓰기 경로가 둘이면 락을 서로 다툰다)."""
     dest_dir = vault_path / "docs" / "projects" / project_name
     dest_dir.mkdir(parents=True, exist_ok=True)
 
@@ -244,28 +275,16 @@ def _sync_project_file(src_path: Path, project_name: str, vault_path: Path) -> b
         logger.warning("파일 읽기 실패 %s: %s", src_path, exc)
         return False
 
-    dest_path.write_text(
-        _inject_or_update_frontmatter(text, src_path, project_name),
-        encoding="utf-8",
-    )
-
     try:
-        from core.graph.knowledge import get_kg
-        from core.graph.semantic import get_semantic_graph, run_sg_coro
-
-        docs_dir = vault_path / "docs"
-        kg = get_kg()
-        nid = kg.sync_file(dest_path, docs_dir)
-        kg.resolve_links(docs_dir)
-        if nid:
-            # 시맨틱 싱크: MCP 서버가 살아있으면 위임, 아니면 직접 처리
-            if not _try_semantic_sync_via_mcp():
-                run_sg_coro(get_semantic_graph().sync_from_kg())
-            logger.info("✅ [%s] %s → wiki 동기화", project_name, src_path.name)
-        return bool(nid)
+        dest_path.write_text(
+            _inject_or_update_frontmatter(text, src_path, project_name),
+            encoding="utf-8",
+        )
     except Exception as exc:
-        logger.error("KG 싱크 실패 (%s): %s", src_path, exc, exc_info=True)
+        logger.error("wiki 복사 실패 (%s): %s", src_path, exc)
         return False
+    logger.info("✅ [%s] %s → wiki 복사", project_name, src_path.name)
+    return True
 
 
 # ── Git repo 자동 탐색 ────────────────────────────────────
@@ -296,23 +315,48 @@ def _find_git_repos(workspace: Path, max_depth: int = 2) -> list[Path]:
 
 
 class _DebounceSync:
+    RETRY_DELAY = 30.0
+
     def __init__(self, vault_path: Path, delay: float = 3.0):
         self.vault_path = vault_path
         self.delay = delay
         self._timer: threading.Timer | None = None
         self._lock = threading.Lock()
+        self._running = False
+        self._rerun = False
 
-    def schedule(self) -> None:
+    def schedule(self, delay: float | None = None) -> None:
         with self._lock:
             if self._timer:
                 self._timer.cancel()
-            self._timer = threading.Timer(self.delay, self._fire)
+            self._timer = threading.Timer(self.delay if delay is None else delay, self._fire)
             self._timer.daemon = True
             self._timer.start()
 
     def _fire(self) -> None:
-        logger.info("변경 감지 → 싱크 시작...")
-        _do_sync(self.vault_path)
+        # 디바운스는 시작 전만 막는다. 싱크 중에 온 변경은 새 싱크를 겹쳐 띄우지 않고
+        # 끝난 뒤 한 번 더 돌린다.
+        with self._lock:
+            if self._running:
+                self._rerun = True
+                return
+            self._running = True
+        try:
+            while True:
+                logger.info("변경 감지 → 싱크 시작...")
+                retry = _do_sync(self.vault_path)
+                with self._lock:
+                    if not self._rerun:
+                        self._running = False
+                        break
+                    self._rerun = False
+            if retry:
+                # 서버가 바빠 반영을 확인 못 했다 — 새 변경이 없어도 한 번 더 맡긴다.
+                self.schedule(self.RETRY_DELAY)
+        except BaseException:
+            with self._lock:
+                self._running = False
+            raise
 
 
 class _ProjectDebounce:

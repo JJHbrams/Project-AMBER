@@ -17,10 +17,12 @@ NATIVE_MODE = 'native_bolttagu'
 EXTERNAL_ID = 'engram.bolttagu-2d'
 
 
-def store_mapping(document: dict, directory: Path) -> Path:
+def store_mapping(document: dict, directory: Path, *, validator=None) -> Path:
     """Content-addressed owned copy; no existing source or destination is overwritten."""
-    from overlay.bolttagu_mapping import validate_mapping_document
-    validate_mapping_document(document)
+    if validator is None:
+        from overlay.bolttagu_mapping import validate_mapping_document
+        validator = validate_mapping_document
+    validator(document)
     content = json.dumps(document, ensure_ascii=False, indent=2).encode('utf-8')
     if len(content) > 65536:
         raise ValueError('mapping is too large')
@@ -44,12 +46,12 @@ def store_mapping(document: dict, directory: Path) -> Path:
     return target
 
 
-def import_mapping(source: Path, directory: Path) -> Path:
+def import_mapping(source: Path, directory: Path, *, validator=None) -> Path:
     if source.stat().st_size > 65536:
         raise ValueError('mapping is too large')
     content = source.read_bytes()
     document = json.loads(content.decode('utf-8-sig'))
-    return store_mapping(document, directory)
+    return store_mapping(document, directory, validator=validator)
 
 
 def pending_mapping_warning(path: Path, document: dict) -> str:

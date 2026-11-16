@@ -286,7 +286,7 @@ def run() -> None:
     _session_log_dir.mkdir(parents=True, exist_ok=True)
     _session_log_path = _session_log_dir / f"overlay-{_session_ts}.log"
 
-    _raw_log(f"[entry] 시작 — frozen={getattr(sys, 'frozen', False)}" f", cwd={os.getcwd()}" f", exe={sys.executable}")
+    _raw_log(f"[entry] 시작 — frozen={getattr(sys, 'frozen', False)}" f", pid={os.getpid()}" f", cwd={os.getcwd()}" f", exe={sys.executable}")
 
     # KuzuDB 소유권: overlay 프로세스는 KuzuDB를 열지 않음 (MCP 서버 독점).
     # 반드시 다른 import보다 먼저 설정해야 함.

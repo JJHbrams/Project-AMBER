@@ -1,5 +1,87 @@
 # Release Notes
 
+## 2026-11-16 - v1.5.25: No More Silent Overlay Deaths, No Orphaned Services, Safe Frontmatter
+
+### Highlights
+
+- **The overlay no longer dies at shutdown with no record.** Promotion scoring
+  loaded the embedding model (sentence-transformers, pandas, pyarrow) inside
+  the overlay process even though the overlay never uses embeddings there.
+  With the model loaded, quitting crashed in `arrow.dll`. On the development
+  PC, every shutdown death since September happened on a quit with the model
+  loaded (8 of 16 such quits), and none on the 11 quits without it. The
+  overlay now never loads the model.
+- **A crashed overlay no longer leaves the MCP server, kg-watcher and
+  dashboard running as orphans** that block the next start. They are tied to
+  the overlay's lifetime and exit with it.
+- **`kg_update_node` can no longer corrupt a note's frontmatter** with a
+  summary containing `: `, backslashes, a leading `#` or newlines.
+- A new Mnema character (the default stays `engram-icon`) and a headless MCP
+  service for future server/client deployment.
+
+### What Changed
+
+- `core/graph/semantic/stm_promoter.py`: novelty only computes an embedding
+  when the semantic graph is enabled; in the overlay role it falls back to the
+  neutral score without touching the model.
+- `core/graph/semantic/semantic_graph.py`: under `ENGRAM_RUNTIME_ROLE=overlay`
+  the encoder logs `overlay 역할 — 인코더 호출 차단` and returns nothing before
+  any import, so no other path can load the model there either.
+- `core/entrypoint.py`, `overlay/main.py`: the start line records the host
+  PID and `quit()` records whether pyarrow, pandas and torch are loaded, so
+  Windows crash records can be matched to the host and the fix measured.
+- `core/install/job_object.py` (new), `overlay/main.py`: the MCP server,
+  kg-watcher and dashboard are assigned to one kill-on-close Windows Job
+  Object owned by the overlay. The overlay itself and a host started by
+  restart are never assigned, so a restart cannot take the new host down.
+- `core/install/service_lifecycle.py`: a dashboard left holding its port
+  after its overlay died is stopped at startup when it is verifiably ours
+  (our exe, parent gone); anything unverified is still refused.
+- `core/graph/knowledge/knowledge_graph.py`: the summary is written through
+  YAML serialization and every text replacement is literal; a failed file
+  patch is logged instead of raised after the DB update.
+- `mcp_server.py`: `engram_search_memories` is described as the first stop for
+  "what did we do last session" questions; `engram_search_transcript` is for
+  verbatim wording and is ranked by match, not recency.
+- Also included since 1.5.24: overlay restart handover and prompt exit after
+  quit, kg-watcher sync-storm and duplicate-id fixes, MCP session rebind and
+  listener recovery, the Mnema native character and sprite mappings,
+  `engram_service.py` / `Dockerfile.service` (headless MCP service), and the
+  shared LLM creed (`docs/llm/creed.md`, `scripts/render_llm_creed.py`,
+  `AGENTS.md`, `CLAUDE.md`, `.github/workflows/llm-creed.yml`).
+
+### Impact
+
+- Fewer silent overlay deaths; when the overlay does stop unexpectedly, its
+  services stop with it and the next start works without manual cleanup.
+- Existing 1.5.24 installs are offered this release through the overlay's
+  **check for update** menu.
+- This release ships the Standalone Windows installer only. The
+  server/client split (Client Overlay installer, Server Docker image) is not
+  released yet, so this is not a complete three-deliverable AMBER release.
+
+### Validation
+
+- Frozen build, development PC (Windows 11): with the fix, the promotion path
+  ran on 41- and 100-message sessions with no model load and quit logged
+  `pyarrow=False pandas=False torch=False`; no Windows crash record
+  (Event 1000) for `engram-overlay.exe` across all runs. The previous build,
+  quit with the model loaded, still crashed in `arrow.dll` right after its
+  cleanup finished.
+- Job Object: `taskkill /F` on the overlay removed all three services within
+  3 s and freed ports 17384/17385/8501; the next start succeeded without
+  manual cleanup; a second-host handover and the context-menu restart both
+  left the new host running outside the job with its services inside it.
+- Installed build 1.5.25.943 (`/VERYSILENT` setup, exit 0): running host
+  version 1.5.25.943 with the PID on its start line, services in the job.
+- Tests: new frontmatter (14), Job Object (real-process) and service
+  lifecycle suites pass (37); 290 related tests pass and the 18 failing ones
+  fail identically on the unmodified baseline (kuzu not installed). An
+  independent acceptance audit passed all criteria.
+- Not yet verified: the in-session pandas `hashtable` stack-overflow crashes
+  reported on another machine; they share the same precondition (model loaded
+  in the overlay) and are being observed after this release.
+
 ## 2026-10-02 - v1.5.24: Codex Persona, Idle-Proof MCP Sessions, Per-Conversation Memory, New Character
 
 ### Highlights

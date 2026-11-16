@@ -1,0 +1,8 @@
+FROM python:3.12-slim
+WORKDIR /app
+COPY requirements-service.txt requirements-service-semantic.txt ./
+RUN pip install --no-cache-dir -r requirements-service-semantic.txt
+COPY . ./
+VOLUME ["/data", "/run/secrets"]
+EXPOSE 17386
+ENTRYPOINT ["python", "engram_service.py", "--data-dir", "/data", "--host", "127.0.0.1", "--port", "17385", "--remote-host", "0.0.0.0", "--remote-port", "17386", "--token-file", "/run/secrets/engram-tokens.yaml"]

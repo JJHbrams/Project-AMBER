@@ -253,10 +253,13 @@ def resolve(
     if not isinstance(document, dict):
         note(f"{MAPPING_FILE} ignored: top level must be an object")
         return resolved
+    if document.get("overlay_id") not in (None, sprite_map.overlay_id):
+        note(f"{MAPPING_FILE} ignored: mapping belongs to another character")
+        return resolved
 
     sections = {section.key: section for section in sprite_map.sections}
     for key, entries in document.items():
-        if key == "version":
+        if key in {"version", "overlay_id"}:
             continue
         section = sections.get(key)
         if section is None:
@@ -643,9 +646,11 @@ def validate_mapping_document(document: object) -> None:
         raise ValueError("매핑 최상위는 JSON 객체여야 합니다.")
     if "version" in document and (type(document['version']) is not int or document['version'] != 1):
         raise ValueError("지원하는 매핑 version은 1입니다.")
+    if document.get("overlay_id") not in (None, OVERLAY_ID):
+        raise ValueError("다른 캐릭터용 매핑입니다.")
     sections = {section.key: section for section in sprite_map().sections}
     for name, entries in document.items():
-        if name == 'version':
+        if name in {'version', 'overlay_id'}:
             continue
         section = sections.get(name)
         if section is None or not isinstance(entries, dict):

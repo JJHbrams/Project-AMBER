@@ -176,6 +176,23 @@ class CharacterReloadTests(unittest.TestCase):
             self.assertFalse(overlay.reload_config())
         self.assertIs(overlay._profile, old)
 
+    def test_invalid_mnema_mapping_keeps_last_good_view_on_reload(self):
+        overlay = self._overlay()
+        old = overlay._profile
+        replacement = SimpleNamespace(
+            source_mode="native_mnema", default_frame=Path("new.png"), sprite_enabled=False,
+            reaction_pack=SimpleNamespace(states={}), native_enabled=True,
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            mapping = Path(temporary) / "mnema.json"
+            mapping.write_text('{"overlay_id":"mnema-2d","categories":{"execute":"trickcal-waiting"}}', encoding="utf-8")
+            cfg = {"overlay": {"character": {"source_mode": "native_mnema", "mnema": {"mapping_path": str(mapping)}}}}
+            with patch("overlay.character.load_cfg", return_value=cfg), patch(
+                "overlay.character._CharacterProfile", return_value=replacement
+            ):
+                self.assertFalse(overlay.reload_config())
+        self.assertIs(overlay._profile, old)
+
     def test_configured_user_manifest_is_watched_even_after_bundled_fallback(self):
         overlay = self._overlay()
         profile = SimpleNamespace(

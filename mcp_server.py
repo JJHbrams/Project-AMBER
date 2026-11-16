@@ -9,6 +9,7 @@ import re
 import json
 import asyncio
 import socket
+import ipaddress
 import threading
 import time
 import logging
@@ -476,6 +477,8 @@ _STM_RETRY_INTERVAL: float = 30.0  # 재연결 쿨다운 (초)
 
 def _try_connect_stm() -> str | None:
     """overlay STM 서버에 연결을 시도하고 base URL 반환. 실패 시 None."""
+    if os.environ.get("ENGRAM_RUNTIME_MODE") == "headless-service":
+        return None
     try:
         from core.install.service_config import effective_service_config
         port = int(os.environ.get("ENGRAM_STM_PORT") or effective_service_config()['overlay']['stm_server_port'])
@@ -2044,8 +2047,15 @@ def engram_update_themes(themes: list[str]) -> dict:
 
 @engramMCP.tool()
 async def engram_search_memories(query: str, limit: int = 5) -> list:
-    """키워드 기반으로 과거 기억을 검색합니다.
-    관련 주제가 나올 때 과거 경험을 회상하기 위해 사용합니다."""
+    """승격된 장기 기억·세션 요약을 키워드로 검색합니다.
+    engram_save_memory 로 다른 클라이언트에서 저장한 기억도 포함됩니다.
+
+    "이전 세션에 뭐 했어", "지난번 작업", "what did we do last time" 같은
+    요약 수준의 과거 회상은 이 도구를 **먼저** 호출하세요(get_context 의
+    working memory 도 함께 확인). 발화의 정확한 원문이 필요할 때만
+    engram_search_transcript 를 쓰세요.
+
+    query 는 "이전 세션" 같은 일반어 대신 구체적인 주제 키워드로 쓰세요."""
     results = await search_memories(query, limit)
     return results
 
@@ -2796,17 +2806,20 @@ def _schedule_post_session_sync() -> dict:
             def _sqlite_kg_sync():
                 from pathlib import Path
                 from core.graph.knowledge import get_kg
+                from core.graph.knowledge.knowledge_graph import _SYNC_VAULT_LOCK
 
                 docs_dir = Path(get_db_root_dir()) / "docs"
                 if not docs_dir.exists():
                     return {"processed": 0, "detail": "docs directory absent"}
                 kg = get_kg()
-                for vault_file in files:
-                    if _sync_cancel.is_set():
-                        raise _SyncCancelled()
-                    kg.sync_file(vault_file, docs_dir)
-                kg.resolve_links(docs_dir)
-                kg.prune_missing(docs_dir)
+                # 시작 시 전체 재동기화도 kg_sync 와 같은 락 아래서 — 겹치면 서로의 쓰기 락을 기다린다.
+                with _SYNC_VAULT_LOCK:
+                    for vault_file in files:
+                        if _sync_cancel.is_set():
+                            raise _SyncCancelled()
+                        kg.sync_file(vault_file, docs_dir)
+                    kg.resolve_links(docs_dir)
+                    kg.prune_missing(docs_dir)
                 return {"processed": len(files)}
 
             _run_stage("sqlite_kg_sync", _sqlite_kg_sync)
@@ -2819,6 +2832,9 @@ def _schedule_post_session_sync() -> dict:
                 result = run_sg_coro(sg.sync_from_kg(cancel_event=_sync_cancel))
                 if result.get("status") == "cancelled":
                     raise _SyncCancelled()
+                if result.get("status") == "skipped":
+                    # 다른 sync 가 돌고 있다 — 그쪽이 끝난 뒤 한 번 더 돌도록 예약됐다.
+                    return {"processed": 0, "detail": result}
                 if result.get("status") != "ok":
                     raise RuntimeError(f"Kuzu KG sync did not complete: {result.get('status', 'unknown')}")
                 return {
@@ -3387,11 +3403,13 @@ def engram_search_transcript(
     cwd: str = "",
     ctx: Context | None = None,
 ) -> dict:
-    """과거 대화 '원문'을 전문검색합니다. 요약본(memories/STM)이 아닌 잘리지 않은 기록입니다.
+    """과거 대화 '원문'(정확한 문구)을 전문검색합니다. 요약본(memories/STM)이 아닌 잘리지 않은 기록입니다.
 
-    "그때 뭐라고 했더라", "이거 전에 논의했었나", "내가 그렇게 말했나?" 처럼
-    과거를 되짚어야 할 때 사용합니다. search_memories 가 승격된 요약을 찾는 반면
-    이 도구는 실제로 오간 문장을 찾습니다.
+    "그때 뭐라고 했더라", "내가 그렇게 말했나?" 처럼 실제로 오간 문장이 필요할 때 사용합니다.
+    "지난번에 뭐 했어" 같은 요약 수준의 회상은 engram_search_memories 로 먼저 시작하세요.
+
+    결과는 텍스트 매칭 순위이며 최신순이 아닙니다. 따라서 이 도구만으로
+    어떤 세션이 "가장 최근"인지 판단하면 안 됩니다.
 
     결과는 snippet(매칭 구간)만 싣습니다. 앞뒤 흐름이 필요하면 반환된 turn id 로
     engram_read_transcript 를 호출하세요 — 검색과 확장은 별개 연산입니다.
@@ -3688,7 +3706,7 @@ def engram_discord_send(channel_id: str, content: str, message_id: str = "") -> 
 # ── Knowledge Graph ───────────────────────────────────────
 
 from core.config.runtime_config import get_db_root_dir as _get_vault_root
-from core.graph.knowledge import get_kg, iter_wiki_md_files
+from core.graph.knowledge import get_kg
 from core.graph.semantic import get_semantic_graph
 from pathlib import Path as _Path
 
@@ -3839,37 +3857,7 @@ def _kg_sync_impl(verbose: bool = False) -> dict:
     if not docs_dir.exists():
         return {"error": f"docs 디렉토리 없음: {docs_dir}"}
 
-    kg = get_kg()
-    existing_mtimes = kg.get_path_mtimes(docs_dir)
-
-    synced = 0
-    skipped = 0
-    unchanged = 0
-    added_new = False
-    changed_paths: set[str] = set()
-    for f in iter_wiki_md_files(docs_dir):
-        rel_path = str(f.relative_to(docs_dir))
-        try:
-            mtime = f.stat().st_mtime
-        except OSError:
-            continue
-
-        if existing_mtimes.get(rel_path, 0.0) >= mtime:
-            unchanged += 1
-            continue
-
-        nid = kg.sync_file(f, docs_dir, source_mtime=mtime)
-        if nid:
-            synced += 1
-            changed_paths.add(rel_path)
-            added_new = added_new or rel_path not in existing_mtimes
-        else:
-            skipped += 1
-
-    # 새 노드가 생기면 그 노드를 가리키던 기존 파일의 링크가 이제야 풀린다.
-    # 바뀐 파일만 재해석하면 대상보다 먼저 sync 된 링크는 영영 엣지가 되지 않는다.
-    kg.resolve_links(docs_dir, restrict_to_paths=None if added_new else changed_paths)
-    pruned = kg.prune_missing(docs_dir)
+    sql_result = get_kg().sync_vault(docs_dir)
 
     # 시맨틱 레이어도 동기화 (자체적으로 content_hash 기반 증분 재임베딩)
     # _kg_sync_impl은 asyncio.to_thread 워커 안에서 도니 이벤트 루프가 없다 — run_sg_coro로 실행.
@@ -3879,11 +3867,8 @@ def _kg_sync_impl(verbose: bool = False) -> dict:
     semantic_result = run_sg_coro(sg.sync_from_kg())
 
     return {
-        "status": "ok",
-        "synced": synced,
-        "skipped": skipped,
-        "unchanged": unchanged,
-        "pruned": pruned,
+        "status": "busy" if sql_result.get("busy") else "ok",
+        **sql_result,
         "vault": str(vault),
         "semantic": semantic_result,
     }
@@ -4647,6 +4632,36 @@ class RemoteGuardMiddleware:
         return await self.app(scope, receive, send)
 
 
+def _host_matches_allowed(host: str, allowed_hosts: tuple[str, ...]) -> bool:
+    if host in allowed_hosts:
+        return True
+    return any(
+        allowed.endswith(":*") and host.startswith(allowed[:-2] + ":")
+        for allowed in allowed_hosts
+    )
+
+
+class LocalHostGuardMiddleware:
+    """Keep remote Host exceptions from widening the local listener."""
+
+    def __init__(self, app, local_port: int, allowed_hosts: tuple[str, ...]):
+        self.app = app
+        self._local_port = local_port
+        self._allowed_hosts = allowed_hosts
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") != "http":
+            return await self.app(scope, receive, send)
+        server = scope.get("server") or ()
+        local_port = server[1] if len(server) > 1 else None
+        if local_port != self._local_port:
+            return await self.app(scope, receive, send)
+        headers = {k.decode("latin-1").lower(): v.decode("latin-1") for k, v in scope.get("headers") or []}
+        if not _host_matches_allowed(headers.get("host", ""), self._allowed_hosts):
+            return await _asgi_send_json(send, 421, {"error": "invalid local Host header"})
+        return await self.app(scope, receive, send)
+
+
 # scope_key 파라미터를 실제로 받는 도구들. 여기에 없는 도구에 주입하면
 # 인자 검증에서 튕기므로 대상을 한정한다. 나머지 도구는 이들이 연 세션에
 # 붙어 스코프를 상속하므로, 이 목록만 고정하면 하위 기록이 전부 따라간다.
@@ -4731,14 +4746,49 @@ _REMOTE_PRINCIPALS: dict = {}
 
 def _bind_socket(host: str, port: int) -> socket.socket:
     """uvicorn 에 넘길 리스닝 소켓을 미리 바인딩한다."""
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    # Windows 의 SO_REUSEADDR 은 이미 바인딩된 포트를 가로챌 수 있게 하므로 설정하지 않는다.
-    if sys.platform != "win32":
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    sock.bind((host, port))
-    sock.listen(2048)
-    sock.set_inheritable(True)
-    return sock
+    addresses = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    if not addresses:
+        raise OSError(f"could not resolve listener host: {host}")
+    family, socktype, proto, _canonname, sockaddr = addresses[0]
+    sock = socket.socket(family, socktype, proto)
+    try:
+        # Windows 의 SO_REUSEADDR 은 이미 바인딩된 포트를 가로챌 수 있게 하므로 설정하지 않는다.
+        if sys.platform != "win32":
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind(sockaddr)
+        sock.listen(2048)
+        sock.set_inheritable(True)
+        return sock
+    except Exception:
+        sock.close()
+        raise
+
+
+def _is_loopback_host(host: str) -> bool:
+    """Return whether a local listener host is restricted to loopback."""
+    value = str(host or "").strip().lower()
+    if value == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(value).is_loopback
+    except ValueError:
+        return False
+
+
+def _validate_http_listener_args(parser, args) -> None:
+    """Keep the unauthenticated listener local and reject ambiguous sockets."""
+    if not _is_loopback_host(args.host):
+        parser.error("--host must be a loopback address; use --remote-host for authenticated remote access")
+    if not 1 <= args.port <= 65535:
+        parser.error("--port must be between 1 and 65535 for HTTP transport")
+    if args.remote_port:
+        if not 1 <= args.remote_port <= 65535:
+            parser.error("--remote-port must be 0 or between 1 and 65535")
+        if args.remote_port == args.port:
+            parser.error("--remote-port must differ from --port")
+    for host in args.remote_allowed_host:
+        if not re.fullmatch(r"(?:[A-Za-z0-9.-]+|\[[0-9A-Fa-f:]+\])(?::(?:\*|[0-9]{1,5}))?", host):
+            parser.error("--remote-allowed-host must be a host or host:port pattern")
 
 
 def main(argv=None):
@@ -4771,10 +4821,31 @@ def main(argv=None):
         help=(
             "원격용 인증 리스너 포트 (0=비활성). 이 포트로 들어온 요청만 "
             "bearer 인증 + 도구 deny + 감사 로그가 적용된다. SSH 리버스 터널은 "
-            "--port 가 아니라 이 포트에 연결한다."
+            "호환 경로이고, 직접 ingress도 --port 가 아니라 이 포트에 연결한다."
         ),
     )
+    parser.add_argument(
+        "--remote-host",
+        default="127.0.0.1",
+        help="authenticated remote listener host (default: 127.0.0.1)",
+    )
+    parser.add_argument(
+        "--remote-token-file",
+        default=os.environ.get("ENGRAM_REMOTE_TOKENS_FILE", ""),
+        help="token YAML path; suitable for a read-only container secret mount",
+    )
+    parser.add_argument(
+        "--remote-allowed-host",
+        action="append",
+        default=[],
+        help="explicit Host header allowed on the authenticated listener (repeatable)",
+    )
     args = parser.parse_args(argv)
+
+    if args.transport in {"sse", "streamable-http"}:
+        _validate_http_listener_args(parser, args)
+    if args.transport != "streamable-http" and args.remote_port:
+        parser.error("--remote-port requires --transport streamable-http")
 
     if sys.platform == "win32" and args.transport in {"sse", "streamable-http"}:
         try:
@@ -4789,32 +4860,49 @@ def main(argv=None):
         # streamable-http를 기본으로 사용하되, 기존 SSE 클라이언트 호환을 유지한다.
         engramMCP.settings.host = args.host
         engramMCP.settings.port = args.port
+        # FastMCP protects loopback transports from DNS rebinding by allowing
+        # localhost Host headers only.  A direct ingress deployment must opt in
+        # to each proxy/client hostname; do not disable this protection.
+        local_allowed_hosts = tuple(engramMCP.settings.transport_security.allowed_hosts)
+        for allowed_host in args.remote_allowed_host:
+            if allowed_host not in engramMCP.settings.transport_security.allowed_hosts:
+                engramMCP.settings.transport_security.allowed_hosts.append(allowed_host)
         # 앱은 반드시 1회만 만든다. FastMCP.streamable_http_app() 은 _session_manager 를
         # 재사용하지만 StreamableHTTPSessionManager.run() 은 인스턴스당 1회만 허용되므로
         # 앱을 두 번 만들면 두 번째 lifespan 에서 터진다. 대신 소켓을 둘 바인딩한다.
         app = _build_hybrid_http_app()
+        if args.remote_allowed_host:
+            app = LocalHostGuardMiddleware(app, local_port=args.port, allowed_hosts=local_allowed_hosts)
         sockets = [_bind_socket(args.host, args.port)]
+        try:
+            if args.remote_port:
+                # 지연 import — 원격 리스너를 켤 때만 필요하다.
+                from core.config.remote_tokens import ensure_tokens_file, load_principals
 
-        if args.remote_port:
-            # 지연 import — 원격 리스너를 켤 때만 필요하다.
-            from core.config.remote_tokens import ensure_tokens_file, load_principals
-
-            global _REMOTE_PRINCIPALS
-            tokens_path = ensure_tokens_file(args.remote_port)
-            _REMOTE_PRINCIPALS = load_principals()
-            app = RemoteGuardMiddleware(app, remote_port=args.remote_port)
-            sockets.append(_bind_socket(args.host, args.remote_port))
-            # 토큰 값은 출력하지 않는다 — 경로만.
-            print(
-                f"[engram] remote listener on :{args.remote_port} "
-                f"(principals={len(_REMOTE_PRINCIPALS)}, tokens={tokens_path})",
-                file=sys.stderr,
-            )
-            if not _REMOTE_PRINCIPALS:
+                global _REMOTE_PRINCIPALS
+                tokens_path = ensure_tokens_file(args.remote_port, args.remote_token_file or None)
+                _REMOTE_PRINCIPALS = load_principals(args.remote_token_file or None)
+                app = RemoteGuardMiddleware(app, remote_port=args.remote_port)
+                sockets.append(_bind_socket(args.remote_host, args.remote_port))
+                # 토큰 값은 출력하지 않는다 — 경로만.
                 print(
-                    "[engram] WARNING: 등록된 원격 토큰이 없습니다 — 원격 요청은 전부 401 입니다.",
+                    f"[engram] remote listener on {args.remote_host}:{args.remote_port} "
+                    f"(principals={len(_REMOTE_PRINCIPALS)}, tokens={tokens_path})",
                     file=sys.stderr,
                 )
+                if not _REMOTE_PRINCIPALS:
+                    print(
+                        "[engram] WARNING: 등록된 원격 토큰이 없습니다 — 원격 요청은 전부 401 입니다.",
+                        file=sys.stderr,
+                    )
+        except OSError as exc:
+            for bound_socket in sockets:
+                bound_socket.close()
+            parser.error(str(exc))
+        except Exception:
+            for bound_socket in sockets:
+                bound_socket.close()
+            raise
 
         server = uvicorn.Server(
             uvicorn.Config(app, log_level=engramMCP.settings.log_level.lower())

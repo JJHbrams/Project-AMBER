@@ -312,6 +312,7 @@ class SemanticGraph:
     ) -> None:
         self._write_lock = CrossLoopAsyncLock()
         self._sync_lock = CrossLoopAsyncLock()  # sync_from_kg 동시 실행 방지
+        self._sync_pending = False  # 실행 중에 들어온 sync 요청 — 끝난 뒤 한 번 더 돈다
         self._encoder_lock = CrossLoopAsyncLock()  # 임베딩 모델 lazy-load 이중 실행 방지
         self._read_only = read_only
         self._enabled = False
@@ -525,6 +526,10 @@ class SemanticGraph:
             self._encoder = False  # 재시도 방지 sentinel
 
     async def _get_encoder(self) -> Any:
+        if os.environ.get("ENGRAM_RUNTIME_ROLE") == "overlay":
+            # overlay 호스트는 torch/pyarrow 로드 시 크래시하므로 어떤 import도 하기 전에 차단
+            logger.warning("overlay 역할 — 인코더 호출 차단 (임베딩 모델 로드 안 함)")
+            return None
         if self._encoder is None:
             async with self._encoder_lock:
                 if self._encoder is None:  # 락 획득 사이 다른 코루틴이 이미 로드했을 수 있음
@@ -598,10 +603,11 @@ class SemanticGraph:
             old_hash = ""
             old_emb = ""
             old_model = ""
+            old_type = None
             try:
                 res = await self.async_conn.execute(
                     "MATCH (n:KGNode {id: $id}) "
-                    "RETURN n.content_hash, n.embedding, n.embedding_model",
+                    "RETURN n.content_hash, n.embedding, n.embedding_model, n.type",
                     {"id": node_id},
                 )
                 if res.has_next():
@@ -609,6 +615,7 @@ class SemanticGraph:
                     old_hash = row[0] or ""
                     old_emb = row[1] or ""
                     old_model = row[2] or ""
+                    old_type = row[3]
             except Exception:
                 pass
 
@@ -626,6 +633,10 @@ class SemanticGraph:
                 recomputed = True
             else:
                 emb_str = old_emb
+                if old_type == node_type:
+                    # 바뀐 게 없으면 쓰지 않는다. sync 마다 노드 전체를 다시 쓰면 KuzuDB 파일이
+                    # 계속 불어나고 검색 캐시도 매번 버려진다.
+                    return False
 
             try:
                 await self.async_conn.execute(
@@ -680,6 +691,29 @@ class SemanticGraph:
             except Exception as exc:
                 logger.debug("create_edge 스킵 (%s→%s): %s", from_id, to_id, exc)
 
+    async def delete_edge(self, from_id: str, to_id: str, rel_type: str) -> None:
+        async with self._write_lock:
+            if not self._enabled:
+                return
+            try:
+                await self.async_conn.execute(
+                    "MATCH (a:KGNode {id: $fid})-[e:KG_EDGE {rel_type: $rel}]->(b:KGNode {id: $tid}) DELETE e",
+                    {"fid": from_id, "tid": to_id, "rel": rel_type},
+                )
+            except Exception as exc:
+                logger.debug("delete_edge 스킵 (%s→%s): %s", from_id, to_id, exc)
+
+    async def _list_edges(self) -> dict[tuple[str, str, str], float]:
+        async with self._write_lock:
+            res = await self.async_conn.execute(
+                "MATCH (a:KGNode)-[e:KG_EDGE]->(b:KGNode) RETURN a.id, b.id, e.rel_type, e.weight"
+            )
+            edges: dict[tuple[str, str, str], float] = {}
+            while res.has_next():
+                f, t, rel, w = res.get_next()
+                edges[(f, t, rel)] = float(w) if w is not None else 1.0
+            return edges
+
     # ── SQLite KG → KuzuDB 동기화 ────────────────────────────────────────────
 
     async def sync_from_kg(self, cancel_event: threading.Event | None = None) -> dict:
@@ -691,60 +725,78 @@ class SemanticGraph:
         if not self._enabled:
             return {"status": "disabled"}
 
-        if not self._sync_lock.try_acquire():
-            logger.debug("sync_from_kg: 이미 실행 중 — 스킵")
-            return {"status": "skipped"}
-
-        try:
-            from core.storage.db import get_connection
-
-            conn = get_connection()
+        result: dict = {"status": "skipped"}
+        while True:
+            if not self._sync_lock.try_acquire():
+                # 버리면 방금 쓴 노드가 다음 변경 때까지 색인에 안 잡힌다 — 돌고 있는 쪽이 한 번 더 돈다.
+                self._sync_pending = True
+                logger.debug("sync_from_kg: 이미 실행 중 — 끝난 뒤 재실행 예약")
+                return result
             try:
-                nodes = conn.execute("SELECT id, title, type, tags, summary FROM kg_nodes").fetchall()
-                node_synced = 0
-                reembedded = 0
-                for row in nodes:
-                    if cancel_event is not None and cancel_event.is_set():
-                        return {
-                            "status": "cancelled",
-                            "nodes": node_synced,
-                            "reembedded": reembedded,
-                            "edges": 0,
-                        }
-                    nid, title, ntype, tags_json, summary = row
-                    did_reembed = await self.upsert_node(
-                        node_id=nid,
-                        title=title,
-                        node_type=ntype,
-                        tags=tags_json,
-                        summary=summary,
-                    )
-                    node_synced += 1
-                    if did_reembed:
-                        reembedded += 1
-
-                if cancel_event is not None and cancel_event.is_set():
-                    return {
-                        "status": "cancelled",
-                        "nodes": node_synced,
-                        "reembedded": reembedded,
-                        "edges": 0,
-                    }
-
-                # 엣지는 clear 이후 중단하면 부분 그래프가 되므로 한 번에 끝까지 재생성한다.
-                await self.clear_edges()
-                edges = conn.execute("SELECT from_id, to_id, rel_type, weight FROM kg_edges").fetchall()
-                edge_synced = 0
-                for row in edges:
-                    await self.create_edge(row[0], row[1], row[2], float(row[3]))
-                    edge_synced += 1
+                while True:
+                    self._sync_pending = False
+                    result = await self._sync_from_kg_once(cancel_event)
+                    if result.get("status") != "ok" or not self._sync_pending:
+                        break
             finally:
-                conn.close()
+                self._sync_lock.release()
+            # 확인과 release 사이에 들어온 예약을 놓치지 않는다.
+            if result.get("status") != "ok" or not self._sync_pending:
+                return result
 
-            logger.info("SemanticGraph 동기화: nodes=%d (재임베딩=%d), edges=%d", node_synced, reembedded, edge_synced)
-            return {"status": "ok", "nodes": node_synced, "reembedded": reembedded, "edges": edge_synced}
+    async def _sync_from_kg_once(self, cancel_event: threading.Event | None) -> dict:
+        from core.storage.db import get_connection
+
+        conn = get_connection()
+        try:
+            nodes = conn.execute("SELECT id, title, type, tags, summary FROM kg_nodes").fetchall()
+            edges = conn.execute("SELECT from_id, to_id, rel_type, weight FROM kg_edges").fetchall()
         finally:
-            self._sync_lock.release()
+            conn.close()
+
+        node_synced = 0
+        reembedded = 0
+        for row in nodes:
+            if cancel_event is not None and cancel_event.is_set():
+                return {"status": "cancelled", "nodes": node_synced, "reembedded": reembedded, "edges": 0}
+            nid, title, ntype, tags_json, summary = row
+            did_reembed = await self.upsert_node(
+                node_id=nid,
+                title=title,
+                node_type=ntype,
+                tags=tags_json,
+                summary=summary,
+            )
+            node_synced += 1
+            if did_reembed:
+                reembedded += 1
+
+        if cancel_event is not None and cancel_event.is_set():
+            return {"status": "cancelled", "nodes": node_synced, "reembedded": reembedded, "edges": 0}
+
+        # 엣지는 차이만 반영한다. 매번 전부 지우고 다시 만들면 sync 한 번이 엣지 수만큼
+        # 쓰기를 하고, KuzuDB 파일이 지운 만큼 계속 불어난다(노드 천 개에 3.5 GB, 2026-10-19).
+        desired = {(f, t, rel): float(w) for f, t, rel, w in edges}
+        existing = await self._list_edges()
+        stale = [k for k in existing if k not in desired]
+        changed = [(k, w) for k, w in desired.items() if existing.get(k) != w]
+        for f, t, rel in stale:
+            await self.delete_edge(f, t, rel)
+        for (f, t, rel), w in changed:
+            await self.create_edge(f, t, rel, w)
+
+        logger.info(
+            "SemanticGraph 동기화: nodes=%d (재임베딩=%d), edges=%d (+%d -%d)",
+            node_synced, reembedded, len(desired), len(changed), len(stale),
+        )
+        return {
+            "status": "ok",
+            "nodes": node_synced,
+            "reembedded": reembedded,
+            "edges": len(desired),
+            "edges_added": len(changed),
+            "edges_removed": len(stale),
+        }
 
     # ── 시맨틱 검색 ───────────────────────────────────────────────────────────
 

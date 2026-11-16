@@ -164,6 +164,10 @@ def _get_project_root() -> Path:
 
 PROJECT_ROOT = _get_project_root()
 
+# Guards one-time creation of the service-child kill-on-close job (see
+# OverlayApp._assign_service_child).
+_SERVICE_JOB_LOCK = threading.Lock()
+
 
 def _find_mcp_python() -> str | None:
     """MCP HTTP 서버 subprocess용 Python 경로를 반환한다."""
@@ -648,23 +652,45 @@ class OverlayApp:
             return False
         if proc.poll() is not None:
             setattr(self, attr_name, None)
-            return False
+            return True
 
-        proc.terminate()
         try:
+            proc.terminate()
             proc.wait(timeout=timeout)
         except Exception:
-            proc.kill()
+            # Do not forget the handle until a forced termination has also
+            # completed. Starting a replacement while the old process is
+            # still unwinding can make its listener look foreign.
+            try:
+                proc.kill()
+                proc.wait(timeout=max(0.1, min(timeout, 1.0)))
+            except Exception:
+                log.warning("[%s] %s 종료 확인 실패; 기존 프로세스를 유지합니다", log_prefix, display_name)
+                return False
         setattr(self, attr_name, None)
-        log.info("[%s] %s 종료", log_prefix, display_name)
+        log.info("[%s] %s 종료 확인", log_prefix, display_name)
         return True
+
+    def _wait_mcp_listener_released(self, port: int, timeout: float) -> bool:
+        """Wait briefly for a stopped owned child to release its loopback port."""
+        import time
+
+        deadline = time.monotonic() + max(0.0, timeout)
+        while time.monotonic() < deadline:
+            if not self._is_mcp_listener_ready(port, timeout=0.2):
+                return True
+            time.sleep(0.1)
+        return not self._is_mcp_listener_ready(port, timeout=0.2)
 
     def _restart_managed_dependents(self) -> None:
         # mcp 재기동 후 종속 프로세스도 재연결을 보장하기 위해 재시작한다.
-        self._terminate_managed_process("_dashboard_proc", "dashboard", "dashboard")
-        self._terminate_managed_process("_kg_watcher_proc", "kg_watcher", "kg_watcher")
-        self._kg_watcher_proc = self._start_kg_watcher()
-        if self._is_dashboard_enabled():
+        watcher_stopped = (getattr(self, "_kg_watcher_proc", None) is None
+                           or self._terminate_managed_process("_kg_watcher_proc", "kg_watcher", "kg_watcher"))
+        dashboard_stopped = (getattr(self, "_dashboard_proc", None) is None
+                             or self._terminate_managed_process("_dashboard_proc", "dashboard", "dashboard"))
+        if watcher_stopped:
+            self._kg_watcher_proc = self._start_kg_watcher()
+        if dashboard_stopped and self._is_dashboard_enabled():
             self._dashboard_proc = self._start_dashboard()
 
     def _recover_mcp_listener(self, reason: str) -> None:
@@ -689,12 +715,24 @@ class OverlayApp:
             log.warning("[mcp_http] 헬스체크 복구 시작: reason=%s port=%d", reason, port)
             self._stm_server.publish_mcp_ready(False, replaced=True)
 
-            self._terminate_managed_process("_mcp_http_proc", "mcp_http", "MCP HTTP 서버")
+            if (getattr(self, "_mcp_http_proc", None) is not None
+                    and not self._terminate_managed_process("_mcp_http_proc", "mcp_http", "MCP HTTP 서버")):
+                log.error("[mcp_http] 복구 중단: 기존 MCP 프로세스 종료를 확인하지 못함")
+                return
+            release_timeout = min(5.0, float(settings["ready_timeout_secs"]))
+            if not self._wait_mcp_listener_released(port, timeout=release_timeout):
+                log.error("[mcp_http] port_release_timeout: port %d 해제를 확인하지 못함", port)
+                return
             self._mcp_http_proc = self._start_mcp_http_server()
 
             if self._quitting:
                 return
-            if self._wait_mcp_ready(timeout=float(settings["ready_timeout_secs"]), port=port):
+            if self._mcp_http_proc is None:
+                log.error("[mcp_http] 복구 실패: 관리 MCP 프로세스를 시작하지 못함")
+                return
+            if self._wait_mcp_ready(
+                timeout=float(settings["ready_timeout_secs"]), port=port, require_managed_process=True
+            ):
                 self._restart_managed_dependents()
                 log.info("[mcp_http] 복구 완료: 리스너/종속 프로세스 재연결 보장")
             else:
@@ -705,46 +743,63 @@ class OverlayApp:
     def _mcp_health_monitor_loop(self) -> None:
         import time
 
-        start_delay = float(self._get_mcp_health_settings()["start_delay_secs"])
+        try:
+            start_delay = float(self._get_mcp_health_settings()["start_delay_secs"])
+        except Exception:
+            start_delay = 0.0
+            try:
+                self._stm_server.publish_mcp_ready(False, replaced=True)
+            except Exception:
+                pass
+            log.exception("[mcp_http] health monitor initialization failed; monitoring will continue")
         if start_delay > 0:
             time.sleep(start_delay)
 
         failures = 0
         while not self._quitting:
-            settings = self._get_mcp_health_settings()
-            port = int(settings["port"])
-            threshold = int(settings["fail_threshold"])
-            interval = float(settings["interval_secs"])
+            interval = 1.0
+            try:
+                settings = self._get_mcp_health_settings()
+                port = int(settings["port"])
+                threshold = int(settings["fail_threshold"])
+                interval = float(settings["interval_secs"])
 
-            proc_dead = bool(self._mcp_http_proc and self._mcp_http_proc.poll() is not None)
-            listener_ok = self._is_mcp_listener_ready(port)
-            http_ok = self._is_mcp_http_healthy(port)
-            healthy = listener_ok and http_ok and not proc_dead
+                proc_dead = bool(self._mcp_http_proc and self._mcp_http_proc.poll() is not None)
+                listener_ok = self._is_mcp_listener_ready(port)
+                http_ok = self._is_mcp_http_healthy(port)
+                healthy = listener_ok and http_ok and not proc_dead
 
-            if healthy:
-                failures = 0
-            else:
-                failures += 1
-                log.warning(
-                    "[mcp_http] health fail %d/%d (proc_dead=%s, listener_ok=%s, http_ok=%s, port=%d)",
-                    failures,
-                    threshold,
-                    proc_dead,
-                    listener_ok,
-                    http_ok,
-                    port,
-                )
-                if failures >= threshold:
-                    if proc_dead:
-                        reason = "proc_dead"
-                    elif not listener_ok:
-                        reason = "listener_unavailable"
-                    else:
-                        reason = "http_unhealthy"
-                    self._recover_mcp_listener(reason=reason)
+                if healthy:
                     failures = 0
+                else:
+                    failures += 1
+                    log.warning(
+                        "[mcp_http] health fail %d/%d (proc_dead=%s, listener_ok=%s, http_ok=%s, port=%d)",
+                        failures,
+                        threshold,
+                        proc_dead,
+                        listener_ok,
+                        http_ok,
+                        port,
+                    )
+                    if failures >= threshold:
+                        if proc_dead:
+                            reason = "proc_dead"
+                        elif not listener_ok:
+                            reason = "listener_unavailable"
+                        else:
+                            reason = "http_unhealthy"
+                        self._recover_mcp_listener(reason=reason)
+                        failures = 0
+            except Exception:
+                failures = 0
+                try:
+                    self._stm_server.publish_mcp_ready(False, replaced=True)
+                except Exception:
+                    pass
+                log.exception("[mcp_http] health monitor cycle failed; monitoring will continue")
 
-            sleep_left = interval
+            sleep_left = max(0.1, interval)
             while sleep_left > 0 and not self._quitting:
                 step = min(0.5, sleep_left)
                 time.sleep(step)
@@ -1017,6 +1072,43 @@ class OverlayApp:
                 time.sleep(min(0.5, sleep_left))
                 sleep_left -= 0.5
 
+    def _assign_service_child(self, proc, label: str) -> None:
+        """Tie a service child (MCP / kg-watcher / dashboard) to this host's lifetime.
+
+        One KILL_ON_JOB_CLOSE job is created lazily and its handle is kept for the
+        whole process lifetime; it is never closed explicitly. When the host exits
+        or crashes natively the OS closes the handle and kills the members, so no
+        orphan keeps the MCP/dashboard ports held (which made the next start refuse).
+
+        NEVER assign the host itself, and NEVER assign the new host spawned by
+        restart(): only explicitly assigned processes are job members, so the new
+        host (a child of this host, not of a member) stays outside the job. If it
+        were inside, the old host's exit would kill the restarted host (the bug
+        fixed in 1f34a24 where restarts left nothing running).
+
+        Known gap: a child could spawn a grandchild between Popen and assignment;
+        accepted, because assignment follows Popen immediately and grandchildren
+        spawned after assignment inherit the job.
+        """
+        try:
+            # Spawns run from the deferred-startup thread and from the main thread
+            # (config reload / respawn). Create under a lock and publish the handle
+            # before the "tried" flag, so a concurrent caller never sees tried=True
+            # with no job yet and silently leaves its child outside the job.
+            with _SERVICE_JOB_LOCK:
+                if not getattr(self, "_service_job_tried", False):
+                    from core.install.job_object import create_kill_on_close_job
+                    self._service_job = create_kill_on_close_job()
+                    self._service_job_tried = True
+                    if self._service_job is None and sys.platform == "win32":
+                        log.warning("[job] 서비스 자식용 job object 생성 실패 - 고아 방지 비활성")
+                job = getattr(self, "_service_job", None)
+            if job:
+                from core.install.job_object import assign_to_job
+                assign_to_job(job, proc, label)
+        except Exception as exc:
+            log.warning("[job] %s 할당 처리 실패: %s", label, exc)
+
     def _start_mcp_http_server(self) -> "subprocess.Popen | None":
         """CLI용 지속 MCP HTTP(SSE + Streamable HTTP) 서버를 overlay 수명에 맞춰 시작한다."""
         cfg = load_cfg()
@@ -1031,13 +1123,24 @@ class OverlayApp:
             raise RuntimeError(f'MCP port {port} belongs to another process family; refusing stale listener reuse')
         # frozen 번들: 같은 exe 를 멀티콜(`--role mcp-server`)로 재실행 → conda python 불필요.
         # 개발(소스) 모드: conda python 으로 mcp_server.py 실행.
-        # 원격 인증 리스너는 명시적으로 켤 때만 연다. SSH 리버스 터널은 http_port 가
-        # 아니라 이 포트에 연결한다 — http_port 는 무인증이므로 터널에 노출하면 안 된다.
+        # 원격 인증 리스너는 명시적으로 켤 때만 연다. 외부 직접 접속과 기존 SSH
+        # 터널은 모두 이 포트만 쓴다 — http_port 는 무인증이므로 노출하면 안 된다.
         remote_args: list[str] = []
         if bool(mcp_cfg.get("remote_enabled", False)):
             remote_port = int(mcp_cfg.get("remote_port", port + 1))
-            remote_args = ["--remote-port", str(remote_port)]
-            log.info("[mcp_http] 원격 인증 리스너 활성 port=%d", remote_port)
+            remote_host = str(mcp_cfg.get("remote_host", "127.0.0.1") or "127.0.0.1")
+            token_file = str(mcp_cfg.get("remote_token_file", "") or "").strip()
+            remote_args = ["--remote-port", str(remote_port), "--remote-host", remote_host]
+            if token_file:
+                remote_args.extend(["--remote-token-file", token_file])
+            allowed_hosts = mcp_cfg.get("remote_allowed_hosts", []) or []
+            if not isinstance(allowed_hosts, list):
+                raise ValueError("mcp.remote_allowed_hosts must be a list")
+            for allowed_host in allowed_hosts:
+                value = str(allowed_host).strip()
+                if value:
+                    remote_args.extend(["--remote-allowed-host", value])
+            log.info("[mcp_http] 원격 인증 리스너 활성 host=%s port=%d", remote_host, remote_port)
 
         if getattr(sys, "frozen", False):
             cmd = [sys.executable, "--role", "mcp-server", "--transport", transport, "--port", str(port), *remote_args]
@@ -1071,13 +1174,16 @@ class OverlayApp:
                 stderr=log_fh,
                 creationflags=subprocess.CREATE_NO_WINDOW,
             )
+            self._assign_service_child(proc, "mcp-server")
             log.info("[mcp_http] MCP HTTP 서버 시작 PID=%d port=%d transport=%s", proc.pid, port, transport)
             return proc
         except Exception as exc:
             log.warning("[mcp_http] MCP HTTP 서버 시작 실패: %s", exc)
             return None
 
-    def _wait_mcp_ready(self, timeout: float = 15.0, port: int | None = None) -> bool:
+    def _wait_mcp_ready(
+        self, timeout: float = 15.0, port: int | None = None, require_managed_process: bool = False
+    ) -> bool:
         """MCP server가 /health 에 응답할 때까지 대기. 성공 시 True."""
         import time
 
@@ -1086,7 +1192,11 @@ class OverlayApp:
             port = int((cfg.get("mcp") or {}).get("http_port", MCP_HTTP_PORT))
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            if self._is_mcp_listener_ready(port, timeout=1.0) and self._is_mcp_http_healthy(port, timeout=1.5):
+            managed_proc = getattr(self, "_mcp_http_proc", None)
+            managed_alive = bool(managed_proc and managed_proc.poll() is None)
+            if ((not require_managed_process or managed_alive)
+                    and self._is_mcp_listener_ready(port, timeout=1.0)
+                    and self._is_mcp_http_healthy(port, timeout=1.5)):
                 log.info("[mcp_http] MCP server ready (port=%d)", port)
                 self._stm_server.publish_mcp_ready(True, f"http://127.0.0.1:{port}/mcp")
                 return True
@@ -1212,6 +1322,7 @@ class OverlayApp:
                 stderr=log_fh,
                 creationflags=getattr(_sp, "CREATE_NO_WINDOW", 0),
             )
+            self._assign_service_child(proc, "dashboard")
             log.info("[dashboard] 시작 PID=%d", proc.pid)
             return proc
         except Exception as exc:
@@ -1257,6 +1368,7 @@ class OverlayApp:
                 stderr=log_fh,
                 creationflags=getattr(_sp, "CREATE_NO_WINDOW", 0),
             )
+            self._assign_service_child(proc, "kg-watcher")
             log.info("[kg_watcher] 시작 PID=%d", proc.pid)
             return proc
         except Exception as exc:
@@ -1288,6 +1400,7 @@ class OverlayApp:
 
         # root.after() 는 root.destroy() 시 취소되므로 threading.Timer 사용
         def _spawn():
+            # Deliberately NOT assigned to the service job (see _assign_service_child).
             subprocess.Popen(cmd, cwd=cwd)
 
         threading.Timer(0.5, _spawn).start()
@@ -2758,6 +2871,8 @@ class OverlayApp:
         except Exception:
             pass
         log.info("[overlay] quit 진입: reason=%s", self._quit_reason)
+        log.info("[overlay] quit 모듈 상태: pyarrow=%s pandas=%s torch=%s",
+                 "pyarrow" in sys.modules, "pandas" in sys.modules, "torch" in sys.modules)
 
         if self._discord_bot:
             self._discord_bot.stop()
@@ -2825,6 +2940,27 @@ class OverlayApp:
 
     def run(self):
         self.root.mainloop()
+        if self._quitting:
+            self._exit_without_stragglers()
+
+    @staticmethod
+    def _exit_without_stragglers() -> None:
+        """quit() 정리가 끝났으면 남은 작업 스레드를 기다리지 않고 프로세스를 끝낸다.
+
+        quit 의 STM 승격은 15초만 기다리고 넘어가지만 그 스레드(임베딩 로드·반성 판정)는
+        계속 돌고, 인터프리터 종료가 executor 스레드를 join 하느라 창이 닫힌 뒤에도 30초가량
+        살아 있었다. 재시작하는 새 host 는 그동안 옛 host 가 안 죽었다고 보고 시작을 거부했다.
+        끊긴 승격은 DB 의 미승격 메시지로 남아 다음 checkpoint 에서 다시 처리된다.
+        """
+        try:
+            from overlay.config import flush_overlay_state
+
+            flush_overlay_state(2.0)
+        except Exception:
+            log.debug("[overlay] 종료 전 상태 저장 실패", exc_info=True)
+        log.info("[overlay] 정리 완료 — 프로세스 종료")
+        logging.shutdown()
+        os._exit(0)
 
 
 def main():

@@ -11,9 +11,9 @@
 `run_command`, `write_to_file`, `replace_file_content`, `multi_replace_file_content`다. 기존 설정은
 marker 기준으로만 병합하고 백업·atomic replace·readback을 거친다. 배치 실패는 터널 상태를 바꾸지 않는다.
 
-> engram 은 **Windows 로컬 머신 한 대**에서만 돌아간다. 원격 서버에서 쓴다는 건
-> 원격에 engram 을 설치하는 게 아니라, 원격의 에이전트가 **SSH 터널을 통해 로컬 engram 에
-> 붙는다**는 뜻이다. 기억·위키는 언제나 로컬 한 곳에만 있다.
+> 기존 Windows overlay는 SSH 터널을 통해 원격 에이전트를 연결할 수 있다. 별도
+> overlay-free 서비스는 인증된 원격 리스너를 직접 ingress로 제공한다. 서비스 운영
+> 절차와 TLS reverse proxy 경계는 [headless-service.md](headless-service.md)를 따른다.
 
 ---
 

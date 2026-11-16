@@ -25,6 +25,8 @@ from overlay.settings_window import (
 
 class CharacterSourceSettingsTests(unittest.TestCase):
     def test_mode_display_round_trip(self):
+        self.assertEqual(character_source_mode_from_display("므네마"), "native_mnema")
+        self.assertEqual(character_source_mode_to_display("native_mnema"), "므네마")
         self.assertEqual(character_source_mode_from_display("Engram 아이콘"), "native_engram_icon")
         self.assertEqual(character_source_mode_from_display("볼따구-의사"), "native_bolttagu")
         self.assertEqual(character_source_mode_to_display("native_engram_icon"), "Engram 아이콘")
@@ -143,6 +145,13 @@ class CharacterSourceSettingsTests(unittest.TestCase):
             root.update_idletasks()
             self.assertEqual(window._bolttagu_native_box.winfo_manager(), "grid")
             self.assertEqual(window._bolttagu_mapping_label.winfo_manager(), "grid")
+
+            window._char_source_mode_var.set("므네마")
+            window._apply_character_source_mode()
+            root.update_idletasks()
+            self.assertEqual(window._mnema_native_box.winfo_manager(), "grid")
+            self.assertEqual(window._mnema_mapping_label.winfo_manager(), "grid")
+            self.assertEqual(window._bolttagu_native_box.winfo_manager(), "")
 
             for mode in ("단일 이미지", "애니메이션 폴더"):
                 window._char_source_mode_var.set(mode)

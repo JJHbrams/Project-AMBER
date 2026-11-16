@@ -10,6 +10,10 @@ from __future__ import annotations
 
 import re
 import json
+import logging
+import os
+import sqlite3
+import threading
 from pathlib import Path
 from datetime import datetime
 from collections import deque
@@ -23,6 +27,22 @@ from core.storage.db import get_connection
 
 NODE_TYPES = {"concept", "project", "research", "reference", "fleeting", "moc", "person", "tool"}
 EDGE_TYPES = {"links", "supports", "contradicts", "part_of", "follows", "inspired_by", "implements", "references"}
+
+_SYNC_VAULT_LOCK = threading.Lock()
+
+logger = logging.getLogger(__name__)
+
+
+def _same_file(a: Path, b: Path) -> bool:
+    """대소문자만 바뀐 이름 변경(Windows)도 같은 파일로 본다."""
+    try:
+        return os.path.samefile(a, b)
+    except OSError:
+        return os.path.normcase(str(a)) == os.path.normcase(str(b))
+
+
+def _same_rel_path(a: str | None, b: str | None) -> bool:
+    return bool(a and b) and os.path.normcase(a) == os.path.normcase(b)
 
 NODE_TYPE_DIRS = {
     "concept":   "concepts",
@@ -109,6 +129,7 @@ CREATE TABLE IF NOT EXISTS kg_edges (
 
 CREATE INDEX IF NOT EXISTS idx_kg_nodes_type ON kg_nodes(type);
 CREATE INDEX IF NOT EXISTS idx_kg_nodes_title ON kg_nodes(title);
+CREATE INDEX IF NOT EXISTS idx_kg_nodes_vault_path ON kg_nodes(vault_path, path);
 CREATE INDEX IF NOT EXISTS idx_kg_edges_from ON kg_edges(from_id);
 CREATE INDEX IF NOT EXISTS idx_kg_edges_to ON kg_edges(to_id);
 """
@@ -548,17 +569,114 @@ class KnowledgeGraph:
                 source_mtime = 0.0
 
         rel_path = str(filepath.relative_to(vault_path))
+        vkey = vault_key(vault_path)
+        nid_wanted = parsed["id"]
+        conn = get_connection()
+        # kg_nodes.id 는 볼트를 가리지 않고 유일하다 — 주인도 볼트 구분 없이 찾는다.
+        owner = conn.execute(
+            "SELECT path, vault_path FROM kg_nodes WHERE id=?", (nid_wanted,)
+        ).fetchone()
+        conn.close()
+        if owner and owner["path"]:
+            owner_file = Path(owner["vault_path"] or vkey) / owner["path"]
+            if not _same_file(owner_file, filepath) and self._file_declares_id(owner_file, nid_wanted):
+                # 같은 id 를 다른 살아있는 파일이 이미 쥐고 있다. 덮어쓰면 두 파일이 sync 마다
+                # 노드를 번갈아 빼앗고, 매번 "새 파일"로 잡혀 전체 링크 해석·재임베딩이 돈다.
+                logger.warning(
+                    "kg sync: id '%s' 중복 — %s 는 건너뜀 (노드 주인: %s)", nid_wanted, filepath, owner_file
+                )
+                # 이 파일이 예전에 다른 id 로 갖던 행은 정리한다 — 남으면 옛 내용이 노드로 남는다.
+                self._drop_other_rows_for_path(rel_path, vkey, keep_id=None)
+                return None
+
         nid = self.add_node(
             title=title,
             note_type=parsed["type"] if parsed["type"] in NODE_TYPES else "concept",
             tags=parsed["tags"],
             summary=parsed["summary"],
             path=rel_path,
-            vault_path=vault_key(vault_path),
-            node_id=parsed["id"],
+            vault_path=vkey,
+            node_id=nid_wanted,
             source_mtime=source_mtime,
         )
+        # 파일 하나엔 노드 하나. frontmatter id 가 바뀌면 옛 id 행이 같은 경로로 남아
+        # get_path_mtimes 가 옛 mtime 을 보고 이 파일을 sync 마다 다시 읽었다.
+        self._drop_other_rows_for_path(rel_path, vkey, keep_id=nid)
         return nid
+
+    @staticmethod
+    def _drop_other_rows_for_path(rel_path: str, vkey: str, keep_id: str | None) -> None:
+        conn = get_connection()
+        try:
+            stale = [
+                r[0]
+                for r in conn.execute(
+                    "SELECT id FROM kg_nodes WHERE path=? AND vault_path=?", (rel_path, vkey)
+                ).fetchall()
+                if r[0] != keep_id
+            ]
+            if not stale:
+                return
+            with conn:
+                for old_id in stale:
+                    if keep_id:
+                        # id 가 바뀐 파일 — 사람이 단 엣지는 새 id 로 옮기고 지운다(CASCADE 로 사라지지 않게).
+                        conn.execute("UPDATE OR IGNORE kg_edges SET from_id=? WHERE from_id=?", (keep_id, old_id))
+                        conn.execute("UPDATE OR IGNORE kg_edges SET to_id=? WHERE to_id=?", (keep_id, old_id))
+                    conn.execute("DELETE FROM kg_nodes WHERE id=?", (old_id,))
+        finally:
+            conn.close()
+
+    @staticmethod
+    def _file_declares_id(filepath: Path, node_id: str) -> bool:
+        try:
+            text = filepath.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            return False
+        parsed = parse_markdown(text, filepath)
+        return bool(parsed["title"]) and parsed["id"] == node_id
+
+    def sync_vault(self, docs_dir: Path, lock_timeout: float = 240.0) -> dict:
+        """볼트를 mtime 증분으로 SQLite 에 동기화한다. MCP kg_sync 와 watcher 폴백의 공용 경로.
+
+        한 프로세스 안에서는 한 번에 하나만 돈다 — 겹친 전체 sync 들이 서로의 쓰기 락을
+        기다리며 한 시간씩 늘어졌다(2026-10-19 kg-watcher). 앞선 sync 가 lock_timeout 안에
+        안 끝나면 기다리던 스레드를 쌓지 않고 busy 로 돌려준다."""
+        if not _SYNC_VAULT_LOCK.acquire(timeout=lock_timeout):
+            return {"synced": 0, "skipped": 0, "unchanged": 0, "pruned": [], "busy": True}
+        try:
+            existing_mtimes = self.get_path_mtimes(docs_dir)
+
+            synced = skipped = unchanged = 0
+            added_new = False
+            changed_paths: set[str] = set()
+            for f in iter_wiki_md_files(docs_dir):
+                rel_path = str(f.relative_to(docs_dir))
+                try:
+                    mtime = f.stat().st_mtime
+                except OSError:
+                    continue
+
+                if existing_mtimes.get(rel_path, 0.0) >= mtime:
+                    unchanged += 1
+                    continue
+
+                nid = self.sync_file(f, docs_dir, source_mtime=mtime)
+                if nid:
+                    synced += 1
+                    changed_paths.add(rel_path)
+                    added_new = added_new or rel_path not in existing_mtimes
+                else:
+                    skipped += 1
+
+            # 새 노드가 생기면 그 노드를 가리키던 기존 파일의 링크가 이제야 풀린다.
+            # 바뀐 파일만 재해석하면 대상보다 먼저 sync 된 링크는 영영 엣지가 되지 않는다.
+            if changed_paths:
+                self.resolve_links(docs_dir, restrict_to_paths=None if added_new else changed_paths)
+            pruned = self.prune_missing(docs_dir)
+            return {"synced": synced, "skipped": skipped, "unchanged": unchanged, "pruned": pruned}
+        finally:
+            _SYNC_VAULT_LOCK.release()
 
     def resolve_links(self, vault_path: Path, restrict_to_paths: set[str] | None = None):
         """마크다운 wikilinks를 파싱해 kg_edges에 반영.
@@ -574,7 +692,7 @@ class KnowledgeGraph:
         else:
             md_files = list(iter_wiki_md_files(vault_path))
 
-        parsed_by_from_id: dict[str, dict] = {}
+        parsed_by_from_id: dict = {}
         source_paths: dict[str, str] = {}
         for f in md_files:
             try:
@@ -584,49 +702,101 @@ class KnowledgeGraph:
             parsed = parse_markdown(text, f)
             from_id = parsed["id"]
             if from_id:
-                parsed_by_from_id[from_id] = parsed
-                source_paths[from_id] = str(f.relative_to(vault_path))
+                parsed_by_from_id.setdefault(from_id, []).append((parsed, str(f.relative_to(vault_path))))
 
-        auto_edges = f"(rel_type='links' OR context LIKE '{FM_EDGE_MARK}%')"
         conn = get_connection()
-        with conn:
-            if restrict_to_paths is not None:
-                if parsed_by_from_id:
-                    placeholders = ",".join("?" * len(parsed_by_from_id))
-                    conn.execute(
-                        f"DELETE FROM kg_edges WHERE {auto_edges} AND from_id IN ({placeholders})",
-                        tuple(parsed_by_from_id.keys()),
-                    )
-            else:
-                # 자동 엣지(links + frontmatter relations) 제거, 수동 엣지는 유지.
-                # 이 볼트에 속한 노드에서 나가는 것만 — 전체를 지우면 다른 볼트의
-                # 링크가 사라지고, 그쪽을 다시 sync 할 때까지 복구되지 않는다.
-                conn.execute(
-                    f"""DELETE FROM kg_edges WHERE {auto_edges} AND from_id IN
-                       (SELECT id FROM kg_nodes WHERE vault_path = ?)""",
-                    (vault_key(vault_path),),
-                )
+        node_paths = {
+            r[0]: (r[1], r[2]) for r in conn.execute("SELECT id, path, vault_path FROM kg_nodes").fetchall()
+        }
         conn.close()
-
-        cache: dict[tuple[str, str], str | None] = {}
-        for from_id, parsed in parsed_by_from_id.items():
-            # from_id가 DB에 있는지 확인
-            conn = get_connection()
-            exists = conn.execute("SELECT id FROM kg_nodes WHERE id=?", (from_id,)).fetchone()
-            conn.close()
-            if not exists:
+        known_ids = set(node_paths)
+        vkey_here = vault_key(vault_path)
+        # 같은 id 를 선언한 파일이 여럿이면 노드의 주인 파일 링크만 쓴다 — 아니면 건너뛴
+        # 중복 파일의 링크가 주인 노드의 엣지를 덮는다.
+        for from_id, cands in list(parsed_by_from_id.items()):
+            owner_path, owner_vault = node_paths.get(from_id, (None, None))
+            pick = next(
+                (c for c in cands if owner_vault == vkey_here and _same_rel_path(c[1], owner_path)),
+                None,
+            )
+            if pick is None:
+                del parsed_by_from_id[from_id]
                 continue
+            parsed_by_from_id[from_id] = pick[0]
+            source_paths[from_id] = pick[1]
 
+        # 원하는 자동 엣지 집합을 먼저 계산한다. 키는 UNIQUE 제약과 같은 (from, to, rel).
+        cache: dict[tuple[str, str], str | None] = {}
+        desired: dict[tuple[str, str, str], str] = {}
+        for from_id, parsed in parsed_by_from_id.items():
+            if from_id not in known_ids:
+                continue
             src = source_paths[from_id]
             for link_title in parsed["links"]:
                 to_id = self._resolve_target(str(link_title), src, vault_path, cache)
-                if to_id:
-                    self.add_edge(from_id, to_id, "links")
+                if to_id and to_id != from_id:
+                    desired.setdefault((from_id, to_id, "links"), "")
             for r in parsed.get("relations", []):
                 to_id = self._resolve_target(r["to"], src, vault_path, cache)
-                if to_id:
-                    ctx = f"{FM_EDGE_MARK} {r['context']}".rstrip()
-                    self.add_edge(from_id, to_id, r["rel"], context=ctx)
+                if to_id and to_id != from_id:
+                    desired.setdefault((from_id, to_id, r["rel"]), f"{FM_EDGE_MARK} {r['context']}".rstrip())
+
+        # 지우고 다시 넣지 않고 차이만 반영한다. 전체 삭제·재삽입은 엣지마다 커밋이 생겨
+        # 노드가 천 개를 넘자 sync 한 번이 쓰기 락을 수십 분 쥐었다(2026-10-19).
+        is_auto = f"(rel_type='links' OR context LIKE '{FM_EDGE_MARK}%')"
+        conn = get_connection()
+        try:
+            if restrict_to_paths is not None:
+                scope_ids = tuple(parsed_by_from_id.keys())
+                if not scope_ids:
+                    return
+                placeholders = ",".join("?" * len(scope_ids))
+                rows = conn.execute(
+                    f"SELECT from_id, to_id, rel_type, context, {is_auto} FROM kg_edges "
+                    f"WHERE from_id IN ({placeholders})",
+                    scope_ids,
+                ).fetchall()
+            else:
+                # 이 볼트에 속한 노드에서 나가는 엣지만 대상 — 다른 볼트의 링크는 건드리지 않는다.
+                rows = conn.execute(
+                    f"""SELECT from_id, to_id, rel_type, context, {is_auto} FROM kg_edges
+                        WHERE from_id IN (SELECT id FROM kg_nodes WHERE vault_path = ?)""",
+                    (vault_key(vault_path),),
+                ).fetchall()
+            # 수동 엣지는 지우지 않고, 같은 키의 자동 엣지를 다시 넣으려 하지도 않는다(UNIQUE).
+            auto = {(r[0], r[1], r[2]): r[3] for r in rows if r[4]}
+            manual = {(r[0], r[1], r[2]) for r in rows if not r[4]}
+
+            stale = [k for k, ctx in auto.items() if desired.get(k) != ctx]
+            missing = [
+                (k, ctx) for k, ctx in desired.items() if k not in manual and auto.get(k) != ctx
+            ]
+            if not stale and not missing:
+                return
+            insert_sql = (
+                "INSERT OR IGNORE INTO kg_edges (from_id, to_id, rel_type, context, weight) "
+                "VALUES (?, ?, ?, ?, 1.0)"
+            )
+            insert_rows = [(f, t, rel, ctx) for (f, t, rel), ctx in missing]
+            try:
+                with conn:
+                    conn.executemany(
+                        "DELETE FROM kg_edges WHERE from_id=? AND to_id=? AND rel_type=?", stale
+                    )
+                    conn.executemany(insert_sql, insert_rows)
+            except sqlite3.IntegrityError:
+                # 그 사이 prune 된 노드를 가리키는 엣지 하나 때문에 묶음 전체를 잃지 않는다.
+                with conn:
+                    conn.executemany(
+                        "DELETE FROM kg_edges WHERE from_id=? AND to_id=? AND rel_type=?", stale
+                    )
+                    for row in insert_rows:
+                        try:
+                            conn.execute(insert_sql, row)
+                        except sqlite3.IntegrityError:
+                            pass
+        finally:
+            conn.close()
 
     def _resolve_target(self, target: str, source_rel_path: str, vault_path: Path,
                         cache: dict | None = None) -> str | None:
@@ -750,50 +920,78 @@ class KnowledgeGraph:
 
         return True
 
+    @staticmethod
+    def _replace_fm_summary(fm_text: str, summary: str) -> str:
+        """frontmatter 본문에서 summary 키(연속 줄 포함)를 YAML 안전 직렬화 값으로 교체한다."""
+        dumped = yaml.safe_dump(
+            {"summary": summary},
+            allow_unicode=True,
+            default_flow_style=False,
+            width=10**9,
+        ).rstrip("\n")
+        new_lines = dumped.split("\n")
+        lines = fm_text.split("\n")
+        start = next((i for i, ln in enumerate(lines) if ln.startswith("summary:")), None)
+        if start is None:
+            return "\n".join([*lines, *new_lines]) if fm_text.strip() else "\n".join(new_lines)
+        end = start + 1
+        while end < len(lines):
+            ln = lines[end]
+            if ln[:1] in (" ", "\t"):
+                end += 1
+                continue
+            if ln.strip() == "":
+                # 빈 줄은 뒤에 들여쓴 줄이 이어질 때만 summary 블록의 일부
+                k = end
+                while k < len(lines) and lines[k].strip() == "":
+                    k += 1
+                if k < len(lines) and lines[k][:1] in (" ", "\t"):
+                    end = k
+                    continue
+            break
+        return "\n".join([*lines[:start], *new_lines, *lines[end:]])
+
     def _patch_md_progress(self, md_path: Path, summary: str, progress: str, open_intents: str):
-        """마크다운 파일의 frontmatter summary와 ## Progress 섹션을 갱신한다."""
+        """마크다운 파일의 frontmatter summary와 ## Progress 섹션을 갱신한다.
+
+        실패해도 예외를 던지지 않고 파일은 그대로 둔다(DB는 이미 커밋된 상태)."""
         try:
             text = md_path.read_text(encoding="utf-8", errors="ignore")
         except Exception:
             return
 
-        # frontmatter summary 교체
-        def _replace_summary(m: re.Match) -> str:
-            fm_text = m.group(1)
-            if re.search(r"^summary:", fm_text, re.MULTILINE):
-                fm_text = re.sub(
-                    r"^summary:.*$",
-                    f"summary: {summary}",
-                    fm_text,
-                    flags=re.MULTILINE,
-                )
+        try:
+            # frontmatter summary 교체 (callable 치환 — 백슬래시 해석 방지)
+            def _replace_summary(m: re.Match) -> str:
+                fm_text = self._replace_fm_summary(m.group(1), summary)
+                return f"---\n{fm_text}\n---\n"
+
+            text = _FRONTMATTER_RE.sub(_replace_summary, text, count=1)
+
+            # ## Progress 섹션 갱신 또는 추가
+            now = datetime.now().strftime("%Y-%m-%d %H:%M")
+            progress_lines = [f"\n## Progress\n\n> 마지막 업데이트: {now}\n"]
+            if progress:
+                progress_lines.append(f"\n{progress.strip()}\n")
+            if open_intents:
+                progress_lines.append(f"\n### 다음 작업\n\n{open_intents.strip()}\n")
+            new_progress_block = "".join(progress_lines)
+
+            progress_pattern = re.compile(r"\n## Progress\b.*?(?=\n## |\Z)", re.DOTALL)
+            if progress_pattern.search(text):
+                text = progress_pattern.sub(lambda _m: new_progress_block, text)
             else:
-                fm_text = fm_text.rstrip() + f"\nsummary: {summary}\n"
-            return f"---\n{fm_text}\n---\n"
+                text = text.rstrip() + "\n" + new_progress_block
 
-        text = _FRONTMATTER_RE.sub(_replace_summary, text, count=1)
-
-        # ## Progress 섹션 갱신 또는 추가
-        now = datetime.now().strftime("%Y-%m-%d %H:%M")
-        progress_lines = [f"\n## Progress\n\n> 마지막 업데이트: {now}\n"]
-        if progress:
-            progress_lines.append(f"\n{progress.strip()}\n")
-        if open_intents:
-            progress_lines.append(f"\n### 다음 작업\n\n{open_intents.strip()}\n")
-        new_progress_block = "".join(progress_lines)
-
-        progress_pattern = re.compile(r"\n## Progress\b.*?(?=\n## |\Z)", re.DOTALL)
-        if progress_pattern.search(text):
-            text = progress_pattern.sub(new_progress_block, text)
-        else:
-            text = text.rstrip() + "\n" + new_progress_block
-
-        text = touch_frontmatter_updated(text)
+            text = touch_frontmatter_updated(text)
+        except Exception:
+            logger.exception("md 패치 실패 — 파일 변경 없음: %s", md_path)
+            return
 
         try:
             md_path.write_text(text, encoding="utf-8")
         except Exception:
-            pass
+            logger.warning("md 쓰기 실패: %s", md_path, exc_info=True)
 
     def append_node_progress_checkpoint(
         self,
