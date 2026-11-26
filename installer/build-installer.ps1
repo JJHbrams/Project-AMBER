@@ -50,6 +50,13 @@ function Write-Err($Message) {
 
 function Invoke-FrozenRole([string]$Role) {
     $savedProfile = Enter-EngramBuildSmokeProfile
+    # The frozen bundle carries the full embedding model and must work offline.
+    # Force the Hub offline and pass no ENGRAM_MODEL_CACHE_DIR / HF cache hint, so
+    # a missing or truncated bundled model fails this smoke instead of being masked.
+    $previousHfOffline = $env:HF_HUB_OFFLINE
+    $previousModelCache = $env:ENGRAM_MODEL_CACHE_DIR
+    $env:HF_HUB_OFFLINE = "1"
+    Remove-Item Env:\ENGRAM_MODEL_CACHE_DIR -ErrorAction SilentlyContinue
     try {
         $process = Start-Process -FilePath $DistExe `
             -ArgumentList @("--role", $Role) `
@@ -60,7 +67,11 @@ function Invoke-FrozenRole([string]$Role) {
             throw "Frozen installer role timed out: $Role"
         }
         return [int]$process.ExitCode
-    } finally { Exit-EngramBuildSmokeProfile $savedProfile }
+    } finally {
+        $env:HF_HUB_OFFLINE = $previousHfOffline
+        $env:ENGRAM_MODEL_CACHE_DIR = $previousModelCache
+        Exit-EngramBuildSmokeProfile $savedProfile
+    }
 }
 
 function Invoke-IsccCompile(

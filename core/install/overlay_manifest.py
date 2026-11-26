@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from core.install import app_payload
-from core.install.model_manifest import validate_manifest_metadata
+from core.install.model_manifest import check_bundled_model, validate_manifest_metadata
 from core.install.versioning import resolve_version, write_snapshot
 
 
@@ -29,6 +29,9 @@ ENGINE_FILES = (
     "environment.yml",
     "engram_overlay_entry.py",
     "resource/icon.ico",
+    # The model payload is bundled by PyInstaller (not patchable): a different
+    # manifest means different model bytes, so it needs the full build.
+    "resource/embedding-model/manifest.json",
 )
 ENGINE_PATTERNS = ("*.spec", "installer/pyi_rth_*.py", "native-bubble-shell/*")
 SMOKE_POLICY = {
@@ -240,6 +243,22 @@ def _runtime_asset_sources(root: Path) -> set[str]:
 def _missing_runtime_asset_sources(root: Path, toc: dict[str, Any]) -> list[str]:
     declared = {str(entry.get("source", "")) for entry in toc.get("datas", [])}
     return sorted(_runtime_asset_sources(root) - declared)
+
+
+def _bundled_model_problem(artifact_dir: Path, model_manifest_path: Path | None = None) -> str:
+    """Why the artifact's bundled embedding model is unusable, or ``""``.
+
+    Artifacts built before the model was bundled again (manifest-only) must not
+    be reused or fast-patched: only a full build can add the payload.
+    """
+    model_dir = app_payload.internal_dir(Path(artifact_dir)) / "resource" / "embedding-model"
+    valid, reason = check_bundled_model(model_dir)
+    if not valid:
+        return reason
+    if model_manifest_path is not None and Path(model_manifest_path).is_file():
+        if _hash_file(model_dir / "manifest.json") != _hash_file(Path(model_manifest_path)):
+            return "bundled embedding model manifest differs from the source manifest"
+    return ""
 
 
 def _missing_runtime_asset_files(artifact_dir: Path, toc: dict[str, Any]) -> list[str]:
@@ -456,6 +475,9 @@ def validate_build(
     missing_files = _missing_runtime_asset_files(artifact_dir, toc)
     if missing_files:
         return False, f"artifact missing runtime asset files: {missing_files[0]}"
+    model_problem = _bundled_model_problem(artifact_dir, model_manifest_path)
+    if model_problem:
+        return False, model_problem
     files = app_section.get("payload_files") or []
     recorded = app_section.get("payload_digest") or ""
     if files and recorded:
@@ -538,6 +560,9 @@ def _plan(root: Path, artifact_dir: Path, model_manifest_path: Path) -> dict[str
     missing_runtime_files = _missing_runtime_asset_files(artifact_dir, toc)
     if missing_runtime_files:
         reasons.append(f"artifact missing runtime asset files: {missing_runtime_files[0]}")
+    model_problem = _bundled_model_problem(artifact_dir, model_manifest_path)
+    if model_problem:
+        reasons.append(model_problem)
     files = app_payload.payload_files(toc)
     recorded_digest = app_section.get("payload_digest") or ""
     if files and recorded_digest:

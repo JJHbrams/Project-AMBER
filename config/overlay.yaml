@@ -285,6 +285,9 @@ mcp:
   # 준비 전 health monitor가 정상 프로세스를 재시작하지 않도록 충분히 유예한다.
   healthcheck_interval_secs: 10
   healthcheck_fail_threshold: 6
+  # 프로세스·리스너는 살아있는데 /health만 타임아웃(긴 도구가 이벤트 루프 점유)일 때
+  # 재기동 전 유예(초). 최소 interval*threshold 이상으로 보정된다.
+  healthcheck_stall_grace_secs: 180
   healthcheck_start_delay_secs: 180
   restart_cooldown_secs: 30
   ready_timeout_secs: 120

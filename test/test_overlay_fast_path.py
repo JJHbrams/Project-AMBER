@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from core.install import app_payload, overlay_manifest
-from core.install.model_manifest import create_manifest
+from core.install.model_manifest import BUNDLE_CHECK_NAME, create_manifest, write_bundle_check
 from core.install.versioning import resolve_version, write_snapshot
 
 
@@ -115,6 +115,11 @@ class Project:
         (self.artifact / "engram-mcp-bridge.exe").write_bytes(b"bridge")
         sources = [e["source"] for e in toc["pure"]] + [e["source"] for e in toc["datas"]]
         app_payload.compile_payload(self.artifact, self.root, toc, sources)
+        # The spec bundles the complete model plus a size record (bundle-check.json).
+        bundled = self.artifact / "_internal" / "resource" / "embedding-model"
+        shutil.copytree(model_dir, bundled, dirs_exist_ok=True)
+        write_bundle_check(model_dir, bundled / BUNDLE_CHECK_NAME)
+        self.bundled_model = bundled
         overlay_manifest.write_manifest(self.root, self.artifact, self.model_manifest, "rebuild")
 
     def plan(self, artifact: Path | None = None) -> dict:
@@ -151,6 +156,61 @@ def test_fresh_artifact_reuses_and_plan_is_deterministic(project):
     assert first["changed_files"] == []
     assert first["smoke"]["runtime-contract"] is True
     assert overlay_manifest.validate_build(project.root, project.artifact, project.model_manifest)[0]
+
+
+def test_manifest_only_artifact_is_not_reused_or_fast_patched(project):
+    # Artifacts from the manifest-only era (v1.5.12..) carry no model payload.
+    (project.bundled_model / "model.safetensors").unlink()
+    plan = project.plan()
+    assert plan["build"] == "full"
+    assert any("bundled embedding model file missing: model.safetensors" in r for r in plan["reasons"])
+    valid, reason = overlay_manifest.validate_build(project.root, project.artifact, project.model_manifest)
+    assert not valid and "model.safetensors" in reason
+
+
+def test_model_manifest_change_requires_full_build_not_fast_patch(project):
+    project.model_manifest.write_bytes(project.model_manifest.read_bytes() + b" ")
+    plan = project.plan()
+    assert plan["build"] == "full"
+    assert "engine input changed: resource/embedding-model/manifest.json" in plan["reasons"]
+    assert any("bundled embedding model manifest differs" in r for r in plan["reasons"])
+
+
+def test_bundled_manifest_differing_from_source_is_rejected(project):
+    bundled = project.bundled_model / "manifest.json"
+    bundled.write_bytes(bundled.read_bytes() + b" ")
+    # keep the size record consistent with the (now different) bundled manifest
+    write_bundle_check_for(project)
+    plan = project.plan()
+    assert plan["build"] == "full"
+    assert any("differs from the source manifest" in r for r in plan["reasons"])
+
+
+def write_bundle_check_for(project):
+    import json as _json
+    record = _json.loads((project.bundled_model / BUNDLE_CHECK_NAME).read_text(encoding="utf-8"))
+    from core.install.model_manifest import manifest_sha256
+    record["manifest_sha256"] = manifest_sha256(project.bundled_model / "manifest.json")
+    (project.bundled_model / BUNDLE_CHECK_NAME).write_text(_json.dumps(record), encoding="utf-8")
+
+
+def test_truncated_model_payload_requires_full_build(project):
+    (project.bundled_model / "model.safetensors").write_bytes(b"w")
+    plan = project.plan()
+    assert plan["build"] == "full"
+    assert any("size mismatch: model.safetensors" in r for r in plan["reasons"])
+
+
+def test_model_payload_is_not_part_of_app_payload_digest(project):
+    toc = project.toc
+    dests = app_payload.payload_files(toc)
+    assert "resource/embedding-model/manifest.json" in dests
+    assert not any(d.endswith("model.safetensors") for d in dests)
+    rebuilt = app_payload.build_toc(
+        project.root, [], [("resource/embedding-model/model.safetensors", str(project.root / "resource/embedding-model/model.safetensors"), "DATA"),
+        ("resource/embedding-model/bundle-check.json", str(project.root / "build/bundle-check.json"), "DATA")],
+    )
+    assert rebuilt["datas"] == []
 
 
 def test_plan_cli_output_is_byte_identical(project, capsys):

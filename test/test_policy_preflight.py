@@ -1,4 +1,5 @@
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -45,8 +46,13 @@ class PolicyPreflightTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             script_path = Path(tmp) / "engram-claude-pretool-hook.ps1"
             script_path.write_text(_render_pretool_hook_script(), encoding="utf-8")
+            # Isolate the profile so a real install marker / backend writes never apply.
+            env = os.environ.copy()
+            env["USERPROFILE"] = tmp
+            env["HOME"] = tmp
             return subprocess.run(
                 ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path)],
+                env=env,
                 cwd=ROOT,
                 shell=False,
                 input=hook_payload_text,
@@ -439,7 +445,8 @@ class PolicyPreflightTests(unittest.TestCase):
         self.assertIn("agent-policy-hook", script)
         self.assertIn("'--provider', 'claude-code'", script)
         self.assertIn("[Console]::In.ReadToEnd()", script)
-        self.assertIn("$payload | & $backendExe @backendArgs", script)
+        self.assertIn("$psi.FileName = $backendExe", script)
+        self.assertIn("ConvertTo-HookArgument", script)
         self.assertNotIn("exit 2", script)
         self.assertTrue(script.rstrip().endswith("exit 0"))
 

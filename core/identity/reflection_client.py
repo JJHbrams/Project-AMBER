@@ -12,7 +12,6 @@ Windows에서 claude.cmd를 node cli.js로 우회 실행, ProactorEventLoop로 s
 
 import json as _json
 import logging
-from pathlib import Path
 from typing import Optional
 
 from claude_code_sdk import query as _sdk_query
@@ -24,6 +23,7 @@ from claude_code_sdk.types import (
 )
 
 from core.integrations.claude_cli_transport import make_transport, run_in_proactor
+from core.memory.transcript_capture import engram_oneshot_cwd
 
 logger = logging.getLogger(__name__)
 
@@ -57,9 +57,13 @@ async def _call_async(
     if json_schema is not None:
         extra_args["json-schema"] = _json.dumps(json_schema)
 
+    # 홈이 아니라 전용 폴더에서 돈다 — 그래야 transcript 캡처가 이 내부 호출을
+    # 사용자 대화로 다시 적재하지 않는다(transcript_capture.engram_oneshot_cwd 참고).
+    cwd = engram_oneshot_cwd()
+    cwd.mkdir(parents=True, exist_ok=True)
     options = ClaudeCodeOptions(
         resume=session_id,
-        cwd=str(Path.home()),
+        cwd=str(cwd),
         system_prompt=_MINIMAL_SYSTEM_PROMPT,
         extra_args=extra_args,
     )

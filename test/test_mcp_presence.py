@@ -188,12 +188,18 @@ class PresenceTests(unittest.TestCase):
         reporter._thread = Mock()  # Inspect queued metadata without worker/network.
         for n in range(100):
             reporter.submit(f"{n:032d}")
-        self.assertEqual(len(reporter._pending), 3)
+        # submit() only records intent for the sender thread; nothing is processed yet.
+        self.assertEqual(reporter._inbox.qsize(), 100)
+        self.assertEqual(len(reporter._outbox), 0)
+        reporter._process_inbox()
+        self.assertEqual(len(reporter._outbox), 3)
         reporter.submit(f"{99:032d}", ended=True)
-        self.assertEqual(len(reporter._pending), 3)
-        self.assertTrue(list(reporter._pending.values())[-1]["ended"])
+        reporter._process_inbox()
+        self.assertEqual(len(reporter._outbox), 3)
+        ended = reporter._outbox.slots[("mcp", f"{99:032d}")].ended
+        self.assertTrue(ended.payload["ended"])
         self.assertEqual(
-            set(list(reporter._pending.values())[-1]),
+            set(ended.payload),
             {"provider", "session_id", "bubble_owner", "ended"},
         )
 

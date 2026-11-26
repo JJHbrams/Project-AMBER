@@ -8,12 +8,23 @@ import os
 import re
 import json
 import asyncio
+import concurrent.futures
+import contextvars
 import socket
 import ipaddress
 import threading
 import time
 import logging
 from datetime import datetime, timezone
+
+# 기동 추적은 무거운 import 전에 무장한다 - 기동이 멈추면 어디서인지 남는다.
+if __name__ == "__main__":
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from core.observability import startup_trace as _early_startup_trace
+
+    _early_startup_trace.arm()
+    _early_startup_trace.mark("entry")
+
 import uvicorn
 from starlette.responses import Response
 
@@ -98,9 +109,21 @@ from core.memory.bus import memory_bus
 from core.context.project_scope import resolve_scope_key, resolve_project_key, resolve_kg_node_id, cwd_is_foreign, get_global_scope_key
 from core.graph.semantic import checkpoint_open_session
 from core.integrations.engram_bootstrap import session_title_directive
+from core.integrations.mcp_tool_runtime import (
+    CallTimer,
+    LoopStallWatchdog,
+    StepTimer,
+    run_helper,
+    steps_logger,
+    wrap_sync_tool,
+)
+from core.observability import startup_trace as _startup_trace
+
+_startup_trace.mark("imports_done")
 
 # DB 초기화
 initialize_db()
+_startup_trace.mark("db_init")
 
 from core.observability.call_log import call_log as _call_log
 
@@ -111,6 +134,7 @@ engramMCP = FastMCP(
                  + session_title_directive(),
     stateless_http=False,
 )
+_startup_trace.mark("fastmcp_created")
 from core.integrations.mcp_presence import PresenceReporter, PresenceMiddleware, TransportIdentityFilter
 from core.integrations.project_metadata import ClientRootProjectResolver
 _mcp_presence = PresenceReporter()
@@ -133,7 +157,7 @@ async def _refresh_client_root_project(context):
             return
         label = await _client_root_projects.resolve(context, identity[0])
         if label:
-            await asyncio.to_thread(_mcp_presence.report_project, context, label, None, source=2)
+            await run_helper("report_project", _mcp_presence.report_project, context, label, None, source=2, lane="presence")
     except Exception:
         pass
 
@@ -146,18 +170,18 @@ async def _report_bootstrap_project(context, project_name, project_key, cwd):
     if project_name is not None:
         name = project_display_name(project_name)
         if name is not None:
-            await asyncio.to_thread(_mcp_presence.report_project, context, name, None, source=3)
+            await run_helper("report_project", _mcp_presence.report_project, context, name, None, source=3, lane="presence")
         return
     identity = _mcp_presence.context_identity(context)
     if identity and not identity[1]:
         root_name = await _client_root_projects.resolve(context, identity[0])
         if root_name:
-            await asyncio.to_thread(_mcp_presence.report_project, context, root_name, None, source=2)
+            await run_helper("report_project", _mcp_presence.report_project, context, root_name, None, source=2, lane="presence")
             return
     # project_key is textual metadata only.  If it is not a safe display label,
     # report_project may use the caller's cwd basename; neither is persisted raw.
     safe_key = project_display_name(project_key or None)
-    await asyncio.to_thread(_mcp_presence.report_project, context, safe_key, cwd or None, source=1)
+    await run_helper("report_project", _mcp_presence.report_project, context, safe_key, cwd or None, source=1, lane="presence")
 
 # 서버 시작 시 1회 스냅샷 — config.yaml tools.disabled 목록
 from core.config.runtime_config import (
@@ -191,7 +215,8 @@ def _tool_with_log(*args, **kwargs):
                     logged.pop('project_name', None)
                     logged.pop('project_key', None)
                 _call_log.record(fn.__name__, logged)
-                result = await fn(*a, **kw)
+                with CallTimer(fn.__name__, "loop"):
+                    result = await fn(*a, **kw)
                 structured = getattr(result, 'structuredContent', result)
                 try:
                     native_child = _inspect.signature(fn).bind_partial(*a, **kw).arguments.get('agent_id') not in (None, '')
@@ -207,16 +232,15 @@ def _tool_with_log(*args, **kwargs):
             return decorator(logged_async)
         else:
 
-            @_functools.wraps(fn)
-            async def logged_sync(*a, **kw):
+            # 동기 도구 본체는 이벤트 루프가 아니라 전용 스레드 풀에서 돈다(긴 도구가 /health 를 얼리지 않게).
+            # presence/call_log/라벨 갱신은 루프에 남긴다.
+            def _prepare(name, a, kw):
                 context = engramMCP.get_context()
                 _mcp_presence.report_context(context)
-                _call_log.record(fn.__name__, kw)
-                result = fn(*a, **kw)
-                await _refresh_client_root_project(context)
-                return result
+                _call_log.record(name, kw)
+                return context
 
-            return decorator(logged_sync)
+            return decorator(wrap_sync_tool(fn, prepare=_prepare, finish=_refresh_client_root_project))
 
     return wrap
 
@@ -235,7 +259,7 @@ async def engram_report_session_state(state: str, label: str | None = None,
     """
     import asyncio
     context = engramMCP.get_context()
-    return await asyncio.to_thread(_mcp_presence.report_state, context, state, label, subagent_count)
+    return await run_helper("report_state", _mcp_presence.report_state, context, state, label, subagent_count, lane="presence")
 
 
 @engramMCP.tool()
@@ -247,7 +271,7 @@ async def engram_report_session_title(title: str) -> dict:
     the bubble controller's state.
     """
     context = engramMCP.get_context()
-    return await asyncio.to_thread(_mcp_presence.report_title, context, title)
+    return await run_helper("report_title", _mcp_presence.report_title, context, title, lane="presence")
 
 
 @engramMCP.tool()
@@ -257,8 +281,8 @@ async def engram_report_session_project(project_name: str | None = None, cwd: st
     No session identity argument. Raw cwd is never published to overlay state.
     Project name takes precedence; no server-directory or content inference.
     """
-    return await asyncio.to_thread(_mcp_presence.report_project, engramMCP.get_context(), project_name, cwd,
-                                   source=3 if project_name is not None else 1)
+    return await run_helper("report_project", _mcp_presence.report_project, engramMCP.get_context(), project_name, cwd,
+                            source=3 if project_name is not None else 1, lane="presence")
 
 
 async def _remember_native_off_loop(context, event, agent_id, native_session_id, result) -> None:
@@ -284,9 +308,9 @@ async def engram_report_claude_event(event: str, turn_id: str | None = None,
     ordinary MCP activity; use Claude's opt-in native mcp_tool hooks.
     """
     context = engramMCP.get_context()
-    result = await asyncio.to_thread(_mcp_presence.report_claude_event,
-                                    context, event, turn_id,
-                                    agent_id, tool_name, tool_use_id, native_session_id)
+    result = await run_helper("report_claude_event", _mcp_presence.report_claude_event,
+                              context, event, turn_id,
+                              agent_id, tool_name, tool_use_id, native_session_id, lane="presence")
     await _remember_native_off_loop(context, event, agent_id, native_session_id, result)
     # Claude's native hook parser reads text, not our diagnostic structure.
     # Keep text strictly in the documented non-blocking hook JSON shape.
@@ -312,9 +336,9 @@ async def engram_report_codex_event(event: str, turn_id: str,
     output or tool input. Uses this existing MCP connection only.
     """
     context = engramMCP.get_context()
-    result = await asyncio.to_thread(_mcp_presence.report_codex_event,
-                                    context, event, turn_id,
-                                    tool_name, tool_use_id, native_session_id, agent_id)
+    result = await run_helper("report_codex_event", _mcp_presence.report_codex_event,
+                              context, event, turn_id,
+                              tool_name, tool_use_id, native_session_id, agent_id, lane="presence")
     await _remember_native_off_loop(context, event, agent_id, native_session_id, result)
     # Codex rejects suppressOutput on PreToolUse. Empty JSON is a successful
     # non-blocking hook; only the documented title context is model-visible.
@@ -347,7 +371,9 @@ import uuid as _uuid
 _CONTEXT_ONCE_KEYS: "OrderedDict[str, tuple[int | None, float]]" = OrderedDict()
 _CONTEXT_ONCE_MAX = 500
 _CONTEXT_ONCE_TTL_SECONDS = 1800  # 30분: 같은 세션 내 재호출은 dedupe, idle 이후 새 세션은 재초기화
-_CONTEXT_ONCE_LOCK = threading.RLock()
+_CONTEXT_ONCE_LOCK = threading.RLock()  # 워커 스레드에서만 잡는다(이벤트 루프 스레드에서 잡으면 /health 가 대기한다)
+# get_context_once 가 repo policy 를 이미 확인한 cwd. 이어지는 engram_get_context 가 중복 실행하지 않게 한다.
+_POLICY_ENSURED: "contextvars.ContextVar[str | None]" = contextvars.ContextVar("engram_policy_ensured", default=None)
 # 이름은 옛 process fingerprint 시절 그대로지만 키는 이제 MCP 연결 키("conn:<id>")다.
 # 프로세스 단위 키로 두면 마지막에 bootstrap 한 대화가 모든 연결의 세션이 된다(교차 오염).
 _FINGERPRINT_TO_SESSION: "OrderedDict[str, int]" = OrderedDict()  # 연결 키 → bootstrap 이 만든 session_id
@@ -578,6 +604,7 @@ def _stm_get(path: str, params: dict | None = None) -> dict | None:
 
 
 _init_stm_mode()
+_startup_trace.mark("stm_mode")
 
 
 # ── Status / Diagnostics ──────────────────────────────────
@@ -838,7 +865,10 @@ def _remember_connection_native(
                     _CONTEXT_ONCE_KEYS.pop(cache_key, None)
         return
     # 'overlay_unavailable' 은 native 바인딩 검사를 통과한 뒤의 전달 실패라 신원은 유효하다.
-    if not isinstance(result, dict) or not (result.get("accepted") or result.get("reason") == "overlay_unavailable"):
+    # 'queued' 는 발송자가 아직 전달 중일 뿐(accepted=True)이라 마찬가지로 유효하다.
+    if not isinstance(result, dict) or not (
+        result.get("accepted") or result.get("reason") in ("overlay_unavailable", "queued")
+    ):
         return
     connection_key = _context_once_connection_key(ctx)
     if not connection_key:
@@ -863,6 +893,51 @@ def _valid_explicit_native(native_session_id: str) -> str:
     from core.integrations.session_title_cache import valid_identity
 
     return native if valid_identity(native) else ""
+
+
+def _claim_connection_native(connection_key: str, session_id: int, explicit_native: str = "") -> int:
+    """새로 만든 세션에 native id 를 물리되, 같은 native id 의 열린 세션이 이미 있으면 그쪽을 채택한다.
+
+    bootstrap(CONCURRENT)과 engram_save_message(create_by_native)가 같은 대화의 세션을 동시에 만들어도
+    _NATIVE_SESSION_LOCK 아래에서 하나만 남긴다. 진 쪽 세션은 메시지가 없으면 종료하고 바인딩하지 않는다.
+    락 순서: _CONTEXT_ONCE_LOCK -> _NATIVE_SESSION_LOCK (여기서는 앞 락을 잡은 채 부르지 않는다)."""
+    if not session_id:
+        return session_id
+    native = ""
+    if connection_key:
+        with _CONTEXT_ONCE_LOCK:
+            native = _CONN_TO_NATIVE.get(connection_key, "")
+    native = native or explicit_native
+    if not native:
+        return session_id
+    with _NATIVE_SESSION_LOCK:
+        conn = get_connection()
+        try:
+            owner = conn.execute(
+                "SELECT id FROM sessions WHERE native_session_id=? AND ended_at IS NULL AND id<>? "
+                "ORDER BY started_at DESC, id DESC LIMIT 1",
+                (native, session_id),
+            ).fetchone()
+            if owner:
+                # 진 쪽은 비어 있으면 같은 락 안에서 종료한다(열린 채 남으면 scope-newest 조회가 빈 세션을 집는다).
+                # 메시지가 하나라도 있으면 건드리지 않는다. 내용 이동도 하지 않는다.
+                with conn:
+                    conn.execute(
+                        "UPDATE sessions SET ended_at=datetime('now','localtime') "
+                        "WHERE id=? AND ended_at IS NULL AND COALESCE(native_session_id,'')='' "
+                        "AND NOT EXISTS (SELECT 1 FROM messages WHERE session_id=?)",
+                        (session_id, session_id),
+                    )
+                return int(owner["id"])
+            row = conn.execute(
+                "SELECT native_session_id, ended_at FROM sessions WHERE id=?", (session_id,)
+            ).fetchone()
+            if row and not row["ended_at"] and not row["native_session_id"]:
+                with conn:
+                    conn.execute("UPDATE sessions SET native_session_id=? WHERE id=?", (native, session_id))
+            return session_id
+        finally:
+            conn.close()
 
 
 def _attach_connection_native(connection_key: str, session_id: int, explicit_native: str = "") -> None:
@@ -1062,6 +1137,7 @@ def engram_status() -> dict:
             broker_alive = False
 
     identity = get_identity()
+    from core.graph.semantic.semantic_graph import semantic_status_snapshot
 
     return {
         "stm_mode": stm_mode,
@@ -1070,6 +1146,7 @@ def engram_status() -> dict:
         "db_path": str(Path(get_db_root_dir()) / "engram.db"),
         "identity_name": identity.get("name", "unknown"),
         "scope_key_env": os.environ.get("ENGRAM_SCOPE_KEY", "(none)"),
+        "semantic": semantic_status_snapshot(),
     }
 
 
@@ -1092,22 +1169,63 @@ async def engram_get_context(
     cwd를 전달하면 현재 작업 디렉토리 기준으로 프로젝트 KG 상태가 자동 주입됩니다.
     scope_key가 비어 있으면 cwd에서 자동 파생한 스코프를 사용하고,
     project_key를 주면 해당 키로 프로젝트 스코프를 고정합니다."""
+    # 블로킹 구간(git 서브프로세스, SQLite, 시맨틱 그래프 락)은 전부 워커 스레드에서 돈다.
+    # 이벤트 루프가 막히면 /health 까지 멈춰 overlay 가 서버를 죽인다.
+    timer = StepTimer()
+    try:
+        if _POLICY_ENSURED.get() != (cwd or ""):  # get_context_once 가 같은 cwd 로 이미 확인했으면 건너뛴다
+            with timer.step("policy"):
+                await run_helper("ctx_policy", _ensure_repo_policy_logged, cwd, lane="concurrent")
+        with timer.step("session_key"):
+            session_key = await run_helper("ctx_session_key", _resolved_context_session_key, ctx, lane="concurrent")
+        with timer.step("compose"):
+            prompt_ctx = await run_helper(
+                "ctx_compose",
+                _compose_prompt_context_blocking,
+                user_query,
+                lane="concurrent",
+                caller=caller,
+                scope_key=scope_key or None,
+                project_key=project_key or None,
+                cwd=cwd or None,
+                session_key=session_key,
+                is_session_init=True,
+            )
+        # get_context 호출 = 오케스트레이터 세션 확인 → sync gate 개방
+        _sync_gate.set()
+        with timer.step("notices"):
+            # 튜토리얼 상태 저장은 core.tutorial 의 좁은 락이 직렬화한다 - serial 레인에서 기다릴 필요가 없다.
+            notices = await run_helper(
+                "ctx_notices", _context_notices_sync, ctx, user_query, scope_key, project_key, cwd, lane="concurrent",
+            )
+    finally:
+        timer.emit(steps_logger, "get_context")
+    if notices:
+        prompt_ctx = "\n".join(notices) + "\n\n" + prompt_ctx
+    return prompt_ctx
+
+
+def _ensure_repo_policy_logged(cwd: str) -> None:
+    """repo policy bootstrap (git 서브프로세스) — 워커 스레드용. 실패는 사유 코드만 남긴다(경로 제외)."""
     policy_result = ensure_repo_policy(cwd or os.getcwd())
     if policy_result.get("ok") is False:
-        logging.getLogger(__name__).warning("repo policy bootstrap 실패: %s", policy_result)
+        logging.getLogger(__name__).warning(
+            "repo policy bootstrap 실패: reason=%s", str(policy_result.get("reason", ""))[:60]
+        )
 
-    session_key = _resolved_context_session_key(ctx)
-    prompt_ctx = await memory_bus.compose_prompt_context(
-        user_query,
-        caller=caller,
-        scope_key=scope_key or None,
-        project_key=project_key or None,
-        cwd=cwd or None,
-        session_key=session_key,
-        is_session_init=True,
-    )
-    # get_context 호출 = 오케스트레이터 세션 확인 → sync gate 개방
-    _sync_gate.set()
+
+def _compose_prompt_context_blocking(*args, **kwargs) -> str:
+    """compose_prompt_context(async)를 워커 스레드의 자체 루프에서 실행한다.
+
+    내부의 SQLite 조회와 SemanticGraph 호출이 서버 루프를 막지 않는다. SemanticGraph 락은
+    CrossLoopAsyncLock(스레드 락)이라 여러 루프에서 안전하고, stm_promoter 등이 같은 방식으로 쓴다."""
+    from core.graph.semantic import run_sg_coro
+
+    return run_sg_coro(memory_bus.compose_prompt_context(*args, **kwargs))
+
+
+def _context_notices_sync(ctx, user_query: str, scope_key: str, project_key: str, cwd: str) -> list[str]:
+    """get_context 앞에 붙는 경고/튜토리얼 안내 목록 (SQLite/파일 접근 — 워커 스레드용)."""
     notices: list[str] = []
 
     # 원격 클라이언트가 자기 쪽 경로를 cwd 로 보내면 이 서버엔 그런 경로가 없어
@@ -1238,9 +1356,183 @@ async def engram_get_context(
                     "'진행하시겠습니까?' 같은 확인 질문과 자동 도구 호출을 금지합니다."
                 )
 
-    if notices:
-        prompt_ctx = "\n".join(notices) + "\n\n" + prompt_ctx
-    return prompt_ctx
+    return notices
+
+
+def _context_once_keys(
+    ctx, caller, scope_key, project_key, cwd, client_token, session_fingerprint, native_session_id,
+) -> tuple[str, str, str]:
+    """(cache_key, connection_key, explicit_native). 워커 스레드용."""
+    cache_key = _build_context_once_key(
+        caller,
+        scope_key,
+        project_key,
+        cwd,
+        session_fingerprint=session_fingerprint,
+    )
+    if client_token:
+        # A launcher token identifies one concrete root CLI lifetime.  It must
+        # not share the process-wide context-once cache entry with another
+        # root CLI that happens to use the same caller/scope/cwd tuple.
+        cache_key = f"{cache_key}|root:{client_token}"
+    connection_key = _context_once_connection_key(ctx)
+    if connection_key:
+        cache_key = f"{cache_key}|{connection_key}"
+    return cache_key, connection_key, _valid_explicit_native(native_session_id)
+
+
+def _context_once_cache_sync(
+    cache_key, connection_key, explicit_native, caller, scope_key, client_token, now,
+) -> tuple[str, int | None, str, str, str]:
+    """context-once 캐시 조회/갱신 (락 + SQLite, 워커 스레드용. 루프에서 _CONTEXT_ONCE_LOCK 을 잡지 않는다).
+
+    반환: (즉시 응답 문자열 또는 "", 재사용할 session_id, cache_key, connection_key, explicit_native)"""
+    # 같은 대화의 재호출임을 증명할 수 없으면 "already" 로 컨텍스트를 생략하지 않는다.
+    # 컨텍스트는 대화마다 들어가야 하고, 중복 주입보다 누락이 훨씬 비싸다.
+    same_conversation_proven = bool(client_token or connection_key)
+
+    reused_session_id: int | None = None
+    with _CONTEXT_ONCE_LOCK:
+        cached = _CONTEXT_ONCE_KEYS.get(cache_key)
+        if cached is not None:
+            cached_sid, cached_ts = cached
+            if now - cached_ts <= _CONTEXT_ONCE_TTL_SECONDS:
+                if cached_sid is not None and _session_is_open(cached_sid):
+                    if client_token and not _bind_root_client_token(cached_sid, client_token):
+                        return "[engram] invalid root client token.", None, cache_key, connection_key, explicit_native
+                    _mark_trusted_root_bootstrap(cached_sid, caller, client_token)
+                    if same_conversation_proven:
+                        sid_hint = f" session_id={cached_sid}."
+                        return (f"[engram] context already initialized for this request session key.{sid_hint}",
+                                None, cache_key, connection_key, explicit_native)
+                    # 기록 행만 재사용하고 컨텍스트는 전부 돌려준다.
+                    reused_session_id = cached_sid
+                # Ended cached binding: never silently reuse it.  The new open
+                # continuation preserves lineage across a client restart/close.
+                elif cached_sid is not None:
+                    _invalidate_session_bindings(cached_sid)
+                    effective_scope = scope_key or os.environ.get("ENGRAM_SCOPE_KEY") or ""
+                    # 프로세스 공용 fingerprint 로 이으면 마지막에 bootstrap 한 다른 대화의
+                    # 열린 세션을 넘겨받는다. 연결 단위로 묶는다.
+                    session_id = _rebind_continuation(connection_key, cached_sid, effective_scope, cache_key)
+                    _attach_connection_native(connection_key, session_id, explicit_native)
+                    if client_token and not _bind_root_client_token(session_id, client_token):
+                        return "[engram] invalid root client token.", None, cache_key, connection_key, explicit_native
+                    _mark_trusted_root_bootstrap(session_id, caller, client_token)
+                    if same_conversation_proven:
+                        return (f"[engram] context reinitialized after closed session. session_id={session_id}.",
+                                None, cache_key, connection_key, explicit_native)
+                    reused_session_id = session_id
+            if reused_session_id is None:
+                # TTL 만료: 새 세션으로 간주하고 아래에서 재초기화
+                if cached_sid is not None:
+                    clear_situational_humor_state(cached_sid)
+                _CONTEXT_ONCE_KEYS.pop(cache_key, None)
+        if reused_session_id is None:
+            _CONTEXT_ONCE_KEYS[cache_key] = (None, now)  # placeholder: session_id로 곧 업데이트
+            if len(_CONTEXT_ONCE_KEYS) > _CONTEXT_ONCE_MAX:
+                _CONTEXT_ONCE_KEYS.popitem(last=False)
+    return "", reused_session_id, cache_key, connection_key, explicit_native
+
+
+def _context_once_create_session_sync(
+    timer, caller, scope_key, project_key, client_token, cache_key, connection_key, explicit_native, now,
+) -> tuple[int | None, str]:
+    """STM 세션 생성 (브로커 HTTP 최대 70 s, 실패 시 direct SQLite. 워커 스레드용).
+
+    반환: (session_id 또는 None, 즉시 응답 문자열 또는 "")"""
+    session_id: int | None = None
+    try:
+        effective_scope = scope_key or os.environ.get("ENGRAM_SCOPE_KEY") or None
+        # 이 연결이 이미 native id 를 보고했고 그 대화의 열린 세션이 있으면 새로 만들지 않는다.
+        # hook 의 transcript 캡처가 같은 대화에 이미 세션을 만들어 둔 경우 둘로 갈라지는 걸 막는다.
+        with timer.step("native_lookup"):
+            with _CONTEXT_ONCE_LOCK:
+                known_native = _CONN_TO_NATIVE.get(connection_key, "") if connection_key else ""
+            known_native = known_native or explicit_native
+            native_session = _open_session_for_native(known_native)
+        if native_session:
+            session_id = native_session
+        else:
+            with timer.step("stm_session_start"):
+                try:
+                    sess_result = _stm_post(
+                        "/stm/session/start",
+                        {"scope_key": effective_scope or "", "project_key": project_key or ""},
+                    )
+                except Exception:
+                    timer.tag("stm_outcome", "error")
+                    raise
+                timer.tag("stm_outcome", "ok" if sess_result and "session_id" in sess_result else "none")
+            if sess_result and "session_id" in sess_result:
+                session_id = int(sess_result["session_id"])
+            else:
+                with timer.step("start_session"):
+                    _parsed_keys = [project_key.strip()] if project_key.strip() else []
+                    _sess = memory_bus.start_session(scope_key=effective_scope, project_keys=_parsed_keys or None)
+                    session_id = _sess.session_id
+            session_id = _claim_connection_native(connection_key, session_id, explicit_native)
+        with _CONTEXT_ONCE_LOCK:
+            _CONTEXT_ONCE_KEYS[cache_key] = (session_id, now)
+        if session_id and client_token and not _bind_root_client_token(session_id, client_token):
+            return session_id, "[engram] invalid root client token."
+        if session_id:
+            _mark_trusted_root_bootstrap(session_id, caller, client_token)
+        # 연결 키 -> session_id 저장 (save_message 자동 resolve용). 프로세스 공용 키로는 묶지 않는다.
+        if session_id is not None and connection_key:
+            _bind_connection_session(connection_key, session_id)
+    except Exception as _e:
+        # 예외 메시지에는 경로/입력이 섞일 수 있어 클래스 이름만 남긴다.
+        logging.getLogger(__name__).warning("get_context_once STM 세션 생성 실패: %s", type(_e).__name__)
+    return session_id, ""
+
+
+# 캐시 키별 in-flight 표식: 첫 호출이 세션을 만드는 동안(STM 브로커 POST 최대 70 s) 같은 키의 호출은
+# 기다렸다가 그 결과를 재사용한다. 어떤 레인도 점유하지 않고, 세션이 둘 생기지 않는다.
+_CONTEXT_ONCE_INFLIGHT: "dict[str, concurrent.futures.Future]" = {}
+_CONTEXT_ONCE_WAIT_SECS = 75.0  # 브로커 POST timeout(70 s)보다 길게
+
+
+def _context_once_bootstrap_sync(
+    timer, ctx, caller, scope_key, project_key, cwd, client_token, session_fingerprint, native_session_id, now,
+) -> tuple[str, int | None]:
+    """캐시 조회와 세션 생성을 키 단위로 원자적으로 (CONCURRENT 레인, 워커 스레드 전용).
+
+    반환: (즉시 응답 또는 "", session_id). 기다리다 시간이 지나면 세션 없이 ("", None) - 둘째 세션은 만들지 않는다."""
+    cache_key, connection_key, explicit_native = _context_once_keys(
+        ctx, caller, scope_key, project_key, cwd, client_token, session_fingerprint, native_session_id,
+    )
+    deadline = time.monotonic() + _CONTEXT_ONCE_WAIT_SECS
+    while True:
+        with _CONTEXT_ONCE_LOCK:
+            inflight = _CONTEXT_ONCE_INFLIGHT.get(cache_key)
+            if inflight is None:
+                marker = concurrent.futures.Future()
+                _CONTEXT_ONCE_INFLIGHT[cache_key] = marker
+                break
+        try:
+            inflight.result(timeout=max(0.0, deadline - time.monotonic()))
+        except concurrent.futures.TimeoutError:
+            return "", None
+        except Exception:
+            pass  # 첫 호출이 실패했다 - 표식이 지워졌으니 다시 시도한다
+    try:
+        with timer.step("cache_lookup"):
+            early, reused, _k, _c, _e = _context_once_cache_sync(
+                cache_key, connection_key, explicit_native, caller, scope_key, client_token, now,
+            )
+        if early:
+            return early, None
+        if reused is not None:
+            return "", reused
+        session_id, early = _context_once_create_session_sync(
+            timer, caller, scope_key, project_key, client_token, cache_key, connection_key, explicit_native, now,
+        )
+        return (early, None) if early else ("", session_id)
+    finally:
+        with _CONTEXT_ONCE_LOCK:
+            _CONTEXT_ONCE_INFLIGHT.pop(cache_key, None)
+        marker.set_result(None)
 
 
 @engramMCP.tool()
@@ -1264,129 +1556,56 @@ async def engram_get_context_once(
     같은 caller/scope/project/cwd 조합에서 재호출되면 짧은 상태 문자열만 반환하여
     반복 토큰 소모를 줄입니다. 강제 새로고침이 필요하면 engram_get_context를 직접 호출하세요.
     """
-    policy_result = ensure_repo_policy(cwd or os.getcwd())
-    if policy_result.get("ok") is False:
-        logging.getLogger(__name__).warning("repo policy bootstrap 실패: %s", policy_result)
-
-    session_fingerprint = _context_session_fingerprint(ctx)
-    if client_token and not _root_client_token_active(client_token):
-        return "[engram] invalid root client token."
-    # Caller-owned display metadata must refresh even on a context-cache hit.
-    # Do not use effective/server cwd or STM fingerprints for overlay identity.
-    # A caller project key may be a machine identifier rather than display text.
-    # Only a safe key precedes cwd; an explicit invalid project_name is rejected.
+    timer = StepTimer()
+    policy_token = None
+    session_id: int | None = None
     try:
-        await _report_bootstrap_project(ctx or engramMCP.get_context(), project_name, project_key, cwd)
-    except Exception:
-        pass  # Overlay metadata cannot block ordinary context bootstrap.
-    cache_key = _build_context_once_key(
-        caller,
-        scope_key,
-        project_key,
-        cwd,
-        session_fingerprint=session_fingerprint,
-    )
-    if client_token:
-        # A launcher token identifies one concrete root CLI lifetime.  It must
-        # not share the process-wide context-once cache entry with another
-        # root CLI that happens to use the same caller/scope/cwd tuple.
-        cache_key = f"{cache_key}|root:{client_token}"
-    connection_key = _context_once_connection_key(ctx)
-    if connection_key:
-        cache_key = f"{cache_key}|{connection_key}"
-    explicit_native = _valid_explicit_native(native_session_id)
-    # 같은 대화의 재호출임을 증명할 수 없으면 "already" 로 컨텍스트를 생략하지 않는다.
-    # 컨텍스트는 대화마다 들어가야 하고, 중복 주입보다 누락이 훨씬 비싸다.
-    same_conversation_proven = bool(client_token or connection_key)
+        with timer.step("policy"):
+            await run_helper("ctx_policy", _ensure_repo_policy_logged, cwd, lane="concurrent")
+        # 뒤이은 engram_get_context 가 같은 cwd 로 policy 를 또 돌리지 않게 표시한다.
+        policy_token = _POLICY_ENSURED.set(cwd or "")
+        session_fingerprint = _context_session_fingerprint(ctx)
+        with timer.step("token_check"):
+            token_active = (
+                await run_helper("ctx_token_check", _root_client_token_active, client_token, lane="concurrent")
+                if client_token else True
+            )
+        if not token_active:
+            return "[engram] invalid root client token."
+        # Caller-owned display metadata must refresh even on a context-cache hit.
+        # Do not use effective/server cwd or STM fingerprints for overlay identity.
+        # A caller project key may be a machine identifier rather than display text.
+        # Only a safe key precedes cwd; an explicit invalid project_name is rejected.
+        with timer.step("bootstrap_project"):
+            try:
+                await _report_bootstrap_project(ctx or engramMCP.get_context(), project_name, project_key, cwd)
+            except Exception:
+                pass  # Overlay metadata cannot block ordinary context bootstrap.
 
-    now = time.time()
-    reused_session_id: int | None = None
-    with _CONTEXT_ONCE_LOCK:
-        cached = _CONTEXT_ONCE_KEYS.get(cache_key)
-        if cached is not None:
-            cached_sid, cached_ts = cached
-            if now - cached_ts <= _CONTEXT_ONCE_TTL_SECONDS:
-                if cached_sid is not None and _session_is_open(cached_sid):
-                    if client_token and not _bind_root_client_token(cached_sid, client_token):
-                        return "[engram] invalid root client token."
-                    _mark_trusted_root_bootstrap(cached_sid, caller, client_token)
-                    if same_conversation_proven:
-                        sid_hint = f" session_id={cached_sid}."
-                        return f"[engram] context already initialized for this request session key.{sid_hint}"
-                    # 기록 행만 재사용하고 컨텍스트는 전부 돌려준다.
-                    reused_session_id = cached_sid
-                # Ended cached binding: never silently reuse it.  The new open
-                # continuation preserves lineage across a client restart/close.
-                elif cached_sid is not None:
-                    _invalidate_session_bindings(cached_sid)
-                    effective_scope = scope_key or os.environ.get("ENGRAM_SCOPE_KEY") or ""
-                    # 프로세스 공용 fingerprint 로 이으면 마지막에 bootstrap 한 다른 대화의
-                    # 열린 세션을 넘겨받는다 — 연결 단위로 묶는다.
-                    session_id = _rebind_continuation(connection_key, cached_sid, effective_scope, cache_key)
-                    _attach_connection_native(connection_key, session_id, explicit_native)
-                    if client_token and not _bind_root_client_token(session_id, client_token):
-                        return "[engram] invalid root client token."
-                    _mark_trusted_root_bootstrap(session_id, caller, client_token)
-                    if same_conversation_proven:
-                        return f"[engram] context reinitialized after closed session. session_id={session_id}."
-                    reused_session_id = session_id
-            if reused_session_id is None:
-                # TTL 만료 — 새 세션으로 간주하고 아래에서 재초기화
-                if cached_sid is not None:
-                    clear_situational_humor_state(cached_sid)
-                _CONTEXT_ONCE_KEYS.pop(cache_key, None)
-        if reused_session_id is None:
-            _CONTEXT_ONCE_KEYS[cache_key] = (None, now)  # placeholder — session_id로 곧 업데이트
-            if len(_CONTEXT_ONCE_KEYS) > _CONTEXT_ONCE_MAX:
-                _CONTEXT_ONCE_KEYS.popitem(last=False)
+        # 캐시 조회 + 세션 생성은 키 단위 in-flight 표식으로 원자적이다 - 같은 키의 동시 호출이 둘 다
+        # placeholder 를 통과해 세션을 두 개 만드는 일을 막는다. 긴 브로커 POST 가 도는 동안
+        # serial 레인(상태 변경 도구)은 비어 있다.
+        early, session_id = await run_helper(
+            "ctx_once_bootstrap", _context_once_bootstrap_sync,
+            timer, ctx, caller, scope_key, project_key, cwd, client_token, session_fingerprint,
+            native_session_id, time.time(), lane="io",
+        )
+        if early:
+            return early
 
-    # STM 세션 생성 (브로커 → fallback direct SQLite)
-    session_id: int | None = reused_session_id
-    if reused_session_id is None:
-        try:
-            effective_scope = scope_key or os.environ.get("ENGRAM_SCOPE_KEY") or None
-            # 이 연결이 이미 native id 를 보고했고 그 대화의 열린 세션이 있으면 새로 만들지 않는다.
-            # hook 의 transcript 캡처가 같은 대화에 이미 세션을 만들어 둔 경우 둘로 갈라지는 걸 막는다.
-            with _CONTEXT_ONCE_LOCK:
-                known_native = _CONN_TO_NATIVE.get(connection_key, "") if connection_key else ""
-            known_native = known_native or explicit_native
-            native_session = _open_session_for_native(known_native)
-            if native_session:
-                session_id = native_session
-            else:
-                sess_result = _stm_post(
-                    "/stm/session/start",
-                    {"scope_key": effective_scope or "", "project_key": project_key or ""},
-                )
-                if sess_result and "session_id" in sess_result:
-                    session_id = int(sess_result["session_id"])
-                else:
-                    _parsed_keys = [project_key.strip()] if project_key.strip() else []
-                    _sess = memory_bus.start_session(scope_key=effective_scope, project_keys=_parsed_keys or None)
-                    session_id = _sess.session_id
-                _attach_connection_native(connection_key, session_id, explicit_native)
-            with _CONTEXT_ONCE_LOCK:
-                _CONTEXT_ONCE_KEYS[cache_key] = (session_id, now)
-            if session_id and client_token and not _bind_root_client_token(session_id, client_token):
-                return "[engram] invalid root client token."
-            if session_id:
-                _mark_trusted_root_bootstrap(session_id, caller, client_token)
-            # 연결 키 → session_id 저장 (save_message 자동 resolve용). 프로세스 공용 키로는 묶지 않는다.
-            if session_id is not None and connection_key:
-                _bind_connection_session(connection_key, session_id)
-        except Exception as _e:
-            import logging as _logging
-
-            _logging.getLogger(__name__).warning("get_context_once STM 세션 생성 실패: %s", _e)
-
-    ctx_text = await engram_get_context(
-        user_query=user_query,
-        caller=caller,
-        scope_key=scope_key,
-        project_key=project_key,
-        cwd=cwd,
-        ctx=ctx,
-    )
+        with timer.step("get_context"):
+            ctx_text = await engram_get_context(
+                user_query=user_query,
+                caller=caller,
+                scope_key=scope_key,
+                project_key=project_key,
+                cwd=cwd,
+                ctx=ctx,
+            )
+    finally:
+        if policy_token is not None:
+            _POLICY_ENSURED.reset(policy_token)
+        timer.emit(steps_logger, "get_context_once")
 
     if session_id is not None:
         stm_notice = (
@@ -3049,6 +3268,19 @@ async def engram_summarize_session(
     이 도구는 persona/narrative 반성을 적용하지 않습니다. ``정리해줘``에는 이
     도구를 쓰고, 실제 종료에는 ``engram_close_session``을 사용하세요.
     """
+    # 1) 느린 I/O(브로커 POST 최대 70 s)는 concurrent 레인, 2) 로컬 상태 쓰기는 짧은 serial 작업.
+    # 두 단계 사이에는 어떤 레인도 잡고 있지 않다.
+    result, local = await run_helper(
+        "summarize_session", _summarize_session_sync, summary, open_intents, progress, scope_key, cwd,
+        session_id, journal_origin, ctx, lane="io",
+    )
+    if local is None:
+        return result
+    return await run_helper("summarize_checkpoint_local", _summarize_checkpoint_local_sync, local)
+
+
+def _summarize_session_sync(summary, open_intents, progress, scope_key, cwd, session_id, journal_origin, ctx) -> tuple[dict | None, tuple | None]:
+    """1단계(CONCURRENT 레인): 대상 확인 + 브로커 POST(최대 70 s). 반환: (최종 결과 또는 None, 로컬 checkpoint 인자 또는 None)."""
     effective_cwd = cwd or os.getcwd()
     resolved_scope = resolve_scope_key(scope_key or None, cwd=effective_cwd)
     explicit = int(session_id or 0)
@@ -3057,10 +3289,10 @@ async def engram_summarize_session(
     if not target:
         unique, ambiguous = _unique_open_session_id(resolved_scope)
         if ambiguous:
-            return {"status": "ambiguous_open_session", "scope_key": resolved_scope}
+            return {"status": "ambiguous_open_session", "scope_key": resolved_scope}, None
         target = int(unique or 0)
     if not target:
-        return {"status": "no_open_session"}
+        return {"status": "no_open_session"}, None
     # Explicit IDs are never silently redirected to a newer continuation.
     conn = get_connection()
     try:
@@ -3068,19 +3300,25 @@ async def engram_summarize_session(
     finally:
         conn.close()
     if not row:
-        return {"status": "unknown_session" if explicit else "no_open_session"}
+        return {"status": "unknown_session" if explicit else "no_open_session"}, None
     if row["ended_at"]:
-        return {"status": "ended_session" if explicit else "no_open_session"}
+        return {"status": "ended_session" if explicit else "no_open_session"}, None
     if row["scope_key"] != resolved_scope:
         # 열려 있지만 scope 가 다르다 — 끝난 세션이라고 말하면 거짓이다.
-        return {"status": "scope_mismatch", "session_scope_key": row["scope_key"], "scope_key": resolved_scope}
+        return {"status": "scope_mismatch", "session_scope_key": row["scope_key"], "scope_key": resolved_scope}, None
     broker = _stm_post("/stm/session/summarize", {
         "session_id": target, "scope_key": resolved_scope, "summary": summary,
         "open_intents": open_intents, "progress": progress, "cwd": effective_cwd,
         "journal_origin": journal_origin,
     })
     if broker is not None:
-        return broker
+        return broker, None
+    return None, (target, resolved_scope, summary, open_intents, progress, effective_cwd)
+
+
+def _summarize_checkpoint_local_sync(local) -> dict:
+    """2단계(SERIAL 레인, 짧은 로컬 쓰기): 브로커가 없을 때의 checkpoint. 상태 변경 도구와 상호 배제."""
+    target, resolved_scope, summary, open_intents, progress, effective_cwd = local
     return checkpoint_open_session(
         target, resolved_scope, summary, open_intents, progress=progress, cwd=effective_cwd,
         external_daily_dir=(str(get_cfg_value("memory.auto_checkpoint.external_daily_dir", "") or "")
@@ -3162,6 +3400,49 @@ async def engram_close_session(
       · example_prompt_kind: 앞에 사용자 발화가 있었으면 'user', 도구 결과나 자기
         출력을 보고 한 말이면 'situation', 코드·수치를 보고 한 말이면 'source'.
         사용자 턴이 없는데 'user' 로 넣으면 "사용자는 이런 말을 한다"를 가르칩니다."""
+    timer = StepTimer()
+    try:
+        with timer.step("prepare"):
+            early, state = await run_helper(
+                "close_session_prepare", _close_session_prepare_sync,
+                summary, open_intents, progress, scope_key, cwd, new_narrative, persona_observations,
+                example_prompt_text, example_response_text, example_prompt_kind, example_tag,
+                trigger_sync, session_id, ctx,
+            )
+        if early is not None:
+            return early
+        applied = state["applied"]
+
+        # A close always first uses the same non-terminal checkpoint coordinator.
+        # The checkpoint is idempotent, so a retry after a successful summary does
+        # not create a second Daily Note/LTM entry.
+        with timer.step("summarize"):
+            checkpoint = await engram_summarize_session(
+                summary=summary, open_intents=open_intents, progress=progress,
+                scope_key=state["resolved_scope"], cwd=state["effective_cwd"],
+                session_id=int(state["closed_session_id"]), ctx=ctx,
+                journal_origin="internal" if not trigger_sync else "root",
+            )
+        if checkpoint.get("status") not in {"checkpointed", "no_new_messages"}:
+            return {**checkpoint, "session_closed": False, **applied}
+
+        with timer.step("finish"):
+            result = await run_helper(
+                "close_session_finish", _close_session_finish_sync, state, summary, open_intents, progress, trigger_sync,
+            )
+        return result
+    finally:
+        timer.emit(steps_logger, "close_session")
+
+
+def _close_session_prepare_sync(
+    summary, open_intents, progress, scope_key, cwd, new_narrative, persona_observations,
+    example_prompt_text, example_response_text, example_prompt_kind, example_tag,
+    trigger_sync, session_id, ctx,
+) -> tuple[dict | None, dict]:
+    """close_session 앞단(세션 해석, 페르소나 적용, 대상 검증). 워커 스레드용.
+
+    반환: (즉시 응답 dict 또는 None, 다음 단계가 쓰는 상태)"""
     effective_cwd = cwd or os.getcwd()
     resolved_scope = resolve_scope_key(scope_key or None, cwd=effective_cwd)
     project_key = resolve_project_key(cwd=effective_cwd)
@@ -3190,33 +3471,37 @@ async def engram_close_session(
         }
 
     if not trigger_sync and not (explicit_id or bound_id):
-        return _bail("subagent_session_required")
+        return _bail("subagent_session_required"), {}
     if explicit_id or bound_id:
         closed_session_id = str(explicit_id or bound_id)
     else:
         unique, ambiguous = _unique_open_session_id(resolved_scope)
         if ambiguous:
-            return _bail("ambiguous_open_session")
+            return _bail("ambiguous_open_session"), {}
         closed_session_id = unique
     if not _session_is_open(int(closed_session_id or 0), resolved_scope):
         if explicit_id or bound_id:
             _status, _extra = _close_target_failure(int(closed_session_id or 0))
-            return _bail(_status, **_extra)
+            return _bail(_status, **_extra), {}
         closed_session_id = ""
     if not closed_session_id:
-        return _bail("no_open_session")
+        return _bail("no_open_session"), {}
+    state = {
+        "effective_cwd": effective_cwd, "resolved_scope": resolved_scope,
+        "closed_session_id": closed_session_id, "applied": applied,
+        "project_key": project_key, "kg_node_id": kg_node_id, "project_label": project_label,
+    }
+    return None, state
 
-    # A close always first uses the same non-terminal checkpoint coordinator.
-    # The checkpoint is idempotent, so a retry after a successful summary does
-    # not create a second Daily Note/LTM entry.
-    checkpoint = await engram_summarize_session(
-        summary=summary, open_intents=open_intents, progress=progress,
-        scope_key=resolved_scope, cwd=effective_cwd, session_id=int(closed_session_id), ctx=ctx,
-        journal_origin="internal" if not trigger_sync else "root",
-    )
-    if checkpoint.get("status") not in {"checkpointed", "no_new_messages"}:
-        return {**checkpoint, "session_closed": False, **applied}
 
+def _close_session_finish_sync(state, summary, open_intents, progress, trigger_sync) -> dict:
+    """통합 종료(세션 닫기, continuity 표시, 후속 sync 예약). 워커 스레드용."""
+    resolved_scope = state["resolved_scope"]
+    closed_session_id = state["closed_session_id"]
+    applied = state["applied"]
+    project_key = state["project_key"]
+    kg_node_id = state["kg_node_id"]
+    project_label = state["project_label"]
     # Terminal-only hooks run only after the exact target is durably ended.
     closed_session_id = _close_scoped_session(
         resolved_scope, summary, closed_session_id, open_intents, progress,
@@ -4250,8 +4535,12 @@ async def _http_memories_sync(request) -> "Response":
 @engramMCP.custom_route("/health", methods=["GET"])
 async def _http_health(request) -> "Response":
     from starlette.responses import JSONResponse
+    from core.graph.semantic.semantic_graph import semantic_status_snapshot
 
-    sync = _load_sync_status()
+    # _SYNC_STATUS 는 _save_sync_status 가 새 dict 로 통째 교체하므로 락 없이 읽어도 일관된다.
+    # 락을 잡으면 sync 워커가 파일 쓰기(fsync) 중일 때 /health 가 거기서 대기한다.
+    snapshot = _SYNC_STATUS
+    sync = dict(snapshot) if snapshot is not None else await asyncio.to_thread(_load_sync_status)
     drift = sync.get("drift") or {}
     return JSONResponse(
         {
@@ -4260,6 +4549,9 @@ async def _http_health(request) -> "Response":
             "runtime": os.environ.get("ENGRAM_RUNTIME_MODE", "standalone"),
             "parent_pid": int(os.environ.get("ENGRAM_RUNTIME_PARENT_PID", "0") or 0),
             "source_root": os.environ.get("ENGRAM_RUNTIME_SOURCE_ROOT", ""),
+            # Embedding model availability; enabled=false carries the reason so a
+            # missing/corrupt bundled model is visible instead of silently empty.
+            "semantic": semantic_status_snapshot(),
             "sync": {
                 "state": sync["state"],
                 "run_id": sync["run_id"],
@@ -4791,6 +5083,27 @@ def _validate_http_listener_args(parser, args) -> None:
             parser.error("--remote-allowed-host must be a host or host:port pattern")
 
 
+class _EngramUvicornServer(uvicorn.Server):
+    """기동 완료 시 기동 추적을 해제하고 루프 정지 워치독을 시작한다."""
+
+    _watchdog: LoopStallWatchdog | None = None
+
+    async def startup(self, sockets=None):
+        await super().startup(sockets=sockets)
+        if not self.started:
+            return
+        _startup_trace.mark("uvicorn_started")
+        _startup_trace.disarm()
+        self._watchdog = LoopStallWatchdog()
+        await self._watchdog.start()
+        _startup_trace.mark("watchdog_started")
+
+    async def shutdown(self, sockets=None):
+        if self._watchdog is not None:
+            await self._watchdog.stop()
+        await super().shutdown(sockets=sockets)
+
+
 def main(argv=None):
     # 서버 시작 시 임베딩 모델 선로딩을 하지 않는다.
     # SentenceTransformer는 시맨틱 기능이 실제 호출될 때 1회 로드된다.
@@ -4841,6 +5154,15 @@ def main(argv=None):
         help="explicit Host header allowed on the authenticated listener (repeatable)",
     )
     args = parser.parse_args(argv)
+    _startup_trace.mark("args_parsed")
+
+    if args.transport != "stdio":
+        # 로그 파일 쓰기가 이벤트 루프를 막지 않게 한다(멱등 - entrypoint 가 이미 적용했을 수 있다).
+        # RichHandler 는 비터미널에서 80칸으로 줄을 꺾어 한 줄 기록을 쪼갠다(#16) - 일반 포맷으로 교체한다.
+        from core.observability import nonblocking_stdio as _nonblocking_stdio
+
+        _nonblocking_stdio.install()
+        _nonblocking_stdio.replace_rich_handlers()
 
     if args.transport in {"sse", "streamable-http"}:
         _validate_http_listener_args(parser, args)
@@ -4855,6 +5177,9 @@ def main(argv=None):
             print(f"[engram] event loop policy setup failed: {exc}", file=sys.stderr)
 
     if args.transport == "stdio":
+        # stdio/sse 는 run() 이 곧 서빙이다 - 기동 완료로 보고 스택 덤프를 해제한다.
+        _startup_trace.mark("serving")
+        _startup_trace.disarm()
         engramMCP.run(transport="stdio")
     elif args.transport == "streamable-http":
         # streamable-http를 기본으로 사용하되, 기존 SSE 클라이언트 호환을 유지한다.
@@ -4873,6 +5198,7 @@ def main(argv=None):
         app = _build_hybrid_http_app()
         if args.remote_allowed_host:
             app = LocalHostGuardMiddleware(app, local_port=args.port, allowed_hosts=local_allowed_hosts)
+        _startup_trace.mark("app_built")
         sockets = [_bind_socket(args.host, args.port)]
         try:
             if args.remote_port:
@@ -4904,7 +5230,9 @@ def main(argv=None):
                 bound_socket.close()
             raise
 
-        server = uvicorn.Server(
+        _startup_trace.mark("sockets_bound")
+        _load_sync_status()  # /health 가 첫 호출에서 파일/락을 건드리지 않게 미리 적재한다
+        server = _EngramUvicornServer(
             uvicorn.Config(app, log_level=engramMCP.settings.log_level.lower())
         )
         server.run(sockets=sockets)
@@ -4912,8 +5240,12 @@ def main(argv=None):
         # FastMCP.run()은 host/port 인자 미지원 — 생성자로 재설정
         engramMCP.settings.host = args.host
         engramMCP.settings.port = args.port
+        _startup_trace.mark("serving")
+        _startup_trace.disarm()
         engramMCP.run(transport=args.transport)
 
+
+_startup_trace.mark("module_loaded")
 
 if __name__ == "__main__":
     main()

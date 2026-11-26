@@ -36,7 +36,7 @@ _windows_version = VSVersionInfo(
     ),
     kids=[
         StringFileInfo([StringTable('040904B0', [
-            StringStruct('CompanyName', 'DRTECH'),
+            StringStruct('CompanyName', 'Project AMBER'),
             StringStruct('FileDescription', 'Engram Overlay'),
             StringStruct('FileVersion', _version_text),
             StringStruct('InternalName', 'engram-overlay'),
@@ -130,15 +130,46 @@ def _collect_character_datas() -> list[tuple[str, str]]:
 _character_datas = _collect_character_datas()
 
 
-def _collect_embedding_model_manifest() -> list[tuple[str, str]]:
-    """Bundle only the canonical manifest; FP32 payload lives in user cache."""
-    manifest = Path("resource") / "embedding-model" / "manifest.json"
+def _load_model_manifest_module():
+    """core/install/model_manifest.py by file path (stdlib only; no app import)."""
+    import importlib.util
+
+    path = Path("core") / "install" / "model_manifest.py"
+    module_spec = importlib.util.spec_from_file_location("_engram_model_manifest", str(path))
+    module = importlib.util.module_from_spec(module_spec)
+    sys.modules[module_spec.name] = module
+    module_spec.loader.exec_module(module)
+    return module
+
+
+def _collect_embedding_model_payload() -> list[tuple[str, str]]:
+    """Bundle the complete FP32 embedding model (manifest + every listed file).
+
+    The frozen runtime loads it in place and never downloads.  The build FAILS
+    here when any manifest-listed file is missing, extra, corrupt or truncated:
+    validate_manifest re-hashes every file (~9 s measured for ~493 MB), so a
+    manifest-only bundle can never ship.  A size record (bundle-check.json,
+    generated under build/) lets the runtime verify completeness with stat().
+    The payload is deliberately NOT part of the app TOC/payload digest
+    (core/install/app_payload.py skips it) so runtime-contract never hashes it.
+    """
+    model_manifest = _load_model_manifest_module()
+    model_dir = Path("resource") / "embedding-model"
+    manifest = model_dir / model_manifest.MANIFEST_NAME
     if not manifest.is_file():
         raise RuntimeError(f"canonical embedding manifest missing: {manifest}")
-    return [(str(manifest), str(Path("resource") / "embedding-model"))]
+    bundle_check = Path("build") / model_manifest.BUNDLE_CHECK_NAME
+    model_manifest.write_bundle_check(model_dir, bundle_check)  # raises on any defect
+    names = sorted(model_manifest.read_manifest(model_dir)["files"])
+    items: list[tuple[str, str]] = [(str(manifest), str(model_dir))]
+    for name in names:
+        source = model_dir / name
+        items.append((str(source), str(model_dir / Path(name).parent)))
+    items.append((str(bundle_check), str(model_dir)))
+    return items
 
 
-_embedding_model_datas = _collect_embedding_model_manifest()
+_embedding_model_datas = _collect_embedding_model_payload()
 _streamlit_datas, _streamlit_binaries, _streamlit_hiddenimports = collect_all("streamlit")
 _mcp_datas, _mcp_binaries, _mcp_hiddenimports = collect_all("mcp")
 

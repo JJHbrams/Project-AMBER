@@ -1,5 +1,80 @@
 # Release Notes
 
+## 2026-11-26 - v1.5.27: MCP Server Stays Responsive, Upgrades Pass Open Sessions
+
+### Highlights
+
+- **The MCP server no longer freezes behind session status reports.** One lock
+  serialized every session's reports while HTTP went out under it, and the
+  event loop waited on the same lock. Report latency p99 dropped from 8.2 s to
+  141 ms, and stalls of 5 s or more caused by reporting went from 27 a day to 0.
+- **A slow disk can no longer stop the server through a log write.** Logs go
+  through a bounded queue and a writer thread; MCP log records are single
+  lines again.
+- **Upgrades no longer roll back, or leave the overlay off, while Claude
+  sessions are open.** Setup moves running session bridges aside, and restores
+  them and restarts the overlay if it cannot finish.
+- Also included since 1.5.25 (released as 1.5.26 in development only): long
+  synchronous tools no longer freeze the server and drop every client, the
+  embedding model is bundled again (#15), hooks no longer lock files during
+  upgrades (#14), the auto-checkpoint full scan and one-shot LLM re-capture are
+  fixed, and setup configuration works under Windows PowerShell 5.1.
+- The DRTECH label is removed from the product name and installer publisher.
+
+### What Changed
+
+- `core/integrations/mcp_presence.py`, `core/integrations/presence_outbox.py`
+  (new): status state is computed under a short memory-only lock; one sender
+  thread delivers per-session coalesced slots outside any lock, ordered by
+  generation and sequence numbers. The event loop only enqueues.
+- `core/integrations/session_title_cache.py`: lookups once per identity,
+  writes on a dedicated thread; the DPAPI secret is unwrapped once.
+- `core/observability/nonblocking_stdio.py` (new), `core/entrypoint.py`,
+  `mcp_server.py`: non-blocking stdout/stderr for HTTP transports;
+  single-line log formatter.
+- `core/integrations/mcp_tool_runtime.py`: lane thread pools for synchronous
+  tools, a presence lane, per-call timing, and a loop-stall watchdog that logs
+  all thread stacks.
+- `installer/sidestep-engram-bridge.ps1` (new), `installer/engram-overlay.iss`,
+  `installer/stop-engram-processes.ps1`: bridge sidestep before the in-use
+  check, restore and overlay restart on an incomplete setup, cleanup of renamed
+  copies.
+- `engram-overlay.spec`, `core/install/model_manifest.py`: embedding model
+  bundled and verified at build time.
+- `core/install/pe_version.py`, `overlay/settings_window.py`: product label.
+
+### Impact
+
+- Hooks and tools stay responsive while other sessions are busy or the overlay
+  is slow; Codex `tool call failed` hook errors stopped on the development PC
+  (18 the day before the fixes, 0 after).
+- Existing installs are offered this release through **check for update**.
+  Open sessions keep working during the upgrade.
+- This release ships the Standalone Windows installer only. The server/client
+  split (Client Overlay installer, Server Docker image) is not released yet,
+  so this is not a complete three-deliverable AMBER release.
+
+### Validation
+
+- Installed builds 1.5.26.956–959 on the development PC (Windows 11):
+  - With the overlay process suspended for 12 s, `/health` answered in at
+    most 31 ms with no failures, and status reports answered in at most 157 ms.
+  - After install, 483 status reports had p50 14 ms, p99 141 ms; no
+    reporting-caused loop stall.
+  - Upgrade with 8 open session bridges, no manual step: no rollback, all
+    sessions kept running, overlay and MCP server up (`/health` 200).
+- The release installer AMBER_1.5.27.963 passed the frozen runtime contract,
+  role smoke and dashboard smoke; the bundle contains the new modules and no
+  DRTECH label.
+- Tests: new presence (26), non-blocking stdio (7), installer bridge (18),
+  watchdog and ratchet suites pass. Against the unmodified baseline, the only
+  new full-suite failures were environment-dependent (identical on the
+  baseline when rerun) or timing flakes. Independent acceptance audits found no
+  defects.
+- Not yet verified: a full day of observation; the restore-and-restart path of
+  an incomplete setup ran only in unit tests (a failing install could not be
+  induced, because Restart Manager closed every other locking process).
+
 ## 2026-11-16 - v1.5.25: No More Silent Overlay Deaths, No Orphaned Services, Safe Frontmatter
 
 ### Highlights

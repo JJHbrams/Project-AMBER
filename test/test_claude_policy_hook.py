@@ -688,7 +688,9 @@ class ClaudePolicyHookTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            with patch.object(engram_bootstrap, "_CODEX_HOOKS_PATH", hooks_path):
+            with patch.object(engram_bootstrap, "_CODEX_HOOKS_PATH", hooks_path), patch.object(
+                engram_bootstrap, "_ENGRAM_DIR", Path(tmp) / ".engram"
+            ):
                 first = engram_bootstrap.sync_codex_pretool_hook(True)
                 second = engram_bootstrap.sync_codex_pretool_hook(True)
 

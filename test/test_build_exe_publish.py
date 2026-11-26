@@ -147,9 +147,13 @@ def test_smoke_loop_skips_embedding_when_covered_and_records():
     assert '"--kind", "full"' in BUILD
 
 
-def test_persistent_model_cache():
-    body = _function_body("Resolve-SmokeModelCache")
-    assert "build\smoke-model-cache" in body and "--ensure-cache" in body
+def test_frozen_smoke_uses_bundled_model_offline_without_cache():
+    # The bundle carries the model; the smoke must not seed or honour a model cache.
+    assert "Resolve-SmokeModelCache" not in BUILD
+    assert "smoke-model-cache" not in BUILD
+    body = _function_body("Invoke-OverlayRole")
+    assert '$env:HF_HUB_OFFLINE = "1"' in body
+    assert "Remove-Item Env:" in body and "ENGRAM_MODEL_CACHE_DIR" in body
     assert "engram-smoke-model-" not in BUILD
 
 

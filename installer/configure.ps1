@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Engram Overlay — 설치타임 경량 구성기 (frozen/통짜 installer 전용)
 
@@ -68,6 +68,15 @@ $WorkflowSkillsSource = Join-Path $InstallDir ".github\skills"
 $EnvFile       = Join-Path $ShimDir ".env"
 $MCP_HTTP_PORT = 17385
 $Utf8NoBom     = [System.Text.UTF8Encoding]::new($false)
+
+# 설치기는 Windows PowerShell 5.1 로 이 스크립트를 돌린다. PS7 셸에서 setup 을 띄우면
+# PSModulePath 에 PS7 모듈 경로가 섞여 5.1 이 PS7 전용 모듈(Archive 1.2.x 등)을 로드하고
+# .NET Core 전용 API 에서 실패한다(2026-11-25 실측). 5.1 기본 경로만 남긴다.
+if ($PSVersionTable.PSEdition -eq 'Desktop' -and $env:PSModulePath) {
+    $env:PSModulePath = (($env:PSModulePath -split ';') | Where-Object {
+        $_ -and $_ -notmatch '\\PowerShell\\(7[^\\]*\\)?Modules\\?$'
+    }) -join ';'
+}
 
 if (-not (Test-Path $ShimDir)) { New-Item $ShimDir -ItemType Directory -Force | Out-Null }
 $ConfigureLogDir = Join-Path $ShimDir "logs"
@@ -254,6 +263,20 @@ function Remove-EngramManagedCodexHooks {
     Write-Ok "Removed Engram-managed Codex hooks"
 }
 
+function Remove-EngramCodexPretoolWrapper {
+    # Only our own generated wrapper (its header names the Engram Overlay).
+    $wrapper = Join-Path $ShimDir "engram-codex-pretool-hook.ps1"
+    if (-not (Test-Path $wrapper)) { return }
+    try {
+        if ((Get-Content $wrapper -TotalCount 1 -ErrorAction Stop) -like "*engram agent PreToolUse hook wrapper*") {
+            Remove-Item $wrapper -Force -ErrorAction Stop
+            Write-Ok "Removed Engram Codex policy hook wrapper"
+        }
+    } catch {
+        Write-Warn "Could not remove ${wrapper}: $($_.Exception.Message)"
+    }
+}
+
 # ── Uninstall / install ─────────────────────────────────────
 # The finally block also closes the transcript for unexpected terminating
 # errors. Explicit outcomes use Exit-Configure so their original exit code is
@@ -266,6 +289,7 @@ if ($Uninstall) {
     Set-EngramJointStartup -Mode off -HostExecutable $DistExe
     Remove-EngramManagedClaudeHooks
     Remove-EngramManagedCodexHooks
+    Remove-EngramCodexPretoolWrapper
     $uninstallProgramsFolder = Get-EngramKnownFolder -Name "Programs"
     $uninstallStartupFolder = Get-EngramKnownFolder -Name "Startup"
     $legacyShortcutPaths = [Collections.Generic.List[string]]::new()
@@ -440,6 +464,12 @@ foreach ($codexRoot in @($codexHooks.roots)) {
     if ($codexRoot.status -ne 'ready') { Write-Warn $codexRoot.review_instruction }
 }
 if ($codexHooks.title_policy_review_required) { Write-Warn $codexHooks.title_policy_notice }
+# The overlay rewrites the Codex PreToolUse policy hook on start; its command
+# (and so Codex's trust hash) changes once on upgrade. Trust is never written.
+$codexPolicyHooksFile = Join-Path $env:USERPROFILE ".codex\hooks.json"
+if ((Test-Path $codexPolicyHooksFile) -and ((Get-Content $codexPolicyHooksFile -Raw) -match 'engram-codex-pretool-hook')) {
+    Write-Warn 'Codex: the engram policy hook (PreToolUse) is updated when the overlay starts. Open Codex and run /hooks to re-approve it; until then Codex policy guidance stays off.'
+}
 
 # The bridge adapter also owns ~/.engram/claude-mcp.json.
 # VSCode global (%APPDATA%/Code/User/mcp.json) : servers

@@ -54,13 +54,30 @@ def _run_ps(script, timeout=60, env=None):
 
 
 def test_joint_startup_ps1_has_no_bom_regression():
-    """joint-startup.ps1 has no BOM today; this only guards against silently
-    reintroducing mixed encoding while it stays plain ASCII/UTF-8 comments."""
+    """Non-ASCII PowerShell must carry a UTF-8 BOM: Windows PowerShell 5.1 (the
+    installer runs configure.ps1 with it) reads BOM-less files as cp949, and
+    Korean text then breaks parsing — 2026-11-25 setup failed to configure."""
     data = JOINT_STARTUP.read_bytes()
-    assert not data.startswith(b"\xef\xbb\xbf"), (
-        "joint-startup.ps1 had no BOM before this change; if Korean text was "
-        "added, add a BOM too (PowerShell 5.1 misreads it as cp949 without one)"
-    )
+    has_bom = data.startswith(b"\xef\xbb\xbf")
+    body = data[3:] if has_bom else data
+    if any(b > 0x7F for b in body):
+        assert has_bom, "joint-startup.ps1 contains non-ASCII text but no UTF-8 BOM"
+    else:
+        assert not has_bom, "plain-ASCII joint-startup.ps1 does not need a BOM"
+
+
+def test_installer_powershell_with_non_ascii_has_bom():
+    """Every installer script that contains non-ASCII text must start with a
+    UTF-8 BOM so Windows PowerShell 5.1 parses it as UTF-8, not cp949."""
+    installer = JOINT_STARTUP.parent
+    missing = []
+    for path in sorted(installer.rglob("*.ps1")):
+        data = path.read_bytes()
+        if data.startswith(b"\xef\xbb\xbf"):
+            continue
+        if any(b > 0x7F for b in data):
+            missing.append(str(path.relative_to(installer)))
+    assert not missing, f"non-ASCII PowerShell without UTF-8 BOM: {missing}"
 
 
 def test_get_engram_known_folder_returns_null_and_warns_once_when_unresolved():

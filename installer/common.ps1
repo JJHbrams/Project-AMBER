@@ -438,7 +438,9 @@ function Install-GooseCli {
 
     if (Test-Path $extractDir) { Remove-Item $extractDir -Recurse -Force }
     try {
-        Expand-Archive -Path $zipPath -DestinationPath $extractDir -Force
+        # Expand-Archive 는 PS7 모듈 경로가 섞이면 5.1 에서 실패한다(addons.ps1 참고).
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        [IO.Compression.ZipFile]::ExtractToDirectory($zipPath, $extractDir)
     } catch {
         Write-Warn "압축 해제 실패: $_"
         return $null

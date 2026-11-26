@@ -420,27 +420,182 @@ def _policy_preflight_backend_command_parts() -> tuple[str, list[str]]:
     )
 
 
+# Install-in-progress marker, shared with installer/engram-overlay.iss
+# (%USERPROFILE%\.engram\install-in-progress). The installer creates it before it
+# stops processes and removes it when setup finishes or aborts. While a marker
+# younger than INSTALL_MARKER_MAX_AGE_SECONDS exists, the generated Windows hook
+# wrappers exit 0 without launching the (half-replaced) installed exe.
+INSTALL_IN_PROGRESS_MARKER_NAME = "install-in-progress"
+INSTALL_MARKER_MAX_AGE_SECONDS = 600
+# Hard limit for one backend invocation. Claude/Codex hook timeout is 30 s.
+HOOK_BACKEND_TIMEOUT_SECONDS = 20
+_CODEX_PRETOOL_HOOK_SCRIPT_NAME = "engram-codex-pretool-hook.ps1"
+
+_PRETOOL_WRAPPER_TEMPLATE = r"""# engram agent PreToolUse hook wrapper - generated and managed by Engram Overlay.
+# Fail-open: a tool call is never blocked because the backend is unavailable.
+# Skips the backend while an installer upgrade is in progress and never lets it
+# run longer than the time limit (the whole process tree is killed on timeout).
+$ErrorActionPreference = 'Continue'
+[Console]::InputEncoding = [System.Text.UTF8Encoding]::new()
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()
+$backendExe = @@EXE@@
+$backendArgs = @(@@ARGS@@)
+$passExitCode = @@PASS@@
+$markerName = '@@MARKER@@'
+$markerMaxAgeSeconds = @@MARKER_AGE@@
+$backendTimeoutMs = @@TIMEOUT_MS@@
+$neutralOutput = @@NEUTRAL@@
+function Write-NeutralOutput {
+  if ($neutralOutput) { [Console]::Out.Write($neutralOutput) }
+}
+$profileDir = $env:USERPROFILE
+if (-not $profileDir) { $profileDir = $HOME }
+try {
+  $marker = Join-Path (Join-Path $profileDir '.engram') $markerName
+  if (Test-Path -LiteralPath $marker) {
+    $markerAge = ((Get-Date) - (Get-Item -LiteralPath $marker -Force).LastWriteTime).TotalSeconds
+    if (($markerAge -lt $markerMaxAgeSeconds) -and ($markerAge -gt -60)) { Write-NeutralOutput; exit 0 }
+  }
+} catch {}
+function New-Pump($stream) {
+  return @{ Stream = $stream; Buf = (New-Object byte[] 8192); Mem = (New-Object System.IO.MemoryStream); Task = $null; Done = $false }
+}
+function Step-Pump($pump) {
+  if ($pump.Done) { return }
+  while ($true) {
+    if ($null -eq $pump.Task) { $pump.Task = $pump.Stream.ReadAsync($pump.Buf, 0, $pump.Buf.Length) }
+    if (-not $pump.Task.IsCompleted) { return }
+    if ($pump.Task.IsFaulted -or $pump.Task.IsCanceled) { $pump.Done = $true; return }
+    $n = $pump.Task.Result
+    $pump.Task = $null
+    if ($n -le 0) { $pump.Done = $true; return }
+    $pump.Mem.Write($pump.Buf, 0, $n)
+  }
+}
+function Stop-Descendants($rootId, $since) {
+  try {
+    $all = @(Get-CimInstance Win32_Process)
+    $queue = New-Object System.Collections.Queue
+    $queue.Enqueue([uint32]$rootId)
+    $seen = @{}
+    while ($queue.Count -gt 0) {
+      $parentId = $queue.Dequeue()
+      foreach ($c in $all) {
+        if (($c.ParentProcessId -eq $parentId) -and (-not $seen.ContainsKey([int]$c.ProcessId)) -and ($c.CreationDate -ge $since)) {
+          $seen[[int]$c.ProcessId] = $true
+          $queue.Enqueue([uint32]$c.ProcessId)
+          & taskkill.exe /F /PID $c.ProcessId *> $null
+        }
+      }
+    }
+  } catch {}
+}
+function ConvertTo-HookArgument([string]$value) {
+  if (($value.Length -gt 0) -and ($value -notmatch '[\s"]')) { return $value }
+  $quoted = $value -replace '(\\*)"', '$1$1\"'
+  $quoted = $quoted -replace '(\\+)$', '$1$1'
+  return '"' + $quoted + '"'
+}
+$proc = $null
+try {
+  $utf8 = [System.Text.UTF8Encoding]::new($false)
+  $payload = [Console]::In.ReadToEnd()
+  $psi = New-Object System.Diagnostics.ProcessStartInfo
+  $psi.FileName = $backendExe
+  $psi.Arguments = (($backendArgs | ForEach-Object { ConvertTo-HookArgument $_ }) -join ' ')
+  $psi.UseShellExecute = $false
+  $psi.CreateNoWindow = $true
+  $psi.RedirectStandardInput = $true
+  $psi.RedirectStandardOutput = $true
+  $psi.RedirectStandardError = $true
+  $psi.StandardOutputEncoding = $utf8
+  $psi.StandardErrorEncoding = $utf8
+  $clock = [System.Diagnostics.Stopwatch]::StartNew()
+  $startedAfter = (Get-Date).AddSeconds(-2)
+  $proc = [System.Diagnostics.Process]::Start($psi)
+  $outPump = New-Pump $proc.StandardOutput.BaseStream
+  $errPump = New-Pump $proc.StandardError.BaseStream
+  $written = $false
+  try {
+    $bytes = $utf8.GetBytes($payload)
+    $inTask = $proc.StandardInput.BaseStream.WriteAsync($bytes, 0, $bytes.Length)
+    $written = $inTask.Wait($backendTimeoutMs)
+    if ($written) { $proc.StandardInput.Close() }
+  } catch {
+    $written = $true
+  }
+  $timedOut = -not $written
+  $exitSeenAt = $null
+  while (-not $timedOut) {
+    Step-Pump $outPump
+    Step-Pump $errPump
+    if ($proc.HasExited) {
+      if ($outPump.Done -and $errPump.Done) { break }
+      if ($null -eq $exitSeenAt) {
+        $exitSeenAt = $clock.ElapsedMilliseconds
+      } elseif (($clock.ElapsedMilliseconds - $exitSeenAt) -ge 2000) {
+        # A grandchild still holds the pipes after the backend exited: kill it,
+        # then keep whatever output was read.
+        Stop-Descendants $proc.Id $startedAfter
+        Start-Sleep -Milliseconds 150
+        Step-Pump $outPump
+        Step-Pump $errPump
+        break
+      }
+    }
+    if ($clock.ElapsedMilliseconds -ge $backendTimeoutMs) { $timedOut = $true; break }
+    Start-Sleep -Milliseconds 20
+  }
+  if ($timedOut) {
+    & taskkill.exe /T /F /PID $proc.Id *> $null
+    try { $proc.Kill() } catch {}
+    [Console]::Error.WriteLine('Engram policy guidance unavailable: backend timed out.')
+    Write-NeutralOutput
+    exit 0
+  }
+  $proc.WaitForExit()
+  $stdoutText = $utf8.GetString($outPump.Mem.ToArray())
+  $stderrText = $utf8.GetString($errPump.Mem.ToArray())
+  if ($stdoutText) { [Console]::Out.Write($stdoutText) }
+  if ($stderrText) { [Console]::Error.Write($stderrText) }
+  $code = $proc.ExitCode
+  if ($passExitCode) { exit $code }
+  if ($code -ne 0) {
+    [Console]::Error.WriteLine('Engram policy guidance unavailable: backend invocation failed.')
+    if (-not $stdoutText) { Write-NeutralOutput }
+  }
+} catch {
+  if ($proc -and -not $proc.HasExited) { & taskkill.exe /T /F /PID $proc.Id *> $null }
+  [Console]::Error.WriteLine('Engram policy guidance unavailable: backend invocation failed.')
+  Write-NeutralOutput
+}
+exit 0
+"""
+
+
 def _render_pretool_hook_script(provider: str = "claude-code") -> str:
+    """Windows PowerShell 5.1 wrapper.
+
+    The template is ASCII, but the embedded exe path may not be (non-ASCII
+    Windows user name), so callers must write the file as UTF-8 WITH BOM
+    (see ``_script_bytes``); Windows PowerShell 5.1 otherwise reads it as ANSI.
+
+    Claude/Gemini/Antigravity/Copilot wrappers always exit 0 (fail-open). The
+    Codex wrapper passes the backend's exit code through when it finishes in time.
+    """
     backend_exe, backend_args = _agent_policy_hook_command_parts(provider)
     rendered_args = ", ".join(_ps_single_quote(arg) for arg in backend_args)
     return (
-        "# engram Claude PreToolUse hook — Engram Overlay 가 자동 생성/관리한다.\n"
-        "# policy guidance level에 따라 경고하거나 agent tool call을 차단한다.\n"
-        "$ErrorActionPreference = 'Continue'\n"
-        "[Console]::InputEncoding = [System.Text.UTF8Encoding]::new()\n"
-        "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()\n"
-        f"$backendExe = {_ps_single_quote(backend_exe)}\n"
-        f"$backendArgs = @({rendered_args})\n"
-        "try {\n"
-        "  $payload = [Console]::In.ReadToEnd()\n"
-        "  $payload | & $backendExe @backendArgs\n"
-        "  if ($LASTEXITCODE -ne 0) {\n"
-        "    [Console]::Error.WriteLine('Engram policy guidance unavailable: backend invocation failed.')\n"
-        "  }\n"
-        "} catch {\n"
-        "  [Console]::Error.WriteLine('Engram policy guidance unavailable: backend invocation failed.')\n"
-        "}\n"
-        "exit 0\n"
+        _PRETOOL_WRAPPER_TEMPLATE.replace("@@EXE@@", _ps_single_quote(backend_exe))
+        .replace("@@ARGS@@", rendered_args)
+        .replace("@@PASS@@", "$true" if provider == "codex" else "$false")
+        .replace(
+            "@@NEUTRAL@@",
+            "'{\"decision\":\"allow\"}'" if provider in ("antigravity", "gemini") else "''",
+        )
+        .replace("@@MARKER@@", INSTALL_IN_PROGRESS_MARKER_NAME)
+        .replace("@@MARKER_AGE@@", str(INSTALL_MARKER_MAX_AGE_SECONDS))
+        .replace("@@TIMEOUT_MS@@", str(HOOK_BACKEND_TIMEOUT_SECONDS * 1000))
     )
 
 
@@ -479,13 +634,31 @@ def _antigravity_hook_command(script_path: Path) -> str:
     return f"powershell -NoProfile -ExecutionPolicy Bypass -File {relative}"
 
 
+def _codex_wrapper_path() -> Path:
+    return _ENGRAM_DIR / _CODEX_PRETOOL_HOOK_SCRIPT_NAME
+
+
 def _codex_hook_handler() -> dict[str, Any]:
+    """Codex handler. The Windows command goes through the bounded PowerShell
+    wrapper (install marker + 20 s limit) instead of running the exe directly.
+
+    Changing ``commandWindows`` changes Codex's hook trust hash, so an existing
+    install must re-review the hook once via ``/hooks``.
+    """
     executable, args = _agent_policy_hook_command_parts("codex")
     parts = [executable, *args]
+    windows_parts = [
+        "powershell",
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        str(_codex_wrapper_path()),
+    ]
     return {
         "type": "command",
         "command": _shell_command(parts),
-        "commandWindows": _windows_command(parts),
+        "commandWindows": _windows_command(windows_parts),
         "statusMessage": "Checking repository policy guidance",
         "timeout": 30,
     }
@@ -514,6 +687,24 @@ def _load_settings() -> dict | None:
         logger.warning("[engram-bootstrap] ~/.claude/settings.json 파싱 실패 — hook 동기화 건너뜀")
         return None
     return data if isinstance(data, dict) else {}
+
+
+def _script_bytes(path: Path, content: str) -> bytes:
+    """Bytes to store for a managed hook script.
+
+    ``.ps1`` files get a UTF-8 BOM: Windows PowerShell 5.1 reads BOM-less files
+    in the ANSI code page, which garbles non-ASCII paths (e.g. a Korean user
+    name in the embedded exe path). Other scripts (``.sh``) stay BOM-less.
+    """
+    data = content.replace("\r\n", "\n").encode("utf-8")
+    return (b"\xef\xbb\xbf" + data) if path.suffix.lower() == ".ps1" else data
+
+
+def _script_current(path: Path, content: str) -> bool:
+    try:
+        return path.read_bytes() == _script_bytes(path, content)
+    except OSError:
+        return False
 
 
 def _strip_engram_entries(event_entries: list, marker: str) -> list:
@@ -589,10 +780,9 @@ def _sync_managed_hook(
 
         # ── hook 스크립트 파일 동기화(내용이 다를 때만 쓰기) ──
         if enabled:
-            current_script = script_path.read_text(encoding="utf-8") if script_path.exists() else None
-            if current_script != script_content:
+            if not _script_current(script_path, script_content):
                 _ENGRAM_DIR.mkdir(parents=True, exist_ok=True)
-                script_path.write_text(script_content, encoding="utf-8")
+                script_path.write_bytes(_script_bytes(script_path, script_content))
         else:
             try:
                 script_path.unlink(missing_ok=True)
@@ -664,14 +854,14 @@ def _write_provider_hook_script(
                 else _render_pretool_hook_posix_script(provider)
             )
             _ENGRAM_DIR.mkdir(parents=True, exist_ok=True)
-            if not script_path.exists() or script_path.read_text(encoding="utf-8") != content:
+            if not _script_current(script_path, content):
                 # Do not leave a partially rendered executable hook if a host
                 # loses power or a writer fails midway through an update.
                 fd, tmp_name = tempfile.mkstemp(prefix=f".{script_path.name}.", suffix=".tmp", dir=str(script_path.parent))
                 tmp_path = Path(tmp_name)
                 try:
-                    with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as stream:
-                        stream.write(content)
+                    with os.fdopen(fd, "wb") as stream:
+                        stream.write(_script_bytes(script_path, content))
                     os.replace(tmp_path, script_path)
                 except Exception:
                     tmp_path.unlink(missing_ok=True)
@@ -883,7 +1073,13 @@ def sync_codex_pretool_hook(enabled: bool) -> dict[str, Any]:
         if not isinstance(entries, list):
             entries = []
         entries = _strip_engram_entries(entries, _CODEX_PRETOOL_HOOK_MARKER)
+        wrapper_path = _codex_wrapper_path()
         if enabled:
+            if os.name == "nt":
+                wrapper_content = _render_pretool_hook_script("codex")
+                _ENGRAM_DIR.mkdir(parents=True, exist_ok=True)
+                if not _script_current(wrapper_path, wrapper_content):
+                    wrapper_path.write_bytes(_script_bytes(wrapper_path, wrapper_content))
             handler = _codex_hook_handler()
             handler["command"] = f"{handler['command']} # {_CODEX_PRETOOL_HOOK_MARKER}"
             entries.append(
@@ -892,6 +1088,8 @@ def sync_codex_pretool_hook(enabled: bool) -> dict[str, Any]:
                     "hooks": [handler],
                 }
             )
+        if not enabled:
+            wrapper_path.unlink(missing_ok=True)
         if entries:
             hooks["PreToolUse"] = entries
         else:

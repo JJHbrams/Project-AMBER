@@ -97,7 +97,11 @@ class ClosePayloadSurvivesTests(unittest.TestCase):
         import mcp_server
 
         fn = getattr(mcp_server.engram_close_session, "fn", mcp_server.engram_close_session)
-        source = inspect.getsource(fn)
+        # close 본문은 워커 스레드용 동기 단계(prepare/finish)로 나뉘었다 - 셋을 합쳐서 본다.
+        source = "\n".join(
+            inspect.getsource(part)
+            for part in (fn, mcp_server._close_session_prepare_sync, mcp_server._close_session_finish_sync)
+        )
 
         # 조기 반환은 전부 _bail() 을 거쳐야 한다. 맨손 return 이 남아 있으면
         # 그 경로만 조용히 내용을 버린다.

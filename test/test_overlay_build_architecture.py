@@ -5,7 +5,12 @@ from unittest.mock import patch
 from pathlib import Path
 
 from core.install import app_payload, overlay_manifest
-from core.install.model_manifest import create_manifest, validate_manifest
+from core.install.model_manifest import (
+    BUNDLE_CHECK_NAME,
+    create_manifest,
+    validate_manifest,
+    write_bundle_check,
+)
 from core.install.overlay_manifest import (
     input_hashes,
     make_manifest,
@@ -14,6 +19,17 @@ from core.install.overlay_manifest import (
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def _bundle_model(artifact: Path, model_dir: Path) -> None:
+    """Place the complete model + size record where the frozen bundle carries it."""
+    contents = artifact / "_internal" if (artifact / "_internal").is_dir() else artifact
+    bundled = contents / "resource" / "embedding-model"
+    bundled.mkdir(parents=True, exist_ok=True)
+    for source in model_dir.iterdir():
+        if source.is_file():
+            (bundled / source.name).write_bytes(source.read_bytes())
+    write_bundle_check(model_dir, bundled / BUNDLE_CHECK_NAME)
 
 
 class OverlayBuildArchitectureTests(unittest.TestCase):
@@ -123,6 +139,7 @@ class OverlayBuildArchitectureTests(unittest.TestCase):
             artifact.mkdir()
             (artifact / "engram-overlay.exe").write_bytes(b"exe")
             (artifact / "engram-dashboard.exe").write_bytes(b"exe")
+            _bundle_model(artifact, model_dir)
             build_manifest = make_manifest(root, model_manifest, "rebuild")
             (artifact / "build-manifest.json").write_text(
                 json.dumps(build_manifest),
@@ -194,6 +211,7 @@ class OverlayBuildArchitectureTests(unittest.TestCase):
             (internal / "overlay").mkdir(parents=True)
             (artifact / "engram-overlay.exe").write_bytes(b"exe")
             (artifact / "engram-dashboard.exe").write_bytes(b"exe")
+            _bundle_model(artifact, model_dir)
             (internal / "overlay" / "main.pyc").write_bytes(b"bytecode")
             toc = {
                 "schema": app_payload.TOC_SCHEMA,
@@ -248,6 +266,7 @@ class OverlayBuildArchitectureTests(unittest.TestCase):
             artifact.mkdir()
             (artifact / "engram-overlay.exe").write_bytes(b"exe")
             (artifact / "engram-dashboard.exe").write_bytes(b"exe")
+            _bundle_model(artifact, model_dir)
             (artifact / "build-manifest.json").write_text(
                 json.dumps(make_manifest(root, model_manifest, "rebuild")),
                 encoding="utf-8",
@@ -299,11 +318,18 @@ class OverlayBuildArchitectureTests(unittest.TestCase):
         self.assertIn('"--validate-metadata"', build)
         self.assertNotIn('"--allow-download"', build)
         self.assertNotIn("--refresh-manifest", build)
-        self.assertIn("_collect_embedding_model_manifest", spec)
+        self.assertIn("_collect_embedding_model_payload", spec)
+        self.assertNotIn("_collect_embedding_model_manifest", spec)
         self.assertNotIn("model_dir.rglob", spec)
+        self.assertIn("write_bundle_check(model_dir, bundle_check)", spec)
+        self.assertNotIn("FP32 payload lives in user cache", spec)
         self.assertIn('if role == "model-cache":', entry)
-        self.assertIn("ENGRAM_MODEL_CACHE_DIR", build)
-        self.assertIn("smoke-model-cache", build)
+        self.assertNotIn("smoke-model-cache", build)
+        self.assertNotIn("Resolve-SmokeModelCache", build)
+        installer = (ROOT / "installer" / "build-installer.ps1").read_text(encoding="utf-8-sig")
+        self.assertIn('$env:HF_HUB_OFFLINE = "1"', build)
+        self.assertIn('$env:HF_HUB_OFFLINE = "1"', installer)
+        self.assertIn("Remove-Item Env:\\ENGRAM_MODEL_CACHE_DIR", installer)
 
     def test_frozen_bundle_retains_embedding_runtime_dependencies(self):
         spec = (ROOT / "engram-overlay.spec").read_text(encoding="utf-8")

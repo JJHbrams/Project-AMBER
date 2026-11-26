@@ -28,6 +28,26 @@ def claude_project_dir(cwd: str, claude_home: Optional[Path] = None) -> Path:
     return home / "projects" / encoded
 
 
+def engram_oneshot_cwd() -> Path:
+    """engram 내부 단발 LLM 호출(요약·일지·반성·말풍선 프레이징)의 전용 cwd.
+
+    예전엔 홈을 cwd 로 써서 그 transcript 가 사용자의 홈 디렉터리 대화와 한
+    폴더에 섞였고, 캡처 루프가 그걸 사용자 대화로 다시 적재했다 — 2026-11-20
+    실측, 열린 세션 5,046개 중 약 3,660개가 이 내부 호출이었다(닫히지 않아 쌓임).
+    전용 폴더로 분리해야 캡처가 이름 하나로 확실히 건너뛸 수 있다.
+    """
+    return Path.home() / ".engram" / "llm-oneshot"
+
+
+def _claude_dir_name(cwd: "str | Path") -> str:
+    # Claude Code 는 영숫자 외 문자를 전부 '-' 로 바꾼다('.engram' → '-engram').
+    return re.sub(r"[^A-Za-z0-9]", "-", str(cwd))
+
+
+def is_engram_internal_project_dir(project_dir: Path) -> bool:
+    return project_dir.name.casefold() == _claude_dir_name(engram_oneshot_cwd()).casefold()
+
+
 def find_active_transcript(project_dir: Path) -> Optional[Path]:
     """가장 최근에 수정된 .jsonl(현재 활성 세션으로 추정)을 반환한다."""
     if not project_dir.is_dir():
@@ -52,7 +72,7 @@ def find_active_transcript_any(claude_home: Optional[Path] = None) -> Optional[P
     latest: Optional[Path] = None
     latest_mtime = -1.0
     for project_dir in root.iterdir():
-        if not project_dir.is_dir():
+        if not project_dir.is_dir() or is_engram_internal_project_dir(project_dir):
             continue
         for f in project_dir.glob("*.jsonl"):
             try:

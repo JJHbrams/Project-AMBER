@@ -6,6 +6,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+import functools
+import threading
+
 import yaml
 
 _ENGRAM_DIR = Path.home() / ".engram"
@@ -1130,3 +1133,25 @@ def get_tutorial_status(identity_name: str = "") -> dict[str, Any]:
     """튜토리얼 상태를 읽어 보정 후 반환한다."""
     return refresh_tutorial_progress(identity_name=identity_name)
 
+
+# -- 튜토리얼 상태 read-modify-write 직렬화 ------------------------------------
+# get_context 의 안내문(get_tutorial_status -> refresh)은 CONCURRENT 레인에서, complete/skip/... 는
+# SERIAL 레인과 close 에서 돈다. 레인으로는 서로 배제되지 않으므로 이 좁은 락으로 RMW 를 막는다.
+_TUTORIAL_STATE_LOCK = threading.RLock()
+
+
+def _tutorial_locked(fn):
+    @functools.wraps(fn)
+    def locked(*args, **kwargs):
+        with _TUTORIAL_STATE_LOCK:
+            return fn(*args, **kwargs)
+
+    return locked
+
+
+for _name in (
+    "refresh_tutorial_progress", "reset_tutorial_state", "complete_tutorial_step", "skip_tutorial_step",
+    "proceed_tutorial_step", "mark_session_continuity_saved", "resume_tutorial_step",
+    "verify_wiki_basic_step", "verify_wiki_advanced_step", "verify_session_continuity_step",
+):
+    globals()[_name] = _tutorial_locked(globals()[_name])

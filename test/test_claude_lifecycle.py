@@ -199,6 +199,7 @@ class LifecycleTests(unittest.TestCase):
         )
         reporter._send = Mock(return_value=True)
         reporter.report_context(context)
+        self.assertTrue(reporter.flush(5))  # presence is async: drain before asserting nothing was sent
         reporter._send.assert_not_called()
 
     def test_working_lease_not_extended_by_presence_or_metadata(self):

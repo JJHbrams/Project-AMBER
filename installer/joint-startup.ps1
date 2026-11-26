@@ -1,4 +1,4 @@
-# Source installer/development workflow only. Never loaded by the overlay host.
+﻿# Source installer/development workflow only. Never loaded by the overlay host.
 # Startup ownership is separate from runtime ownership: no runtime/config adoption.
 . (Join-Path $PSScriptRoot 'external-components.ps1')
 

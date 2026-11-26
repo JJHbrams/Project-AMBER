@@ -54,18 +54,9 @@ class TitleRetentionHTTPTests(unittest.TestCase):
         self.fail('worker did not restore the expected safe title')
 
     def flush_presence(self, reporter, ctx):
-        sent = threading.Event()
-        original = reporter._send
-        def send(*args, **kwargs):
-            result = original(*args, **kwargs)
-            sent.set()
-            return result
-        with patch.object(reporter, '_send', side_effect=send):
-            reporter.report_context(ctx)
-            self.assertTrue(sent.wait(3))
-            # _run retains this lock until title restoration is also finished.
-            with reporter._title_lock:
-                pass
+        reporter.report_context(ctx)
+        # The sender delivers presence and any title/project restore it triggers.
+        self.assertTrue(reporter.flush(5))
 
     def http_rows(self):
         info = json.loads(self.discovery.read_text(encoding='utf-8'))
@@ -101,9 +92,10 @@ class TitleRetentionHTTPTests(unittest.TestCase):
         self.assertFalse(self.reporter._title_cache.path.exists())
         # Ordinary renewal must not replace a newer producer title.
         self.registry.set_producer_label('mcp', row['session_id'], 'Current live title')
-        with patch.object(self.reporter._title_cache, 'access', wraps=self.reporter._title_cache.access) as access:
+        with patch.object(self.reporter._title_cache, 'lookup', wraps=self.reporter._title_cache.lookup) as lookup,                 patch.object(self.reporter._title_cache, 'store', wraps=self.reporter._title_cache.store) as store:
             self.flush_presence(self.reporter, ctx)
-            access.assert_not_called()
+            lookup.assert_not_called()
+            store.assert_not_called()
         self.wait_title(self.reporter, ctx, 'Current live title')
 
     def test_unknown_and_bubble_presence_do_not_allocate_title_identity(self):
@@ -123,6 +115,7 @@ class TitleRetentionHTTPTests(unittest.TestCase):
         self.reporter.report_title(ctx, 'Safe prior title')
         self.assertTrue(self.reporter.report_claude_event(ctx, 'SessionEnd', turn)['accepted'])
         self.reporter.report_context(ctx)
+        self.assertTrue(self.reporter.flush(5))
         self.assertEqual(self.registry.snapshot(), [])
 
     def test_default_retention_boundary_and_separate_working_lease(self):
@@ -146,6 +139,7 @@ class TitleRetentionHTTPTests(unittest.TestCase):
                 self.assertTrue(hook(original, 'UserPromptSubmit', turn,
                     native_session_id='native-' + provider)['accepted'])
                 self.assertTrue(self.reporter.report_title(original, 'Saved safe title')['accepted'])
+                self.assertTrue(self.reporter.flush(5))  # the title cache is written by its own thread
                 reconnect = self.new_reporter()
                 restored = context('reconnected-' + provider)
                 result = getattr(reconnect, 'report_' + provider + '_event')(

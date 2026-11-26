@@ -1,0 +1,215 @@
+{
+ "_comment": "test_async_blocking_ratchet.py --regen 으로 생성. 손으로 늘리지 말 것.",
+ "entries": [
+  {
+   "file": "core/integrations/mcp_tool_runtime.py",
+   "function": "CallTimer.__aenter__",
+   "target": "helper:CallTimer.__enter__",
+   "count": 1,
+   "classification": "미분류: 블로킹 호출을 to_thread/전용 레인으로 이전 예정"
+  },
+  {
+   "file": "core/integrations/mcp_tool_runtime.py",
+   "function": "CallTimer.__aexit__",
+   "target": "helper:CallTimer.__exit__",
+   "count": 1,
+   "classification": "미분류: 블로킹 호출을 to_thread/전용 레인으로 이전 예정"
+  },
+  {
+   "file": "core/integrations/mcp_tool_runtime.py",
+   "function": "_run_in_lane",
+   "target": "helper:_register",
+   "count": 1,
+   "classification": "미분류: 블로킹 호출을 to_thread/전용 레인으로 이전 예정"
+  },
+  {
+   "file": "core/integrations/mcp_tool_runtime.py",
+   "function": "_run_in_lane",
+   "target": "helper:_unregister",
+   "count": 1,
+   "classification": "미분류: 블로킹 호출을 to_thread/전용 레인으로 이전 예정"
+  },
+  {
+   "file": "mcp_server.py",
+   "function": "_http_sg_graph",
+   "target": "get_semantic_graph",
+   "count": 1,
+   "classification": "2단계(의미 처리 프로세스 분리)에서 제거 예정"
+  },
+  {
+   "file": "mcp_server.py",
+   "function": "_http_sg_neighbors",
+   "target": "get_semantic_graph",
+   "count": 1,
+   "classification": "2단계(의미 처리 프로세스 분리)에서 제거 예정"
+  },
+  {
+   "file": "mcp_server.py",
+   "function": "_http_sg_search",
+   "target": "get_semantic_graph",
+   "count": 1,
+   "classification": "2단계(의미 처리 프로세스 분리)에서 제거 예정"
+  },
+  {
+   "file": "mcp_server.py",
+   "function": "_http_sg_stats",
+   "target": "get_semantic_graph",
+   "count": 1,
+   "classification": "2단계(의미 처리 프로세스 분리)에서 제거 예정"
+  },
+  {
+   "file": "mcp_server.py",
+   "function": "_http_sync_status",
+   "target": "helper:_load_sync_status",
+   "count": 1,
+   "classification": "미분류: 블로킹 호출을 to_thread/전용 레인으로 이전 예정"
+  },
+  {
+   "file": "mcp_server.py",
+   "function": "_memories_sync_impl",
+   "target": "get_connection",
+   "count": 1,
+   "classification": "미분류: 블로킹 호출을 to_thread/전용 레인으로 이전 예정"
+  },
+  {
+   "file": "mcp_server.py",
+   "function": "_memories_sync_impl",
+   "target": "get_semantic_graph",
+   "count": 1,
+   "classification": "2단계(의미 처리 프로세스 분리)에서 제거 예정"
+  },
+  {
+   "file": "mcp_server.py",
+   "function": "_reconcile_memories",
+   "target": "get_semantic_graph",
+   "count": 1,
+   "classification": "2단계(의미 처리 프로세스 분리)에서 제거 예정"
+  },
+  {
+   "file": "mcp_server.py",
+   "function": "_scan_memory_drift",
+   "target": "get_connection",
+   "count": 1,
+   "classification": "미분류: 블로킹 호출을 to_thread/전용 레인으로 이전 예정"
+  },
+  {
+   "file": "mcp_server.py",
+   "function": "_scan_memory_drift",
+   "target": "helper:_load_memories_sync_checkpoint",
+   "count": 1,
+   "classification": "미분류: 블로킹 호출을 to_thread/전용 레인으로 이전 예정"
+  },
+  {
+   "file": "mcp_server.py",
+   "function": "_scan_memory_drift",
+   "target": "helper:_save_memories_sync_checkpoint",
+   "count": 1,
+   "classification": "미분류: 블로킹 호출을 to_thread/전용 레인으로 이전 예정"
+  },
+  {
+   "file": "mcp_server.py",
+   "function": "_sync_memories_incremental_async",
+   "target": "get_connection",
+   "count": 1,
+   "classification": "미분류: 블로킹 호출을 to_thread/전용 레인으로 이전 예정"
+  },
+  {
+   "file": "mcp_server.py",
+   "function": "_sync_memories_incremental_async",
+   "target": "helper:_save_memories_sync_checkpoint",
+   "count": 4,
+   "classification": "미분류: 블로킹 호출을 to_thread/전용 레인으로 이전 예정"
+  },
+  {
+   "file": "mcp_server.py",
+   "function": "engram_verify_tutorial_session_continuity",
+   "target": "helper:_find_latest_open_session_id",
+   "count": 1,
+   "classification": "미분류: 블로킹 호출을 to_thread/전용 레인으로 이전 예정"
+  },
+  {
+   "file": "mcp_server.py",
+   "function": "kg_add_note",
+   "target": "get_kg",
+   "count": 1,
+   "classification": "2단계(의미 처리 프로세스 분리)에서 제거 예정"
+  },
+  {
+   "file": "mcp_server.py",
+   "function": "kg_add_note",
+   "target": "get_semantic_graph",
+   "count": 1,
+   "classification": "2단계(의미 처리 프로세스 분리)에서 제거 예정"
+  },
+  {
+   "file": "mcp_server.py",
+   "function": "kg_cypher",
+   "target": "get_semantic_graph",
+   "count": 1,
+   "classification": "2단계(의미 처리 프로세스 분리)에서 제거 예정"
+  },
+  {
+   "file": "mcp_server.py",
+   "function": "kg_patch_section",
+   "target": "get_kg",
+   "count": 1,
+   "classification": "2단계(의미 처리 프로세스 분리)에서 제거 예정"
+  },
+  {
+   "file": "mcp_server.py",
+   "function": "kg_patch_section",
+   "target": "get_semantic_graph",
+   "count": 1,
+   "classification": "2단계(의미 처리 프로세스 분리)에서 제거 예정"
+  },
+  {
+   "file": "mcp_server.py",
+   "function": "kg_semantic_neighbors",
+   "target": "get_semantic_graph",
+   "count": 1,
+   "classification": "2단계(의미 처리 프로세스 분리)에서 제거 예정"
+  },
+  {
+   "file": "mcp_server.py",
+   "function": "kg_semantic_search",
+   "target": "get_semantic_graph",
+   "count": 1,
+   "classification": "2단계(의미 처리 프로세스 분리)에서 제거 예정"
+  },
+  {
+   "file": "mcp_server.py",
+   "function": "kg_update_node",
+   "target": "get_kg",
+   "count": 1,
+   "classification": "2단계(의미 처리 프로세스 분리)에서 제거 예정"
+  },
+  {
+   "file": "mcp_server.py",
+   "function": "kg_update_node",
+   "target": "get_semantic_graph",
+   "count": 1,
+   "classification": "2단계(의미 처리 프로세스 분리)에서 제거 예정"
+  },
+  {
+   "file": "mcp_server.py",
+   "function": "kg_wiki_reminder",
+   "target": "get_semantic_graph",
+   "count": 1,
+   "classification": "2단계(의미 처리 프로세스 분리)에서 제거 예정"
+  },
+  {
+   "file": "mcp_server.py",
+   "function": "memories_sync",
+   "target": "get_semantic_graph",
+   "count": 1,
+   "classification": "2단계(의미 처리 프로세스 분리)에서 제거 예정"
+  },
+  {
+   "file": "mcp_server.py",
+   "function": "memories_sync",
+   "target": "helper:_update_sync_status",
+   "count": 3,
+   "classification": "미분류: 블로킹 호출을 to_thread/전용 레인으로 이전 예정"
+  }
+ ]
+}

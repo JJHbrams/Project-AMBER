@@ -15,6 +15,7 @@ import urllib.request
 from ctypes import wintypes
 from typing import Sequence
 
+from core.install.model_manifest import user_process_env
 from core.storage.db import get_connection
 
 
@@ -55,7 +56,9 @@ def _process_creation_identity(pid: int) -> str:
 
 def launch_root_claude(argv: Sequence[str], *, cwd: str, bootstrap: str) -> int:
     token = secrets.token_urlsafe(24)
-    env = os.environ.copy()
+    # The user's claude must not inherit the offline switches engram forces on its
+    # own model-loading processes.
+    env = user_process_env()
     env["ENGRAM_ROOT_CLIENT_TOKEN"] = token
     # Keep the token inside the tool call's argument list; a trailing prose
     # suffix is not executable MCP instruction.

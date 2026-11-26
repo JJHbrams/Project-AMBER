@@ -31,6 +31,41 @@ class TitleCacheTests(unittest.TestCase):
             self.assertNotIn(native.encode(), cache.path.read_bytes())
             self.assertIsNone(SessionTitleCache(directory, clock=lambda: 111, ttl=10).access('codex', 'one', native))
 
+    def test_lookup_is_read_only_and_store_is_the_only_writer(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cache = SessionTitleCache(directory)
+            self.assertIsNone(cache.lookup('codex', 'one', 'native-id'))
+            self.assertFalse(cache.path.exists())  # a lookup never creates the database
+            self.assertEqual(cache.store('codex', 'one', 'native-id', 'Safe stored title'), 'Safe stored title')
+            before = cache.path.read_bytes(), cache.path.stat().st_mtime_ns
+            self.assertEqual(cache.lookup('codex', 'one', 'native-id'), 'Safe stored title')
+            self.assertIsNone(cache.lookup('claude', 'one', 'native-id'))
+            self.assertIsNone(cache.lookup('codex', 'one', '${session_id}'))
+            self.assertEqual((cache.path.read_bytes(), cache.path.stat().st_mtime_ns), before)
+            # access() stays a compatible wrapper: title given -> store, otherwise lookup.
+            self.assertEqual(cache.access('codex', 'one', 'native-id'), 'Safe stored title')
+            self.assertEqual(cache.access('codex', 'one', 'native-id', 'Another safe title'), 'Another safe title')
+            self.assertEqual(cache.lookup('codex', 'one', 'native-id'), 'Another safe title')
+
+    def test_unprotected_secret_is_computed_once_per_instance_and_never_logged(self):
+        import core.integrations.session_title_cache as module
+        with tempfile.TemporaryDirectory() as directory:
+            decodes = []
+            real = module._protect
+
+            def counting(value, *, decode=False):
+                decodes.append(decode)
+                return real(value, decode=decode)
+            with patch.object(module, '_protect', counting):
+                cache = SessionTitleCache(directory)
+                cache.store('codex', 'one', 'native-id', 'Safe stored title')
+                for _ in range(5):
+                    cache.lookup('codex', 'one', 'native-id')
+                cache.store('codex', 'one', 'native-id', 'Safe later title')
+                self.assertEqual(decodes.count(True), 1)
+                self.assertEqual(SessionTitleCache(directory).lookup('codex', 'one', 'native-id'), 'Safe later title')
+                self.assertEqual(decodes.count(True), 2)  # a new instance decodes its own copy once
+
     def test_corruption_invalid_metadata_and_transactional_capacity(self):
         with tempfile.TemporaryDirectory() as directory:
             cache = SessionTitleCache(directory, capacity=3)
@@ -62,19 +97,23 @@ class TitleCacheTests(unittest.TestCase):
                 first.report_codex_event(original, 'UserPromptSubmit', 'turn1', native_session_id='native-one')
                 if not title_first:
                     first.report_title(original, 'Safe original title')
+                self.assertTrue(first.flush(5))  # cache writes happen on the cache thread
                 second = PresenceReporter(Path(directory) / 'state.json')
                 second._send = send
                 result = second.report_codex_event(context('reconnect'), 'UserPromptSubmit', 'turn2', native_session_id='native-one')
                 self.assertTrue(result['accepted'])
                 self.assertNotIn('hookSpecificOutput', result)
+                self.assertTrue(second.flush(5))
                 self.assertEqual(sent[-1]['title'], 'Safe original title')
                 self.assertNotIn('native-one', json.dumps(sent))
                 self.assertNotEqual(sent[0]['session_id'], sent[-1]['session_id'])
                 second.report_title(context('reconnect'), 'Updated safe title')
+                self.assertTrue(second.flush(5))
                 third = PresenceReporter(Path(directory) / 'state.json')
                 third._send = send
                 third.report_title(context('new'), 'Current live title')
                 third.report_codex_event(context('new'), 'UserPromptSubmit', 'turn3', native_session_id='native-one')
+                self.assertTrue(third.flush(5))
                 self.assertEqual(sent[-1]['title'], 'Current live title')
 
     def test_no_rebind_rejected_agent_and_stale_turn_never_bind(self):

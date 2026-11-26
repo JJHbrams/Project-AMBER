@@ -38,6 +38,16 @@ def _prepare_frozen_streams() -> None:
             pass
 
 
+def _mcp_transport(rest) -> str:
+    """mcp-server 인자에서 --transport 값을 읽는다. 없으면 mcp_server 기본값(stdio)."""
+    for index, arg in enumerate(rest):
+        if arg == "--transport" and index + 1 < len(rest):
+            return rest[index + 1]
+        if arg.startswith("--transport="):
+            return arg.split("=", 1)[1]
+    return "stdio"
+
+
 def _write_frozen_failure(label: str) -> None:
     path = os.environ.get("ENGRAM_SMOKE_LOG")
     if not path:
@@ -50,6 +60,33 @@ def _write_frozen_failure(label: str) -> None:
             traceback.print_exc(file=handle)
     except OSError:
         pass
+
+
+# Roles that construct the SemanticGraph/encoder at start-up. Only these processes
+# are forced offline (never the user-facing launchers or overlay children, whose
+# environment reaches the user's own claude/codex/ML processes). Every other
+# process that loads the encoder is covered at model-load time in semantic_graph.
+_MODEL_ROLES = frozenset({"mcp-server", "kg-watcher", "embedding-check", "smoke-check"})
+
+
+def _configure_model_network(role: str, argv: list[str]) -> bool:
+    """Frozen builds bundle the embedding model and must never reach the Hub.
+
+    Applied per role, before the role imports transformers/huggingface_hub (their
+    offline switches are read once at import). ``--role model-cache
+    --allow-download`` is the deliberate maintenance tool: it clears any inherited
+    offline switch for its own process so the download can work.
+    """
+    from core.install.model_manifest import force_model_offline_env
+
+    if role == "model-cache" and "--allow-download" in argv:
+        for key in ("HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE"):
+            os.environ.pop(key, None)
+        return False
+    if getattr(sys, "frozen", False) and role in _MODEL_ROLES:
+        force_model_offline_env()
+        return True
+    return False
 
 
 def _run_dashboard_sidecar(argv: list[str]) -> None:
@@ -115,6 +152,7 @@ def _dispatch_backend_role() -> bool:
         return False
     role = argv[1] if len(argv) > 1 else ""
     rest = argv[2:]
+    _configure_model_network(role, rest)
     # 백엔드 역할: UTF-8 콘솔 강제. frozen exe 는 stdout 이 cp949(한국어 로케일)로 잡혀
     # kg_watcher/mcp_server 의 한글·이모지 로그 줄에서 UnicodeEncodeError 로 크래시한다.
     _prepare_frozen_streams()
@@ -128,6 +166,17 @@ def _dispatch_backend_role() -> bool:
     # stderr(=로그)로 트레이스백만 남기고 조용히 종료한다.
     try:
         if role == "mcp-server":
+            # 기동이 멈추면 어디서인지 남긴다(import 전에 무장). _prepare_frozen_streams 이후라 stderr 는 유효하다.
+            from core.observability import startup_trace
+
+            startup_trace.arm()
+            startup_trace.mark("entry")
+            # 로그 파일 쓰기가 asyncio 루프를 막지 않게, logging/uvicorn 이 핸들러를 만들기 전에 교체한다.
+            # stdio 전송은 stdout 이 프로토콜 채널이라 건드리지 않는다.
+            if _mcp_transport(rest) != "stdio":
+                from core.observability import nonblocking_stdio
+
+                nonblocking_stdio.install()
             import mcp_server
             mcp_server.main(rest)
             return True

@@ -63,8 +63,23 @@
   확인하고 정확한 PID만 종료한다. release packaging은 ISCC 전에 렌더 검사를 재실행한다.
 - `resource/embedding-model/manifest.json`은 모델 ID, offline snapshot revision,
   sentence-transformers 버전, exported file SHA-256을 기록한다. manifest가 유효한
-  cached/exported 모델은 네트워크 다운로드나 재export 없이 사용하고, frozen runtime도
-  파일 hash를 검증한 뒤 로드한다.
+  cached/exported 모델은 네트워크 다운로드나 재export 없이 사용하고, source runtime은
+  파일 hash를 검증한 뒤 로드한다(frozen 은 아래 번들 크기 검증).
+  - **frozen 번들은 모델 전체를 포함한다**(`engram-overlay.spec` 의 `_collect_embedding_model_payload`).
+    manifest 가 나열한 모든 파일과 크기 기록 `bundle-check.json` 을
+    `_internal/resource/embedding-model` 에 넣고, 빌드 때 전 파일 SHA-256 을 검증하며
+    하나라도 없거나 다르면 빌드가 실패한다. manifest 단독 번들은 허용하지 않는다(#15).
+    모델 payload 는 app TOC/payload digest 에서 제외된다(runtime-contract 가 493 MB 를 해시하지 않도록).
+  - frozen 런타임은 `check_bundled_model`(파일 존재 + 크기, `stat` 만)로 확인한 뒤
+    번들 디렉터리에서 직접 로드한다. 사용자 캐시로 복사하지 않고 **다운로드하지 않는다**.
+    모델 역할(mcp-server/kg-watcher/embedding-check/smoke-check)은 시작 시, 그 밖의
+    프로세스는 모델 로드 직전에 `HF_HUB_OFFLINE`/`TRANSFORMERS_OFFLINE`/
+    `HF_HUB_DISABLE_TELEMETRY` 를 강제한다(전역 아님: 덮어쓴 원래 값은 기록되어
+    `user_process_env()` 로 사용자 자식 프로세스에 복원된다. 예외:
+    `--role model-cache --allow-download` 는 상속된 offline 스위치를 지운다).
+    번들이 불완전하면 인코더는 비활성 + ERROR 로그 + `/health`·`engram_status` 의
+    `semantic.reason` 으로 노출된다. source 모드는 기존대로 저장소 payload → 검증된
+    사용자 캐시(`~/.engram/models/<manifest sha256>`)를 사용한다.
 
 - Python 런타임 환경 준비
   - Conda env(`intel_engram`) 우선

@@ -36,7 +36,7 @@ class CleanInstallReleaseTests(unittest.TestCase):
     def test_settings_identity_uses_four_part_resolver(self):
         with patch('overlay.settings_window.resolve_version') as resolve:
             resolve.return_value.version = '1.2.3.4'
-            self.assertEqual(settings_product_identity(), 'AMBER (ENGRAM) 1.2.3.4 · DRTECH')
+            self.assertEqual(settings_product_identity(), 'AMBER (ENGRAM) 1.2.3.4')
 
     def test_editor_reserves_footer_and_clamps_short_screen(self):
         self.assertEqual(editor_geometry(1920, 768), ('860x648', (720, 620)))

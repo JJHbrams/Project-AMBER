@@ -139,7 +139,10 @@ function Install-EngramAddons {
         $stagingDir = Join-Path ([IO.Path]::GetTempPath()) ("engram-addon-" + [Guid]::NewGuid().ToString("N"))
         New-Item -Path $stagingDir -ItemType Directory -Force | Out-Null
         try {
-            Expand-Archive -LiteralPath $zipPath -DestinationPath $stagingDir -Force
+            # Expand-Archive 대신 .NET 2-인자 오버로드: PS7 셸에서 띄운 설치기는 5.1 에
+            # PS7 모듈 경로를 물려줘 Archive 1.2.x(.NET Core 전용 3-인자 호출)가 로드된다.
+            Add-Type -AssemblyName System.IO.Compression.FileSystem
+            [IO.Compression.ZipFile]::ExtractToDirectory($zipPath, $stagingDir)
 
             $sourceFiles = @(Get-ChildItem -LiteralPath $stagingDir -Recurse -File |
                 Where-Object { $_.Name -ne '.addon-meta.json' })

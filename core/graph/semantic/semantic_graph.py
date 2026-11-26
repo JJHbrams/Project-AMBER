@@ -26,6 +26,7 @@ import os
 import re
 import sys
 import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, TypedDict
@@ -35,7 +36,9 @@ from core.context.project_scope import resolve_kg_node_id
 from core.install.model_manifest import (
     MANIFEST_NAME,
     bundled_manifest_path,
+    check_bundled_model,
     ensure_cached_model,
+    force_model_offline_env,
     model_stamp_from_manifest,
 )
 
@@ -303,6 +306,8 @@ class SemanticGraph:
     """
 
     _enabled: bool
+    _encoder_error: str = ""
+    _encoder_model_dir: str = ""
 
     def __init__(
         self,
@@ -331,6 +336,10 @@ class SemanticGraph:
             expected_model_id=self._embedding_model_name,
         )
         self._encoder: Any = None
+        # Why the encoder is unavailable (empty while loading/ready). Surfaced by
+        # semantic_status() so /health and engram_status make the failure visible.
+        self._encoder_error: str = ""
+        self._encoder_model_dir: str = ""
         self.db: Any = None
         self.async_conn: Any = None
 
@@ -483,6 +492,11 @@ class SemanticGraph:
 
     def _load_encoder_blocking(self) -> None:
         """실제 모델 로드 — 블로킹, asyncio.to_thread로만 호출할 것."""
+        if getattr(sys, "frozen", False):
+            # Bundled model: never reach the Hub. Set here (not process-wide at
+            # start-up) so user-facing children are unaffected; must precede the
+            # sentence_transformers/huggingface_hub import below.
+            force_model_offline_env()
         try:
             from sentence_transformers import SentenceTransformer
             import transformers as _tr
@@ -490,40 +504,80 @@ class SemanticGraph:
             prev = _tr.logging.get_verbosity()
             _tr.logging.set_verbosity_error()
             try:
-                # The frozen bundle carries only the canonical manifest. Payload
-                # is resolved into the immutable per-user cache from a verified
-                # legacy bundle or the exact pinned Hub revision. SentenceTransformer
-                # never receives an unpinned Hub model id.
+                # SentenceTransformer never receives an unpinned Hub model id.
+                #  - frozen: the installer bundles the complete, build-time
+                #    SHA-256-verified payload. Load it in place after a cheap
+                #    size check; never copy it into a cache and never download.
+                #  - source: resolve the repo payload into the immutable
+                #    per-user cache (or hydrate the exact pinned Hub revision).
                 if getattr(sys, "frozen", False):
-                    manifest_dir = (
-                        Path(getattr(sys, "_MEIPASS", ""))
-                        / "resource"
-                        / "embedding-model"
-                    )
+                    model_dir = self._frozen_bundled_model_dir()
                 else:
                     manifest_dir = (
                         Path(__file__).resolve().parents[3]
                         / "resource"
                         / "embedding-model"
                     )
-
-                model_dir = ensure_cached_model(
-                    manifest_dir / MANIFEST_NAME,
-                    allow_download=True,
-                    migration_sources=[manifest_dir],
-                    expected_model_id=self._embedding_model_name,
-                )
+                    model_dir = ensure_cached_model(
+                        manifest_dir / MANIFEST_NAME,
+                        allow_download=True,
+                        migration_sources=[manifest_dir],
+                        expected_model_id=self._embedding_model_name,
+                    )
                 self._encoder = SentenceTransformer(
                     str(model_dir),
                     local_files_only=True,
                     device="cpu",
                 )
-                logger.info("임베딩 모델 검증 캐시 로드: %s", model_dir)
+                self._encoder_error = ""
+                self._encoder_model_dir = str(model_dir)
+                logger.info("임베딩 모델 로드: %s", model_dir)
             finally:
                 _tr.logging.set_verbosity(prev)
         except Exception as exc:
-            logger.warning("임베딩 모델 로드 실패: %s", exc)
+            self._encoder_error = f"{type(exc).__name__}: {exc}"
+            logger.error(
+                "임베딩 모델 로드 실패 — 시맨틱 검색/임베딩이 비활성화됩니다: %s",
+                self._encoder_error,
+            )
             self._encoder = False  # 재시도 방지 sentinel
+
+    def _frozen_bundled_model_dir(self) -> Path:
+        """Bundled model directory of a frozen build, or raise with the reason."""
+        model_dir = (
+            Path(getattr(sys, "_MEIPASS", "")) / "resource" / "embedding-model"
+        )
+        valid, reason = check_bundled_model(model_dir, self._embedding_model_name)
+        if not valid:
+            raise RuntimeError(f"{reason} ({model_dir})")
+        return model_dir
+
+    def semantic_status(self) -> dict[str, Any]:
+        """Embedding availability for /health and engram_status (no content).
+
+        ``enabled`` is False only when embeddings cannot work; ``reason`` then says
+        why. The encoder loads lazily, so before first use a frozen build is
+        pre-checked with the same cheap size validation the loader applies.
+        """
+        status: dict[str, Any] = {
+            "enabled": True,
+            "state": "unloaded",
+            "reason": "",
+            "model": self._embedding_model_name,
+            "model_dir": self._encoder_model_dir,
+        }
+        if self._encoder is False:
+            status.update(enabled=False, state="failed", reason=self._encoder_error or "encoder load failed")
+        elif self._encoder is not None:
+            status["state"] = "ready"
+        elif os.environ.get("ENGRAM_RUNTIME_ROLE") == "overlay":
+            status.update(state="blocked", reason="overlay role does not load the encoder")
+        elif getattr(sys, "frozen", False):
+            model_dir = Path(getattr(sys, "_MEIPASS", "")) / "resource" / "embedding-model"
+            valid, reason = check_bundled_model(model_dir, self._embedding_model_name)
+            if not valid:
+                status.update(enabled=False, state="failed", reason=reason, model_dir=str(model_dir))
+        return status
 
     async def _get_encoder(self) -> Any:
         if os.environ.get("ENGRAM_RUNTIME_ROLE") == "overlay":
@@ -1725,10 +1779,32 @@ _sg_instance_lock = threading.Lock()  # 최초 생성 레이스 방지. 루프 �
                                        # 불릴 수 있어 asyncio.Lock이 아닌 실제 스레드 락 사용.
 
 
+def peek_semantic_graph() -> SemanticGraph | None:
+    """The singleton if it already exists; never constructs it (safe for /health)."""
+    return _sg_instance
+
+
+def semantic_status_snapshot() -> dict[str, Any]:
+    """Embedding availability without constructing the graph or loading the model."""
+    graph = _sg_instance
+    if graph is None:
+        status: dict[str, Any] = {"enabled": None, "state": "not_initialized", "reason": ""}
+        if getattr(sys, "frozen", False):
+            model_dir = Path(getattr(sys, "_MEIPASS", "")) / "resource" / "embedding-model"
+            valid, reason = check_bundled_model(model_dir)
+            if not valid:
+                status.update(enabled=False, state="failed", reason=reason, model_dir=str(model_dir))
+        return status
+    return graph.semantic_status()
+
+
 def get_semantic_graph() -> SemanticGraph:
     global _sg_instance
     if _sg_instance is None:
         with _sg_instance_lock:
             if _sg_instance is None:
+                _started = time.perf_counter()
                 _sg_instance = SemanticGraph()
+                logger.info("[engram-sg] first SemanticGraph construction took %d ms",
+                            int((time.perf_counter() - _started) * 1000))
     return _sg_instance

@@ -1,4 +1,4 @@
-#
+﻿#
 # 05_config.ps1 — Runtime config, User config, MCP config (모든 클라이언트)
 #   Copilot CLI / Claude Code / Antigravity / VSCode workspace / VSCode global / project .mcp.json
 #

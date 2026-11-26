@@ -103,23 +103,19 @@ class NativeTransportOwnerTests(unittest.TestCase):
 
     def test_queued_presence_and_all_metadata_route_without_alias_resurrection(self):
         self.emit(self.a, 'UserPromptSubmit')
-        with self.reporter._title_lock:
-            self.reporter.report_context(self.b)  # Queue before binding, send after binding.
-            self.assertTrue(self.emit(self.b, 'PreToolUse', tool_name='Read', tool_use_id='a')['accepted'])
+        # Paused sender: presence is queued before binding, delivered only after it.
+        self.reporter.pause_sender()
+        self.reporter.ack_wait = 0.02
+        self.reporter.report_context(self.b)
+        queued = self.emit(self.b, 'PreToolUse', tool_name='Read', tool_use_id='a')
+        self.assertEqual(queued, {'accepted': True, 'reason': 'queued'})
+        self.reporter.ack_wait = 5
+        self.reporter.resume_sender()
         self.assertTrue(self.reporter.report_title(self.b, 'Canonical safe title')['accepted'])
         self.assertTrue(self.reporter.report_project(self.b, project_name='Synthetic project')['accepted'])
         self.assertTrue(self.reporter.report_state(self.b, 'working')['accepted'])
-        sent = threading.Event()
-        original = self.reporter._send
-        def send(*args, **kwargs):
-            result = original(*args, **kwargs)
-            sent.set()
-            return result
-        with patch.object(self.reporter, '_send', side_effect=send):
-            self.reporter.report_context(self.b)
-            self.assertTrue(sent.wait(3))
-            with self.reporter._title_lock:
-                pass
+        self.reporter.report_context(self.b)
+        self.assertTrue(self.reporter.flush(5))
         self.assertEqual(len(self.rows()), 1)
         row = self.rows()[0]
         self.assertEqual(row['label'], 'Canonical safe title')
@@ -131,6 +127,7 @@ class NativeTransportOwnerTests(unittest.TestCase):
         self.emit(self.a, 'PermissionRequest', tool_name='Read')
         self.emit(self.b, 'PreToolUse', tool_name='Other', tool_use_id='other')
         self.reporter.submit(self.reporter.context_identity(self.a)[0], ended=True)
+        self.assertTrue(self.reporter.flush(5))
         self.assertEqual(len(self.rows()), 1)
         self.assertEqual(self.rows()[0]['state'], 'needs_input')
         self.assertTrue(self.emit(self.b, 'PostToolUse', tool_name='Read', tool_use_id='read')['accepted'])
@@ -171,6 +168,7 @@ class NativeTransportOwnerTests(unittest.TestCase):
         self.assertEqual(self.rows(), [])
         self.assertFalse(self.reporter.report_title(self.a, 'Cannot resurrect title')['accepted'])
         self.reporter.report_context(self.b)
+        self.assertTrue(self.reporter.flush(5))
         self.assertEqual(self.rows(), [])
 
     def test_legacy_owner_gc_detaches_without_forgetting_remaining_member(self):
@@ -181,9 +179,9 @@ class NativeTransportOwnerTests(unittest.TestCase):
         self.emit(legacy, 'PermissionRequest', tool_name='Read')
         self.emit(self.b, 'PreToolUse', tool_name='Other', tool_use_id='other')
         owner = self.reporter.context_identity(legacy)[0]
-        # Old synchronous finalizer would deadlock acquiring this non-reentrant
-        # queue lock. The new callback only enqueues; worker drains afterward.
-        with self.reporter._lock:
+        # The finalizer may run while any reporter lock is held. It only enqueues;
+        # the sender drains it afterward.
+        with self.reporter._state_lock:
             del legacy, session
             gc.collect()
         self.wait(lambda: owner not in self.reporter._transport_owners)
@@ -203,7 +201,9 @@ class NativeTransportOwnerTests(unittest.TestCase):
             return original(payload, **kwargs)
         with patch.object(self.reporter, '_send', side_effect=fail_alias):
             self.emit(self.b, 'PreToolUse', tool_name='Read', tool_use_id='read')
+            self.assertTrue(self.reporter.flush(5))
         self.assertIn(alias, self.reporter._pending_alias_retirements)
         self.reporter.report_context(self.b)
         self.wait(lambda: len(self.rows()) == 1)
+        self.assertTrue(self.reporter.flush(5))
         self.assertFalse(self.reporter._pending_alias_retirements)

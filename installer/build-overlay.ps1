@@ -116,8 +116,7 @@ function Invoke-OverlayPython {
 function Invoke-OverlayRole {
     param(
         [Parameter(Mandatory)][string]$Executable,
-        [Parameter(Mandatory)][string]$Role,
-        [string]$ModelCacheDir = ""
+        [Parameter(Mandatory)][string]$Role
     )
 
     $savedProfile = Enter-EngramBuildSmokeProfile
@@ -125,10 +124,12 @@ function Invoke-OverlayRole {
         ("engram-smoke-" + [Guid]::NewGuid().ToString("N") + ".log")
     $previousLog = $env:ENGRAM_SMOKE_LOG
     $previousModelCache = $env:ENGRAM_MODEL_CACHE_DIR
+    $previousHfOffline = $env:HF_HUB_OFFLINE
     $env:ENGRAM_SMOKE_LOG = $smokeLog
-    if ($ModelCacheDir) {
-        $env:ENGRAM_MODEL_CACHE_DIR = $ModelCacheDir
-    }
+    # Frozen roles load the bundled model in place and never download; prove it
+    # offline and hide any model-cache hint so a missing bundle cannot be masked.
+    $env:HF_HUB_OFFLINE = "1"
+    Remove-Item Env:\ENGRAM_MODEL_CACHE_DIR -ErrorAction SilentlyContinue
     try {
         $process = Start-Process -FilePath $Executable `
             -ArgumentList @("--role", $Role) `
@@ -145,6 +146,7 @@ function Invoke-OverlayRole {
     } finally {
         $env:ENGRAM_SMOKE_LOG = $previousLog
         $env:ENGRAM_MODEL_CACHE_DIR = $previousModelCache
+        $env:HF_HUB_OFFLINE = $previousHfOffline
         Exit-EngramBuildSmokeProfile $savedProfile
     }
 }
@@ -504,29 +506,10 @@ function Write-OverlayPlan($Plan, $Smoke) {
         $(if ($script:ForceFullSmoke) { "   (forced by -FullSmoke)" } else { "" }))
 }
 
-function Resolve-SmokeModelCache([string]$Python) {
-    # Persistent cache keyed by manifest SHA-256; repopulated only when invalid.
-    $cache = Join-Path $Root "build\smoke-model-cache"
-    New-Item -ItemType Directory -Path $cache -Force | Out-Null
-    $cliArgs = @(
-        "-m", "core.install.model_manifest",
-        "--model-dir", $ModelDir,
-        "--model-id", $ModelId,
-        "--ensure-cache",
-        "--cache-root", $cache,
-        "--legacy-model-dir", $ModelDir
-    )
-    $check = Invoke-OverlayPython $Python $cliArgs
-    if ($check.ExitCode -eq 0) { return $cache }
-    Write-OverlayWarn "Smoke model cache could not be validated; the frozen role will populate $cache"
-    return $cache
-}
-
 function Invoke-SmokeSelection {
     param(
         [Parameter(Mandatory)][string]$Artifact,
-        [Parameter(Mandatory)]$Smoke,
-        [Parameter(Mandatory)][string]$ModelCache
+        [Parameter(Mandatory)]$Smoke
     )
 
     $exe = Join-Path $Artifact "engram-overlay.exe"
@@ -554,7 +537,7 @@ function Invoke-SmokeSelection {
         if ($failed) { $results[$key] = "skipped:prior-failure"; continue }
         Start-OverlayPhase "smoke:$key"
         $exit = if ($role.Cli) {
-            Invoke-OverlayRole $exe $role.Cli $ModelCache
+            Invoke-OverlayRole $exe $role.Cli
         } else {
             Invoke-DashboardSmoke $Artifact
         }
@@ -645,7 +628,7 @@ try {
     if ($modelCheck.ExitCode -ne 0) {
         throw "Embedding model manifest validation failed: $(Get-LastOutput $modelCheck.Output)"
     }
-    Write-OverlayOk "Embedding model manifest validated (payload excluded from frozen bundle)"
+    Write-OverlayOk "Embedding model manifest validated (engram-overlay.spec bundles the full verified payload and fails the build if it is incomplete)"
 
     Write-OverlayStep "Resolving four-part build version"
     $versionResult = Invoke-OverlayPython $python @(
@@ -697,8 +680,7 @@ try {
         Stop-OverlayPhase
         if ($script:ForceFullSmoke) {
             # -FullSmoke on an unchanged artifact still has to prove every role.
-            $smokeModelCache = Resolve-SmokeModelCache $python
-            $reuseSmoke = Invoke-SmokeSelection $DefaultDist $planSmoke $smokeModelCache
+            $reuseSmoke = Invoke-SmokeSelection $DefaultDist $planSmoke
             $record = Invoke-ManifestCli $python $DefaultDist (Get-SmokeRecordArgs $reuseSmoke.Results)
             if ($record.ExitCode -ne 0) { throw "Could not record smoke results: $(Get-LastOutput $record.Output)" }
             if ($reuseSmoke.Failed) { throw "Full smoke failed on the reused artifact" }
@@ -716,7 +698,6 @@ try {
         $fastFailure = $null
         $fastStage = $null
         try {
-            $smokeModelCache = Resolve-SmokeModelCache $python
             Clear-StaleOverlayTrash -TargetDir $deployTarget
             $fastStage = Join-Path (Split-Path -Parent $deployTarget) `
                 (".engram-overlay-stage-" + [Guid]::NewGuid().ToString("N"))
@@ -768,7 +749,7 @@ try {
             if ($manifestWrite.ExitCode -ne 0) { throw "Build manifest generation failed: $(Get-LastOutput $manifestWrite.Output)" }
 
             Write-OverlayStep "Running selected smoke roles on stage"
-            $fastSmoke = Invoke-SmokeSelection $fastStage $planSmoke $smokeModelCache
+            $fastSmoke = Invoke-SmokeSelection $fastStage $planSmoke
             $fastResults = $fastSmoke.Results
             if ($plan.bridge_rebuild) {
                 Start-OverlayPhase "smoke:bridge"
@@ -869,8 +850,7 @@ try {
             $manifest = Invoke-ManifestCli $python $tempArtifact @("--mode", $Mode, "--write", "--kind", "full")
             if ($manifest.ExitCode -eq 0) {
                 Write-OverlayStep "Running frozen runtime contract and role smoke tests"
-                $smokeModelCache = Resolve-SmokeModelCache $python
-                $fullSmokeRun = Invoke-SmokeSelection $tempArtifact (Get-FullSmokeSelection) $smokeModelCache
+                $fullSmokeRun = Invoke-SmokeSelection $tempArtifact (Get-FullSmokeSelection)
                 $record = Invoke-ManifestCli $python $tempArtifact (Get-SmokeRecordArgs $fullSmokeRun.Results)
                 if ($record.ExitCode -ne 0) { throw "Could not record smoke results: $(Get-LastOutput $record.Output)" }
                 if (-not $fullSmokeRun.Failed) {

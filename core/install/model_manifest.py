@@ -25,8 +25,72 @@ MANIFEST_NAME = "manifest.json"
 MANIFEST_SCHEMA_VERSION = 2
 DEFAULT_MODEL_ID = "intfloat/multilingual-e5-small"
 MODEL_CACHE_ENV = "ENGRAM_MODEL_CACHE_DIR"
+# Sidecar written by the frozen build (never tracked): per-file sizes of the
+# bundled payload so the frozen runtime can reject a truncated or missing model
+# with stat() calls instead of re-hashing ~493 MB on every process start.
+BUNDLE_CHECK_NAME = "bundle-check.json"
+BUNDLE_CHECK_SCHEMA = 1
 _PROCESS_LOCKS: dict[str, threading.Lock] = {}
 _PROCESS_LOCKS_GUARD = threading.Lock()
+
+
+# Offline switches forced on processes that load the bundled model. They are set
+# only in processes that load it, and the original values are recorded so child
+# processes that belong to the user (claude/codex/ML work) can get them back.
+OFFLINE_ENV = {
+    "HF_HUB_OFFLINE": "1",
+    "TRANSFORMERS_OFFLINE": "1",
+    "HF_HUB_DISABLE_TELEMETRY": "1",
+}
+FORCED_ENV_MARKER = "ENGRAM_FORCED_MODEL_ENV"
+
+
+def force_model_offline_env(environ: Any = None) -> list[str]:
+    """Force the Hub offline for this process; remember what we overrode.
+
+    Returns the keys we changed. A key the user already set to the same value is
+    not ours and is never recorded (so it is never stripped later).
+    """
+    env = os.environ if environ is None else environ
+    try:
+        recorded = json.loads(env.get(FORCED_ENV_MARKER, "") or "{}")
+    except ValueError:
+        recorded = {}
+    if not isinstance(recorded, dict):
+        recorded = {}
+    changed: list[str] = []
+    for key, value in OFFLINE_ENV.items():
+        previous = env.get(key)
+        if previous == value:
+            continue
+        recorded.setdefault(key, previous)
+        env[key] = value
+        changed.append(key)
+    if recorded:
+        env[FORCED_ENV_MARKER] = json.dumps(recorded, sort_keys=True)
+    return changed
+
+
+def user_process_env(environ: Any = None) -> dict[str, str]:
+    """Copy of the environment for a user-facing child, minus what we forced.
+
+    Values we overrode are restored to the user's original (or removed); values
+    the user set themselves are left alone.
+    """
+    source = os.environ if environ is None else environ
+    env = dict(source)
+    try:
+        recorded = json.loads(env.pop(FORCED_ENV_MARKER, "") or "{}")
+    except ValueError:
+        recorded = {}
+    if isinstance(recorded, dict):
+        for key, original in recorded.items():
+            if key in OFFLINE_ENV and env.get(key) == OFFLINE_ENV[key]:
+                if original is None:
+                    env.pop(key, None)
+                else:
+                    env[key] = str(original)
+    return env
 
 
 def _normalise_model_id(value: str) -> str:
@@ -47,7 +111,7 @@ def _hash_file(path: Path) -> str:
 def _file_hashes(model_dir: Path) -> dict[str, str]:
     result: dict[str, str] = {}
     for path in sorted(model_dir.rglob("*")):
-        if not path.is_file() or path.name == MANIFEST_NAME:
+        if not path.is_file() or path.name in (MANIFEST_NAME, BUNDLE_CHECK_NAME):
             continue
         result[path.relative_to(model_dir).as_posix()] = _hash_file(path)
     return result
@@ -151,6 +215,79 @@ def validate_manifest_metadata(
     """Validate only the canonical manifest metadata, without requiring payload."""
     manifest, reason = _canonical_manifest(Path(manifest_path).parent, expected_model_id)
     return (manifest is not None), reason
+
+
+def build_bundle_check(model_dir: Path, expected_model_id: str | None = None) -> dict[str, Any]:
+    """Build-time gate: fully SHA-256 verify ``model_dir`` and record file sizes.
+
+    Raises ``RuntimeError`` when any manifest-listed file is missing, extra,
+    corrupt or of the wrong size, so the frozen build can never ship a
+    manifest-only (or partial) embedding model.
+    """
+    model_dir = Path(model_dir)
+    valid, reason = validate_manifest(model_dir, expected_model_id)
+    if not valid:
+        raise RuntimeError(f"embedding model payload cannot be bundled: {reason}")
+    manifest = read_manifest(model_dir)
+    return {
+        "schema_version": BUNDLE_CHECK_SCHEMA,
+        "model_id": _normalise_model_id(manifest["model_id"]),
+        "manifest_sha256": manifest_sha256(model_dir / MANIFEST_NAME),
+        "files": {
+            name: (model_dir / name).stat().st_size for name in sorted(manifest["files"])
+        },
+    }
+
+
+def write_bundle_check(model_dir: Path, output_path: Path, expected_model_id: str | None = None) -> dict[str, Any]:
+    data = build_bundle_check(model_dir, expected_model_id)
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(
+        json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    return data
+
+
+def check_bundled_model(model_dir: Path, expected_model_id: str | None = None) -> tuple[bool, str]:
+    """Cheap runtime completeness check of a bundled model directory.
+
+    Cost is a handful of ``stat`` calls plus hashing the ~1 KB manifest; no
+    payload bytes are read.  Content integrity (SHA-256) is enforced at build
+    time by :func:`build_bundle_check`.
+    """
+    model_dir = Path(model_dir)
+    manifest, reason = _canonical_manifest(model_dir, expected_model_id)
+    if manifest is None:
+        return False, f"bundled embedding model manifest invalid: {reason}"
+    check_path = model_dir / BUNDLE_CHECK_NAME
+    try:
+        check = json.loads(check_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        return False, f"bundled embedding model size record unreadable ({check_path}): {exc}"
+    if not isinstance(check, dict) or check.get("schema_version") != BUNDLE_CHECK_SCHEMA:
+        return False, "bundled embedding model size record has an unsupported schema"
+    if check.get("manifest_sha256") != manifest_sha256(model_dir / MANIFEST_NAME):
+        return False, "bundled embedding model size record does not match its manifest"
+    sizes = check.get("files")
+    if not isinstance(sizes, dict) or set(sizes) != set(manifest["files"]):
+        return False, "bundled embedding model file inventory does not match its manifest"
+    for name in manifest["files"]:
+        path = model_dir / name
+        try:
+            actual = path.stat().st_size
+        except OSError:
+            return False, f"bundled embedding model file missing: {name}"
+        if not path.is_file():
+            return False, f"bundled embedding model file missing: {name}"
+        if actual != sizes[name]:
+            return False, (
+                f"bundled embedding model file size mismatch: {name} "
+                f"(expected {sizes[name]}, found {actual})"
+            )
+    return True, "complete"
 
 
 def default_model_cache_root() -> Path:
@@ -489,6 +626,11 @@ def _main(argv: list[str] | None = None) -> int:
     parser.add_argument("--allow-download", action="store_true")
     parser.add_argument("--validate", action="store_true")
     parser.add_argument("--validate-metadata", action="store_true")
+    parser.add_argument(
+        "--check-bundle",
+        action="store_true",
+        help="Cheap runtime completeness check (sizes only) of the bundled model directory.",
+    )
     parser.add_argument("--refresh-manifest", action="store_true")
     parser.add_argument("--revision")
     parser.add_argument("--cache-root", type=Path)
@@ -500,6 +642,10 @@ def _main(argv: list[str] | None = None) -> int:
         model_dir = args.model_dir or bundled_manifest_path().parent
         manifest_path = model_dir / MANIFEST_NAME
         validation_dir = model_dir
+        if args.check_bundle:
+            valid, reason = check_bundled_model(model_dir, args.model_id)
+            print(json.dumps({"valid": valid, "reason": reason}))
+            return 0 if valid else 1
         if args.refresh_manifest:
             if not args.revision:
                 raise RuntimeError("--refresh-manifest requires --revision")

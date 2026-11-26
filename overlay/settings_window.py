@@ -86,7 +86,7 @@ def settings_product_identity() -> str:
         version = resolve_version().version
     except (OSError, ValueError):
         version = "version unavailable"
-    return f"AMBER (ENGRAM) {version} · DRTECH"
+    return f"AMBER (ENGRAM) {version}"
 _POLICY_LEVEL_OPTIONS = ["끔", "경고만", "Agent 강제 · 사람 경고 (권장)"]
 _POLICY_LEVEL_DISPLAY_TO_VALUE = {
     "끔": "off",

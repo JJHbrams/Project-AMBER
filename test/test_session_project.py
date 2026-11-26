@@ -130,7 +130,7 @@ print('isolated schema and cache PASS')
         self.assertTrue(reporter.report_project(a, 'Canonical', source=1)['accepted'])
         self.assertTrue(reporter.report_project(b, 'Alias explicit', source=3)['accepted'])
         binding = ('codex', 'opaque-native')
-        with reporter._title_lock:
+        with reporter._state_lock:
             reporter._bind_owner(owner, binding, owner)
             reporter._bind_owner(alias, binding, owner)
         record = reporter._native_titles[owner]

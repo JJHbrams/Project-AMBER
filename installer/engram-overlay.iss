@@ -17,7 +17,7 @@
 #ifndef ExternalOverlayVersion
   #define ExternalOverlayVersion "unpinned"
 #endif
-#define AppPublisher "DRTECH"
+#define AppPublisher "Project AMBER"
 #define AppExeName "engram-overlay.exe"
 #ifndef BuildCompression
   #define BuildCompression "zip"
@@ -81,6 +81,8 @@ Source: "component-status.ps1"; Flags: dontcopy
 Source: "external-components.ps1"; Flags: dontcopy
 ; install 전 실행 중인 동일 설치본을 종료하기 위한 공통 helper (PrepareToInstall에서 추출)
 Source: "stop-engram-processes.ps1"; Flags: dontcopy
+; 실행 중인 브리지 exe 를 옆으로 비켜 두는 helper (PrepareToInstall 이 Restart Manager 검사 전에 호출)
+Source: "sidestep-engram-bridge.ps1"; Flags: dontcopy
 ; frozen 번들 전체 (dist\engram-overlay\*)
 Source: "..\dist\engram-overlay\*"; DestDir: "{app}\dist\engram-overlay"; Flags: recursesubdirs createallsubdirs ignoreversion
 Source: "..\config\overlay.yaml"; DestDir: "{app}\dist\engram-overlay\config"; Flags: ignoreversion
@@ -102,10 +104,14 @@ Source: "external-bundle.ps1"; DestDir: "{app}\installer"; Flags: ignoreversion
 Source: "external-components.pin"; DestDir: "{app}\installer"; Flags: ignoreversion
 Source: "external-wheel.ps1"; DestDir: "{app}\installer"; Flags: ignoreversion
 Source: "stop-engram-processes.ps1"; DestDir: "{app}\installer"; Flags: ignoreversion
+Source: "sidestep-engram-bridge.ps1"; DestDir: "{app}\installer"; Flags: ignoreversion
 Source: "addons.ps1"; DestDir: "{app}\installer"; Flags: ignoreversion
 ; configure.ps1 이 검증된 외부 renderer 버전을 읽는다. 같이 배포되지 않으면 unpinned 로 떨어진다.
 Source: "external-overlay.pin"; DestDir: "{app}\installer"; Flags: ignoreversion
 Source: "external-overlay.ps1"; DestDir: "{app}\installer"; Flags: ignoreversion
+
+[UninstallDelete]
+Type: files; Name: "{app}\dist\engram-overlay\engram-mcp-bridge.exe.*.old"
 
 [UninstallRun]
 Filename: "powershell.exe"; \
@@ -125,6 +131,8 @@ var
   SelectAllExternalButton: TNewButton;
   SelectNoneExternalButton: TNewButton;
   ExternalInventoryLabel: TNewStaticText;
+  { ssPostInstall 의 RunConfigure 가 성공한 뒤에만 True. 그 외 종료는 모두 실패한 설치로 본다. }
+  InstallCompleted: Boolean;
 
 function ExistingExternalComponent(Id: String): Boolean;
 var I: Integer;
@@ -423,10 +431,113 @@ begin
   end;
 end;
 
+{ Install-in-progress marker. Must stay in sync with INSTALL_IN_PROGRESS_MARKER_NAME
+  in core/integrations/engram_bootstrap.py. Generated Windows hook wrappers exit 0
+  without launching the installed exe while a marker younger than 10 minutes exists,
+  so a hook cannot load a half-replaced _internal and hold file locks. }
+function InstallMarkerPath(): String;
+begin
+  Result := ExpandConstant('{%USERPROFILE}\.engram\install-in-progress');
+end;
+
+procedure CreateInstallMarker;
+begin
+  ForceDirectories(ExtractFileDir(InstallMarkerPath()));
+  if not SaveStringToFile(InstallMarkerPath(), 'installing', False) then
+    Log('Could not create install-in-progress marker: ' + InstallMarkerPath());
+end;
+
+procedure RemoveInstallMarker;
+begin
+  if FileExists(InstallMarkerPath()) then
+    if not DeleteFile(InstallMarkerPath()) then
+      Log('Could not delete install-in-progress marker: ' + InstallMarkerPath());
+end;
+
+function StoppedOverlayListPath(): String;
+begin
+  Result := ExpandConstant('{tmp}\engram-stopped-overlays.txt');
+end;
+
+function BridgeManifestPath(): String;
+begin
+  Result := ExpandConstant('{tmp}\engram-bridge-aside.txt');
+end;
+
+{ Action: Sidestep, Restore or Cleanup. Returns the helper exit code, -1 if it could not start. }
+function RunBridgeHelper(const Stage, Action: String): Integer;
+var
+  ResultCode: Integer;
+  Params: String;
+begin
+  Result := -1;
+  ExtractTemporaryFile('sidestep-engram-bridge.ps1');
+  Params := '-NoProfile -ExecutionPolicy Bypass -File "' +
+    ExpandConstant('{tmp}\sidestep-engram-bridge.ps1') + '" -Action ' + Action +
+    ' -ArtifactDir "' + ExpandConstant('{app}\dist\engram-overlay') + '"' +
+    ' -ManifestPath "' + BridgeManifestPath() + '"';
+  if not Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'), Params,
+    '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
+    Log(Stage + ': bridge helper (' + Action + ') could not be launched.')
+  else
+  begin
+    Log(Stage + ': bridge helper (' + Action + ') exit=' + IntToStr(ResultCode));
+    Result := ResultCode;
+  end;
+end;
+
+procedure RelaunchStoppedOverlays;
+var
+  Lines: TArrayOfString;
+  I, J, ErrorCode: Integer;
+  Seen: Boolean;
+begin
+  if not FileExists(StoppedOverlayListPath()) then Exit;
+  if not LoadStringsFromFile(StoppedOverlayListPath(), Lines) then Exit;
+  for I := 0 to GetArrayLength(Lines) - 1 do
+  begin
+    if (Lines[I] = '') or not FileExists(Lines[I]) then Continue;
+    Seen := False;
+    for J := 0 to I - 1 do
+      if CompareText(Lines[J], Lines[I]) = 0 then Seen := True;
+    if Seen then Continue;
+    if Exec(Lines[I], '', ExtractFileDir(Lines[I]), SW_SHOWNORMAL, ewNoWait, ErrorCode) then
+      Log('Install did not complete; relaunched overlay: ' + Lines[I])
+    else
+      Log('Install did not complete; could not relaunch overlay: ' + Lines[I]);
+  end;
+end;
+
+procedure StopEngramProcesses(const Stage: String);
+var
+  ResultCode: Integer;
+  Params: String;
+begin
+  ExtractTemporaryFile('stop-engram-processes.ps1');
+  Params := '-NoProfile -ExecutionPolicy Bypass -File "' +
+    ExpandConstant('{tmp}\stop-engram-processes.ps1') +
+    '" -ArtifactDir "' + ExpandConstant('{app}\dist\engram-overlay') + '"' +
+    ' -StoppedOverlayListPath "' + StoppedOverlayListPath() + '"';
+  if not Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'), Params,
+    '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
+    Log(Stage + ': process-stop helper could not be launched.')
+  else
+    Log(Stage + ': process-stop helper exit=' + IntToStr(ResultCode));
+end;
+
 procedure DeinitializeSetup();
 var
   ErrorCode: Integer;
 begin
+  { Covers abort and rollback as well as normal completion. }
+  RemoveInstallMarker;
+  if not InstallCompleted then
+  begin
+    { 취소, 롤백, 구성 실패: 비켜 둔 브리지와 종료한 오버레이를 원래대로 되돌린다. }
+    if FileExists(BridgeManifestPath()) then
+      RunBridgeHelper('DeinitializeSetup', 'Restore');
+    RelaunchStoppedOverlays;
+  end;
   if (MakeYourOwnCheckBox <> nil) and MakeYourOwnCheckBox.Checked then
     ShellExec('open', 'https://github.com/JJHbrams/engram-overlay#readme',
       '', '', SW_SHOWNORMAL, ewNoWait, ErrorCode);
@@ -455,8 +566,27 @@ end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
 begin
+  if CurStep = ssInstall then
+  begin
+    { Hook processes may have been spawned between PrepareToInstall and the file
+      copy. The marker is already in place, so new ones exit immediately. }
+    CreateInstallMarker;
+    StopEngramProcesses('ssInstall');
+    { PrepareToInstall 이후 열린 세션의 브리지도 같은 방식으로 비켜 둔다. }
+    if RunBridgeHelper('ssInstall', 'Sidestep') <> 0 then
+      RaiseException('실행 중인 MCP 브리지를 비켜 두지 못했습니다.');
+  end;
   if CurStep = ssPostInstall then
-    RunConfigure;
+  begin
+    try
+      RunConfigure;
+      InstallCompleted := True;
+    finally
+      RemoveInstallMarker;
+    end;
+    { 어느 세션도 잡고 있지 않은 이전 .old 브리지는 지운다. 잠긴 것은 조용히 남긴다. }
+    RunBridgeHelper('ssPostInstall', 'Cleanup');
+  end;
 end;
 
 function PrepareToInstall(var NeedsRestart: Boolean): String;
@@ -469,6 +599,8 @@ begin
     default here, after Inno has finished resolving its default selection. }
   if PreserveUserOwnedExternalDefault and WizardSilent then
     WizardSelectComponents('native');
+  { Marker first: hook wrappers fail open from here until setup ends. }
+  CreateInstallMarker;
   ExtractTemporaryFile('stop-engram-processes.ps1');
   HelperPath := ExpandConstant('{tmp}\stop-engram-processes.ps1');
   Params := '-NoProfile -ExecutionPolicy Bypass -File "' + HelperPath +
@@ -484,5 +616,17 @@ begin
   end;
   Log('PrepareToInstall: process-stop helper exit=' + IntToStr(ResultCode));
   if ResultCode <> 0 then
+  begin
     Result := '실행 중인 AMBER (ENGRAM) 프로세스를 종료하지 못했습니다. (exit=' + IntToStr(ResultCode) + ')';
+    Exit;
+  end;
+  { Setup 은 이 함수가 끝난 뒤 Restart Manager 로 사용 중 파일을 검사한다. 실행 중인 브리지는
+    클라이언트 세션 소유라 종료하지 않고 이름만 옆으로 바꿔서, 다른 잠긴 파일만 설치를 막게 한다. }
+  Log('PrepareToInstall: moving running bridge aside under ' +
+    ExpandConstant('{app}\dist\engram-overlay'));
+  ResultCode := RunBridgeHelper('PrepareToInstall', 'Sidestep');
+  if ResultCode <> 0 then
+  begin
+    Result := '실행 중인 MCP 브리지를 비켜 두지 못했습니다. (exit=' + IntToStr(ResultCode) + ')';
+  end;
 end;

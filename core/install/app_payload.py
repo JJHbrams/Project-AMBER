@@ -34,6 +34,11 @@ VERSION_SNAPSHOT_REL = "build/engram-version.json"
 APP_SEARCH_DIRS = ("", "scripts/kg")
 BRIDGE_ENTRY = "scripts/engram_mcp_bridge.py"
 _NON_APP_PARTS = {"site-packages", "__pycache__", ".venv", ".git", "node_modules"}
+# The embedding model payload (~493 MB, model.safetensors ~470 MB) is bundled by
+# the spec but is not app code: keeping it out of the TOC keeps it out of the app payload digest (which
+# the runtime contract recomputes) and out of fast-path data copies.
+_MODEL_PAYLOAD_PREFIX = "resource/embedding-model/"
+_MODEL_PAYLOAD_KEEP = "resource/embedding-model/manifest.json"
 _RUNTIME_DATA_PREFIXES = ("resource/character/",)
 _RUNTIME_DATA_EXCLUDED_SUFFIXES = {".ppt", ".pptx", ".doc", ".docx", ".xls", ".xlsx"}
 
@@ -161,6 +166,8 @@ def _data_entries(root: Path, items: Iterable[Any]) -> list[dict[str, str]]:
         if rel is None:
             continue
         if rel.startswith("build/") and rel != VERSION_SNAPSHOT_REL:
+            continue
+        if rel.startswith(_MODEL_PAYLOAD_PREFIX) and rel != _MODEL_PAYLOAD_KEEP:
             continue
         dest_rel = _posix(dest)
         if dest_rel.endswith((".pyc", ".pyo")):

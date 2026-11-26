@@ -1135,10 +1135,15 @@ class KnowledgeGraph:
 
 # 싱글턴
 _kg_instance: KnowledgeGraph | None = None
+# 동기 도구가 워커 스레드에서 병렬로 돌므로 lazy 초기화(DDL 포함)를 한 번만 실행한다.
+# import 시점 pre-warm 은 DB 에 쓰므로 하지 않는다.
+_kg_instance_lock = threading.Lock()
 
 
 def get_kg() -> KnowledgeGraph:
     global _kg_instance
     if _kg_instance is None:
-        _kg_instance = KnowledgeGraph()
+        with _kg_instance_lock:
+            if _kg_instance is None:
+                _kg_instance = KnowledgeGraph()
     return _kg_instance

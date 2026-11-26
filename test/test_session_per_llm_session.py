@@ -143,6 +143,42 @@ class MultipleCheckpointCandidateTests(unittest.TestCase):
         got = _get_auto_checkpoint_candidates("overlay", idle_seconds=1800, min_user_turns=5)
         self.assertEqual([c["session_id"] for c in got], [fresh, older])
 
+    def test_abandoned_sessions_are_not_evaluated_one_by_one(self):
+        """상한을 평가 뒤에 걸면 처리량만 줄고 훑는 비용은 그대로다 —
+        2026-11-20 실측 열린 세션 5,046개를 60초마다 세션당 연결 하나씩 열어
+        평가하느라 overlay 호스트가 코어 하나를 상시 점유했다."""
+        from core.graph.semantic import stm_promoter
+
+        fresh = self._session_with_messages("llm-fresh", idle_minutes=40)
+        for n in range(30):
+            self._session_with_messages(f"llm-old-{n}", idle_minutes=60 * 24 * (n + 2))
+        with self.conn:
+            self.conn.execute("INSERT INTO sessions (scope_key, native_session_id) VALUES ('overlay', 'llm-empty')")
+
+        real_evaluate = stm_promoter._evaluate_checkpoint_candidate
+        evaluated = []
+
+        def spy(session_id, **kwargs):
+            evaluated.append(session_id)
+            return real_evaluate(session_id, **kwargs)
+
+        real_connect = stm_promoter.get_connection
+        opened = []
+
+        def counting_connect(*args, **kwargs):
+            opened.append(1)
+            return real_connect(*args, **kwargs)
+
+        with mock.patch.object(stm_promoter, "_evaluate_checkpoint_candidate", side_effect=spy), \
+                mock.patch.object(stm_promoter, "get_connection", side_effect=counting_connect):
+            got = stm_promoter._get_auto_checkpoint_candidates(
+                "overlay", idle_seconds=1800, min_user_turns=5
+            )
+
+        self.assertEqual([c["session_id"] for c in got], [fresh])
+        self.assertEqual(evaluated, [fresh])
+        self.assertEqual(len(opened), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

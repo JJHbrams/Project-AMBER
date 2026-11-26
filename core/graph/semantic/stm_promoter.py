@@ -16,7 +16,7 @@ import os
 import threading
 import time
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
@@ -575,25 +575,44 @@ def _get_auto_checkpoint_candidates(
     (2026-09-18 기준 254개), 그런 세션은 "유휴 30분"을 언제나 만족한다. 상한이
     없으면 폴링마다 묵은 세션이 쏟아진다 — 실제로 1분 간격으로 9월 6일·7일·
     12일자 세션의 체크포인트가 연달아 적혔다.
+
+    상한은 평가 *전에* SQL 에서 건다. 평가 뒤에 거르면 처리량만 줄고 훑는
+    비용은 그대로다 — 2026-11-20 실측, 열린 세션 5,046개(최근 하루 활성 18개)를
+    60초마다 세션당 연결 하나씩 열어 평가하느라 overlay 호스트가 코어 하나와
+    초당 5~8MB 읽기를 상시 점유했다.
     """
+    now = datetime.now()
+    # messages.timestamp 는 datetime('now','localtime') 형식(YYYY-MM-DD HH:MM:SS)이라
+    # 같은 형식 문자열끼리 비교하면 시각 비교가 된다. 정밀 판정은 아래 평가가 다시 한다.
+    newest_allowed = (now - timedelta(seconds=idle_seconds)).strftime("%Y-%m-%d %H:%M:%S")
+    oldest_allowed = (now - timedelta(seconds=stale_seconds)).strftime("%Y-%m-%d %H:%M:%S")
     conn = get_connection()
     try:
         sessions = conn.execute(
-            """SELECT id FROM sessions
-               WHERE scope_key = ? AND ended_at IS NULL
+            """SELECT id FROM (
+                   SELECT s.id AS id, s.started_at AS started_at,
+                          (SELECT MAX(m.timestamp) FROM messages m
+                            WHERE m.session_id = s.id) AS last_ts
+                     FROM sessions s
+                    WHERE s.scope_key = ? AND s.ended_at IS NULL
+               )
+               WHERE last_ts IS NOT NULL AND last_ts >= ? AND last_ts <= ?
                ORDER BY started_at DESC""",
-            (scope_key,),
+            (scope_key, oldest_allowed, newest_allowed),
         ).fetchall()
+
+        found = []
+        for session in sessions:
+            candidate = _evaluate_checkpoint_candidate(
+                int(session["id"]),
+                idle_seconds=idle_seconds,
+                min_user_turns=min_user_turns,
+                conn=conn,
+            )
+            if candidate and candidate["idle_for"] <= stale_seconds:
+                found.append(candidate)
     finally:
         conn.close()
-
-    found = []
-    for session in sessions:
-        candidate = _evaluate_checkpoint_candidate(
-            int(session["id"]), idle_seconds=idle_seconds, min_user_turns=min_user_turns
-        )
-        if candidate and candidate["idle_for"] <= stale_seconds:
-            found.append(candidate)
     # 갓 잠잠해진 세션부터 처리한다. 오래된 쪽을 앞세우면 몇 주 묵은 세션이
     # 줄을 서서, 지금 막 끝난 대화가 계속 뒤로 밀린다.
     return sorted(found, key=lambda c: c["idle_for"])
@@ -604,8 +623,11 @@ def _evaluate_checkpoint_candidate(
     *,
     idle_seconds: int,
     min_user_turns: int,
+    conn=None,
 ) -> dict | None:
-    conn = get_connection()
+    own_conn = conn is None
+    if own_conn:
+        conn = get_connection()
     try:
         checkpoint = conn.execute(
             "SELECT last_message_id FROM session_checkpoints WHERE session_id=?", (session_id,)
@@ -619,7 +641,8 @@ def _evaluate_checkpoint_candidate(
             (session_id, last_message_id),
         ).fetchall()
     finally:
-        conn.close()
+        if own_conn:
+            conn.close()
     session = {"id": session_id}
     rows = list(reversed(rows))
     if not rows or rows[-1]["role"] != "assistant":
@@ -841,15 +864,50 @@ def _get_reflectable_messages(scope_key: str, limit: int = _WM_MAX_MESSAGES) -> 
 def _get_reflection_session_id() -> Optional[str]:
     try:
         data = json.loads(_REFLECTION_SESSION_FILE.read_text())
-        return data.get("persona_session_id")
     except Exception:
         return None
+    session_id = data.get("persona_session_id")
+    if not session_id:
+        return None
+    # Claude 는 resume 대상을 cwd 의 프로젝트 폴더에서만 찾고, 오래된 transcript 는
+    # 스스로 지운다(기본 30일). 파일이 없는 id 로 resume 하면 exit 1 로 매번 실패하고
+    # id 는 갱신되지 않는다 — 2026-07-13 에 저장된 id 가 11월까지 그렇게 묶여 있었다.
+    # 단발 호출 cwd 가 홈에서 전용 폴더로 옮겨졌으므로 옛 위치의 파일은 한 번 옮긴다.
+    if _ensure_reflection_transcript(session_id):
+        if data.get("cwd") != "oneshot":
+            _set_reflection_session_id(session_id)
+        return session_id
+    return None
+
+
+def _ensure_reflection_transcript(session_id: str) -> bool:
+    import shutil
+
+    from core.memory.transcript_capture import _claude_dir_name, engram_oneshot_cwd
+
+    projects = Path.home() / ".claude" / "projects"
+    src = projects / _claude_dir_name(Path.home()) / f"{session_id}.jsonl"
+    dst_dir = projects / _claude_dir_name(engram_oneshot_cwd())
+    dst = dst_dir / src.name
+    try:
+        if dst.is_file():
+            return True
+        if not src.is_file():
+            return False
+        dst_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dst)
+        return True
+    except OSError as e:
+        logger.warning("reflection 세션 transcript 이전 실패: %s", e)
+        return False
 
 
 def _set_reflection_session_id(session_id: str) -> None:
     try:
         _REFLECTION_SESSION_FILE.parent.mkdir(parents=True, exist_ok=True)
-        _REFLECTION_SESSION_FILE.write_text(json.dumps({"persona_session_id": session_id}))
+        _REFLECTION_SESSION_FILE.write_text(
+            json.dumps({"persona_session_id": session_id, "cwd": "oneshot"})
+        )
     except Exception as e:
         logger.warning("reflection session_id 저장 실패: %s", e)
 

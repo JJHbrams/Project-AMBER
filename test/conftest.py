@@ -130,3 +130,17 @@ def engram_db_dir(tmp_path) -> Path:
     from core.config.runtime_config import get_db_root_dir
 
     return Path(get_db_root_dir())
+
+
+@pytest.fixture(autouse=True)
+def presence_ack_wait_generous(monkeypatch):
+    """Presence 전달은 비동기다. 기본 확인 대기(0.12s)는 느린 CI 에서 'queued' 로 새어
+    동기 전달을 가정한 단언을 흔들므로, 기본값만 넉넉히 올린다. ack 초과 동작은
+    test_presence_outbox 가 생성자 인자(ack_wait=)로 직접 검증한다."""
+    try:
+        import core.integrations.mcp_presence as presence
+    except Exception:
+        yield
+        return
+    monkeypatch.setattr(presence, "DEFAULT_ACK_WAIT_SECS", 5.0)
+    yield

@@ -1,4 +1,4 @@
-#Requires -Version 5
+﻿#Requires -Version 5
 
 function Get-EngramSha256([string]$Path) {
     $stream = [IO.File]::OpenRead($Path)

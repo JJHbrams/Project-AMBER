@@ -110,6 +110,9 @@ mcp:
   # asyncio.to_thread 패치 이전에는 임베딩 로드(20-30초)가 이벤트 루프를 블로킹해
   # 헬스체크 타임아웃을 유발하므로, threshold를 넉넉히 설정한다.
   healthcheck_fail_threshold: 6
+  # 프로세스·리스너는 살아있는데 /health만 타임아웃(긴 도구가 이벤트 루프 점유)일 때
+  # 재기동 전 유예(초). 최소 interval*threshold 이상으로 보정된다.
+  healthcheck_stall_grace_secs: 180
   # Overlay 시작 직후 초기화 구간 유예(초).
   healthcheck_start_delay_secs: 20
   # 재기동 난사 방지 최소 간격(초).

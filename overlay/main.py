@@ -605,11 +605,18 @@ class OverlayApp:
     def _get_mcp_health_settings(self) -> dict[str, float | int]:
         cfg = load_cfg()
         mcp_cfg = cfg.get("mcp") or {}
+        interval_secs = max(1.0, self._coerce_float(mcp_cfg.get("healthcheck_interval_secs", 5.0), 5.0))
+        fail_threshold = max(1, self._coerce_int(mcp_cfg.get("healthcheck_fail_threshold", 3), 3))
+        stall_grace_secs = max(
+            interval_secs * fail_threshold,
+            self._coerce_float(mcp_cfg.get("healthcheck_stall_grace_secs", 180.0), 180.0),
+        )
         return {
             "port": self._coerce_int(mcp_cfg.get("http_port", MCP_HTTP_PORT), MCP_HTTP_PORT),
             "transport": str(mcp_cfg.get("transport", "streamable-http") or "streamable-http").strip().lower(),
-            "interval_secs": max(1.0, self._coerce_float(mcp_cfg.get("healthcheck_interval_secs", 5.0), 5.0)),
-            "fail_threshold": max(1, self._coerce_int(mcp_cfg.get("healthcheck_fail_threshold", 3), 3)),
+            "interval_secs": interval_secs,
+            "fail_threshold": fail_threshold,
+            "stall_grace_secs": stall_grace_secs,
             "start_delay_secs": max(0.0, self._coerce_float(mcp_cfg.get("healthcheck_start_delay_secs", 15.0), 15.0)),
             "restart_cooldown_secs": max(1.0, self._coerce_float(mcp_cfg.get("restart_cooldown_secs", 8.0), 8.0)),
             "ready_timeout_secs": max(3.0, self._coerce_float(mcp_cfg.get("ready_timeout_secs", 20.0), 20.0)),
@@ -630,21 +637,33 @@ class OverlayApp:
         except OSError:
             return False
 
-    def _is_mcp_http_healthy(self, port: int, timeout: float = 1.5) -> bool:
+    def _probe_mcp_http(self, port: int, timeout: float = 1.5) -> str:
+        """Probe /health. Returns "ok", "timeout" (no response), "mismatch" (answered with
+        wrong status/identity) or "error" (refused/reset/malformed)."""
         url = f"http://127.0.0.1:{port}/health"
         req = urllib.request.Request(url, method="GET")
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 if int(getattr(resp, "status", 0)) != 200:
-                    return False
+                    return "mismatch"
                 import json
                 info = json.loads(resp.read())
                 expected_runtime = 'frozen' if getattr(sys, 'frozen', False) else 'source'
-                return (info.get('runtime') == expected_runtime and info.get('parent_pid') == os.getpid()
-                        and (expected_runtime == 'frozen' or
-                             os.path.normcase(str(info.get('source_root', ''))) == os.path.normcase(str(PROJECT_ROOT.resolve()))))
-        except (urllib.error.URLError, TimeoutError, OSError, ValueError):
-            return False
+                matched = (info.get('runtime') == expected_runtime and info.get('parent_pid') == os.getpid()
+                           and (expected_runtime == 'frozen' or
+                                os.path.normcase(str(info.get('source_root', ''))) == os.path.normcase(str(PROJECT_ROOT.resolve()))))
+                return "ok" if matched else "mismatch"
+        except urllib.error.HTTPError:
+            return "mismatch"
+        except urllib.error.URLError as exc:
+            return "timeout" if isinstance(exc.reason, TimeoutError) else "error"
+        except TimeoutError:
+            return "timeout"
+        except (OSError, ValueError):
+            return "error"
+
+    def _is_mcp_http_healthy(self, port: int, timeout: float = 1.5) -> bool:
+        return self._probe_mcp_http(port, timeout=timeout) == "ok"
 
     def _terminate_managed_process(self, attr_name: str, log_prefix: str, display_name: str, timeout: float = 5.0) -> bool:
         proc = getattr(self, attr_name, None)
@@ -756,6 +775,9 @@ class OverlayApp:
             time.sleep(start_delay)
 
         failures = 0
+        unhealthy_started_at: float | None = None
+        stall_seen = False
+        stall_last_logged_at = 0.0
         while not self._quitting:
             interval = 1.0
             try:
@@ -763,36 +785,76 @@ class OverlayApp:
                 port = int(settings["port"])
                 threshold = int(settings["fail_threshold"])
                 interval = float(settings["interval_secs"])
+                stall_grace = float(settings.get("stall_grace_secs", max(interval * threshold, 180.0)))
 
-                proc_dead = bool(self._mcp_http_proc and self._mcp_http_proc.poll() is not None)
+                proc = self._mcp_http_proc
+                proc_dead = bool(proc and proc.poll() is not None)
+                proc_alive = proc is not None and not proc_dead
                 listener_ok = self._is_mcp_listener_ready(port)
-                http_ok = self._is_mcp_http_healthy(port)
+                http_state = self._probe_mcp_http(port)
+                http_ok = http_state == "ok"
                 healthy = listener_ok and http_ok and not proc_dead
+                # Busy, not dead: we own a live process, it accepts TCP, and /health
+                # gave no response at all. A completed answer with wrong identity/status
+                # (foreign/stale listener) or a refused/reset connection is not "busy".
+                stalled = proc_alive and listener_ok and http_state == "timeout"
+                now = time.monotonic()
 
                 if healthy:
+                    if stall_seen and unhealthy_started_at is not None:
+                        log.info("[mcp_http] recovered after %.0fs without restart", now - unhealthy_started_at)
                     failures = 0
+                    unhealthy_started_at = None
+                    stall_seen = False
                 else:
-                    failures += 1
-                    log.warning(
-                        "[mcp_http] health fail %d/%d (proc_dead=%s, listener_ok=%s, http_ok=%s, port=%d)",
-                        failures,
-                        threshold,
-                        proc_dead,
-                        listener_ok,
-                        http_ok,
-                        port,
-                    )
-                    if failures >= threshold:
-                        if proc_dead:
-                            reason = "proc_dead"
-                        elif not listener_ok:
-                            reason = "listener_unavailable"
-                        else:
-                            reason = "http_unhealthy"
-                        self._recover_mcp_listener(reason=reason)
-                        failures = 0
+                    if unhealthy_started_at is None:
+                        unhealthy_started_at = now
+                        stall_last_logged_at = 0.0
+                    unhealthy_elapsed = now - unhealthy_started_at
+                    grace_exceeded = unhealthy_elapsed >= stall_grace
+                    if stalled:
+                        # Do not count toward the dead-process threshold; restart only
+                        # once continuous unhealthy time reaches the grace.
+                        stall_seen = True
+                        if stall_last_logged_at == 0.0 or now - stall_last_logged_at >= 60.0:
+                            stall_last_logged_at = now
+                            log.warning(
+                                "[mcp_http] busy/stalled for %.0fs (listener_ok=True, http_ok=False) "
+                                "— restart after grace %.0fs",
+                                unhealthy_elapsed,
+                                stall_grace,
+                            )
+                        if grace_exceeded:
+                            self._recover_mcp_listener(reason="http_stalled")
+                            failures = 0
+                            unhealthy_started_at = None
+                            stall_seen = False
+                    else:
+                        failures += 1
+                        log.warning(
+                            "[mcp_http] health fail %d/%d (proc_dead=%s, listener_ok=%s, http_ok=%s, port=%d)",
+                            failures,
+                            threshold,
+                            proc_dead,
+                            listener_ok,
+                            http_ok,
+                            port,
+                        )
+                        if failures >= threshold or grace_exceeded:
+                            if proc_dead:
+                                reason = "proc_dead"
+                            elif not listener_ok:
+                                reason = "listener_unavailable"
+                            else:
+                                reason = "http_unhealthy"
+                            self._recover_mcp_listener(reason=reason)
+                            failures = 0
+                            unhealthy_started_at = None
+                            stall_seen = False
             except Exception:
                 failures = 0
+                unhealthy_started_at = None
+                stall_seen = False
                 try:
                     self._stm_server.publish_mcp_ready(False, replaced=True)
                 except Exception:
@@ -1244,6 +1306,14 @@ class OverlayApp:
         ):
             if not result.get("ok"):
                 log.error("[overlay] %s 동기화 실패: %s", name, result.get("error", "unknown error"))
+            elif result.get("trust_required"):
+                # Changing the hook command changes Codex's trust hash; until the
+                # user re-approves it Codex skips the hook (policy guidance off).
+                # Trust hashes are never written from here.
+                log.warning(
+                    "[overlay] %s hook definition changed: open Codex and run /hooks to "
+                    "re-approve the engram policy hook, otherwise Codex policy guidance "
+                    "stays off.", name)
 
     def _apply_tunnels(self, listener_ready: bool | None = None) -> None:
         """설정의 터널 목록을 복원하고, 허용된 경우 키 인증으로 자동 연결한다."""

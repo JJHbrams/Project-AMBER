@@ -16,7 +16,7 @@ import tempfile
 from pathlib import Path
 
 VERSION_STRINGS = {
-    "CompanyName": "DRTECH",
+    "CompanyName": "Project AMBER",
     "FileDescription": "Engram Overlay",
     "InternalName": "engram-overlay",
     "OriginalFilename": "engram-overlay.exe",

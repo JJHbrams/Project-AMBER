@@ -5,7 +5,9 @@
 #>
 param(
     [string]$ArtifactDir = "",
-    [ValidateRange(1, 60)][int]$TimeoutSeconds = 10
+    [ValidateRange(1, 60)][int]$TimeoutSeconds = 10,
+    # Optional: append stopped overlay paths so setup can relaunch them if it rolls back.
+    [string]$StoppedOverlayListPath = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -120,5 +122,12 @@ if ($MyInvocation.InvocationName -ne ".") {
     $result = Stop-EngramArtifactProcesses -ArtifactDir $ArtifactDir -TimeoutSeconds $TimeoutSeconds
     foreach ($path in $result.StoppedPaths) {
         Write-Host "Stopped: $path"
+    }
+    if ($StoppedOverlayListPath -and $result.OverlayPaths.Count -gt 0) {
+        $listDir = Split-Path -Parent $StoppedOverlayListPath
+        if ($listDir -and -not (Test-Path -LiteralPath $listDir)) {
+            $null = New-Item -ItemType Directory -Path $listDir -Force
+        }
+        [IO.File]::AppendAllText($StoppedOverlayListPath, (($result.OverlayPaths -join "`r`n") + "`r`n"), (New-Object Text.UTF8Encoding($false)))
     }
 }

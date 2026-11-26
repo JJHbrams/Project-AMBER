@@ -4,6 +4,74 @@ All notable changes to this project are documented in this file.
 
 ## Unreleased
 
+## [1.5.27] — 2026-11-26
+
+Includes the 1.5.26 fixes, which were not released here separately.
+
+### Fixed
+
+- **Session status reports froze the whole MCP server for 5 s or more.** The
+  status reporter queued every session's reports behind one lock and sent 2–7
+  HTTP requests to the overlay (plus a title-cache SQLite/DPAPI round trip)
+  while holding it. The event loop took the same lock, so one busy session
+  stalled every MCP request and `/health` (27 stalls in one day; report p99
+  8.2 s, worst 48.7 s, against a 2 s hook timeout). State is now computed under
+  a short memory-only lock and one sender thread delivers per-session coalesced
+  updates outside any lock, ordered by generation and sequence numbers. A
+  delivery slower than 0.12 s (`mcp.presence_ack_wait_secs`) answers
+  `accepted=true, reason=queued`; hook responses keep their shape.
+- **A log write could freeze the MCP event loop for 35–40 s.** The overlay
+  wires the server's stdout/stderr straight to `mcp-http.log`, so a stalled
+  disk write stopped every request. For HTTP transports, stdout/stderr now go
+  through a bounded queue drained by one writer thread; a stalled disk drops
+  and counts lines instead. The stdio transport is unchanged (stdout is the
+  protocol channel).
+- **MCP log records wrapped at 80 columns.** FastMCP's Rich handler is
+  replaced by a single-line formatter. A few lines written while the module
+  imports still use the old format.
+- **Upgrades rolled back while a Claude session was open, and left the overlay
+  off.** Each open session runs `engram-mcp-bridge.exe` from the install
+  folder; Restart Manager could not close it, so a silent upgrade aborted after
+  setup had already stopped the overlay. Setup now renames a running bridge
+  aside before the in-use check (the session keeps running from the renamed
+  file), restores it and restarts the overlay if setup does not complete, and
+  removes stale renamed copies after a successful install or uninstall.
+- **A long MCP tool froze the server and dropped every client.** Synchronous
+  tools ran on the event loop, `/health` failed repeatedly and the overlay
+  restarted the server (the cause of Codex `tool call failed` hook errors).
+  Synchronous tools now run on per-lane thread pools (serial 1, concurrent 8,
+  I/O 4), and the health monitor waits 180 s before restarting a busy server.
+- **Setup configuration failed under Windows PowerShell 5.1.** Non-ASCII
+  PowerShell files are saved with a UTF-8 BOM, and PowerShell 7 module paths
+  are removed when the 5.1 configurator runs.
+- **Installed builds shipped without the embedding model (#15).** The model is
+  bundled again and loaded in place; frozen processes never download it, and
+  `/health` reports the semantic state and the reason when it is off.
+- **Agent hooks could lock half-replaced files during an upgrade (#14).** Hook
+  wrappers skip while setup's install marker exists and are killed after 20 s.
+  Codex asks to re-approve the hook once in `/hooks`.
+- **The overlay host kept one CPU core and the disk busy** scanning every open
+  session for auto-checkpoints, and **internal one-shot LLM calls were
+  captured back as user conversations**. Both fixed (from 1.5.26).
+
+### Changed
+
+- Loop stalls log every thread's stack (identical stacks folded, idle threads
+  last). A ratchet test fails when an async function gains a new direct
+  blocking call.
+- The DRTECH label is removed: the settings window shows
+  `AMBER (ENGRAM) <version>`; the exe company and installer publisher read
+  `Project AMBER`. Upgrade matching (AppId) is unchanged.
+
+### Known issues
+
+- The first semantic search after a restart opens the 3.3 GB semantic graph on
+  the event loop and can stall the server for seconds to minutes (4–181 s
+  observed). Moving semantic work to its own process is the next step.
+- After the overlay restarts, the session status bar fills in as each session
+  becomes active again, and existing sessions show no project name until they
+  report it again.
+
 ## [1.5.25] — 2026-11-16
 
 ### Added

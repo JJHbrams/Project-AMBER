@@ -1,4 +1,4 @@
-# external-overlay.ps1 — 외부 renderer 런타임 설치·복구·제거 (공용)
+﻿# external-overlay.ps1 — 외부 renderer 런타임 설치·복구·제거 (공용)
 #
 # 설치본은 configure.ps1 이, 소스 설치는 installer/install.ps1 이 이 파일을
 # dot-source 해서 같은 함수를 쓴다. 진입점이 둘이라 로직을 한쪽에 두면 갈린다.

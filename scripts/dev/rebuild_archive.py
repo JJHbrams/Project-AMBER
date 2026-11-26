@@ -37,8 +37,11 @@ def iter_transcripts(claude_home: Path):
     root = claude_home / "projects"
     if not root.is_dir():
         return
+    from core.memory.transcript_capture import is_engram_internal_project_dir
+
     for project_dir in sorted(root.iterdir()):
-        if not project_dir.is_dir():
+        # 실시간 캡처와 같은 범위를 봐야 한다 — engram 내부 단발 호출은 대화가 아니다.
+        if not project_dir.is_dir() or is_engram_internal_project_dir(project_dir):
             continue
         for f in sorted(project_dir.glob("*.jsonl"), key=lambda p: p.stat().st_mtime):
             yield project_dir.name, f
